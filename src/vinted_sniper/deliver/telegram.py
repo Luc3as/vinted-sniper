@@ -167,13 +167,7 @@ class TelegramSender:
         if item.listed_at:
             lines.append(f"Listed {item.listed_at.strftime('%H:%M UTC')}")
 
-        keyboard: list[list[dict[str, str]]] = [
-            [
-                {"text": "Open listing", "url": item.url},
-                {"text": "Message seller", "url": item.message_url},
-                {"text": "Buy", "url": item.buy_url},
-            ]
-        ]
+        keyboard: list[list[dict[str, str]]] = [_link_row(item)]
         # A second row of actions the bot handles itself: the two things people most
         # often want to do from the alert without opening the dashboard.
         actions = inline_actions(query_id, item.seller_login)
@@ -282,6 +276,16 @@ class TelegramSender:
 _CALLBACK_LIMIT = 64
 CALLBACK_BLOCK_SELLER = "bs"
 CALLBACK_PAUSE_SEARCH = "ps"
+
+
+def _link_row(item: Item) -> list[dict[str, str]]:
+    """Only links that resolve. Vinted's old deep links to the message screen and to
+    checkout answer "page not found" since the site was rebuilt; both actions now live on
+    the listing page itself, so one button covers them."""
+    row = [{"text": "Open listing", "url": item.url}]
+    if item.seller_url:
+        row.append({"text": "Seller profile", "url": item.seller_url})
+    return row
 
 
 def inline_actions(query_id: int | None, seller_login: str | None) -> list[dict[str, str]]:

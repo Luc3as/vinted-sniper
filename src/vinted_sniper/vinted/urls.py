@@ -181,17 +181,22 @@ def member_url(tld: str, user_id: int) -> str:
 
 
 def message_seller_url(tld: str, item_id: int) -> str:
-    """Deep link to the 'ask the seller' screen for a listing."""
-    return f"https://www.vinted.{tld}/items/{item_id}/want_it/new"
+    """Where to go to ask the seller about a listing.
+
+    Vinted's web app used to expose `/items/{id}/want_it/new` for this; every notifier on
+    GitHub still links to it, and it has answered "page not found" since the front end was
+    rebuilt. The message screen is now reached from the listing page, which is where this
+    sends you — the "Ask seller" button sits right under the price.
+    """
+    return item_url(tld, item_id)
 
 
 def buy_url(tld: str, item_id: int) -> str:
-    """Deep link that opens checkout for a listing.
+    """Where to go to buy a listing.
 
-    This only opens the page in the user's own browser, where they log in and decide.
-    Nothing here buys anything on their behalf.
+    `/transaction/buy/new?transaction[item_id]=…` is gone too: checkout now needs a
+    transaction the site creates when you press "Buy now", so there is no address that
+    opens it directly. The listing page is the closest working thing. Nothing here buys
+    anything on anyone's behalf.
     """
-    return (
-        f"https://www.vinted.{tld}/transaction/buy/new"
-        f"?source_screen=item&transaction%5Bitem_id%5D={item_id}"
-    )
+    return item_url(tld, item_id)

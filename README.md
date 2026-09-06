@@ -69,7 +69,7 @@ Raspberry Pi, NAS or cheap VPS: see [the self-hosting guide](docs/self-hosting.m
   <img src="docs/media/discord.png" width="820" alt="A Discord notification: the search it matched, the title linking to the listing, links to the item, dashboard and seller, then price with buyer protection included, size, condition, brand, location, seller rating and photo">
   <br><sub><b>Discord</b> — one rich card per listing, stacked into embeds when several land at once</sub>
   <br><br>
-  <img src="docs/media/telegram.png" width="820" alt="The same kind of notification in Telegram: photo preview, price with buyer protection included, brand, size, condition, seller, and the same three buttons">
+  <img src="docs/media/telegram.png" width="820" alt="The same kind of notification in Telegram: photo preview, price with buyer protection included, brand, size, condition, seller, and buttons to open the listing and the seller's profile">
   <br><sub><b>Telegram</b> — photo as a preview, so the message keeps its buttons</sub>
 </div>
 

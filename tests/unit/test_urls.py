@@ -89,7 +89,10 @@ def test_missing_scheme_is_tolerated() -> None:
     assert urls.normalise_search_url("www.vinted.fr/catalog?search_text=x").startswith("https://")
 
 
-def test_deep_links_stay_on_the_search_country_site() -> None:
+def test_deep_links_stay_on_the_search_country_site_and_resolve() -> None:
     assert urls.item_url("de", 42) == "https://www.vinted.de/items/42"
-    assert urls.message_seller_url("de", 42).endswith("/items/42/want_it/new")
-    assert "transaction%5Bitem_id%5D=42" in urls.buy_url("de", 42)
+    # The old want_it/new and transaction/buy/new routes are gone from Vinted's front end;
+    # anything we link must be a page that actually loads.
+    assert urls.message_seller_url("de", 42) == "https://www.vinted.de/items/42"
+    assert urls.buy_url("de", 42) == "https://www.vinted.de/items/42"
+    assert urls.member_url("de", 7) == "https://www.vinted.de/member/7"

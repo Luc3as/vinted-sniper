@@ -254,7 +254,11 @@ async def test_telegram_sends_one_message_per_listing_with_a_photo_preview() -> 
     payload = recorder.payload(0)
     assert payload["parse_mode"] == "HTML"
     assert payload["link_preview_options"]["prefer_large_media"] is True
-    assert payload["reply_markup"]["inline_keyboard"][0][0]["url"].endswith("/items/1")
+    first_row = payload["reply_markup"]["inline_keyboard"][0]
+    assert first_row[0]["url"].endswith("/items/1")
+    assert [b["text"] for b in first_row] == ["Open listing", "Seller profile"]
+    assert first_row[1]["url"].endswith("/member/12345678")
+    assert all("want_it" not in b["url"] and "transaction" not in b["url"] for b in first_row)
 
 
 async def test_telegram_alerts_carry_skip_seller_and_pause_buttons() -> None:

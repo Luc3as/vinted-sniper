@@ -111,5 +111,11 @@ def _item_json(notification: PendingNotification, callback_base: str | None) -> 
         "seller": item.seller_login,
         "seller_rating": item.seller_rating,
         "seller_reviews": item.seller_feedback_count,
-        "links": {"message_seller": item.message_url, "buy": item.buy_url},
+        # Kept for consumers written against version 1. Both used to be Vinted deep links
+        # that no longer resolve; they now point at the listing page, where the buttons are.
+        "links": {
+            "message_seller": item.message_url,
+            "buy": item.buy_url,
+            "seller": item.seller_url,
+        },
     }

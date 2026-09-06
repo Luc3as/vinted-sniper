@@ -5,6 +5,11 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 ## Unreleased
 
 ### Fixed
+- The "Message seller" and "Buy" buttons under Telegram alerts linked to Vinted deep links
+  (`/items/{id}/want_it/new`, `/transaction/buy/new`) that have answered "page not found" since
+  the site's front end was rebuilt. They are replaced by "Seller profile"; asking and buying
+  happen from the listing page. The webhook's `links` keep their keys (now resolving) and
+  gain `seller`.
 - A refusal during the session handshake (the anti-bot challenge page) crashed the search's
   task; the supervisor restarted it every fifteen seconds and every search on the site
   loaded the homepage four times a minute until the address was blocked outright. A refusal
