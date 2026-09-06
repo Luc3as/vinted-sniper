@@ -111,7 +111,9 @@ Options for `watch`:
 | `--min-seller-reviews N` | Skip sellers with fewer than N reviews. |
 | `--block-seller a,b` | Skip these seller usernames outright. |
 
-The same fields are under "More filters" when adding a search in the dashboard.
+The same fields are under "More filters" when adding a search in the dashboard, and every
+search has an **Edit** button there for changing them afterwards — the change takes effect
+on the next check, no restart needed. Only the URL is fixed: it is what the search *is*.
 | `--to 1,2` | Destination ids to notify. Defaults to all active ones. |
 
 ## Adding a search

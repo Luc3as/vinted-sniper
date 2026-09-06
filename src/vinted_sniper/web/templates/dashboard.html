@@ -27,47 +27,127 @@
     </div>
   {% else %}
   <div class="card">
-    <table>
+    <table id="searches">
       <tr>
         <th>Search</th><th>Site</th><th>State</th>
-        <th>Last checked</th><th>Newest listing</th><th>Found</th><th></th>
+        <th>Last checked</th><th>Next check</th><th>Newest listing</th><th>Found</th><th></th>
       </tr>
       {% for search in snapshot.searches %}
-      <tr>
+      {% set q = queries[search.query_id] %}
+      <tr data-query-id="{{ search.query_id }}">
         <td>
-          {{ search.name }}
-          {% if search.last_error %}
-            <div class="muted">{{ search.last_error[:110] }}</div>
-          {% endif %}
+          <span data-field="name">{{ search.name }}</span>
+          <div class="muted">
+            every {{ q.poll_interval_s }}s
+            {% if q.max_total_price %}· ≤ {{ q.max_total_price }}{% endif %}
+            {% if q.required_keywords %}· needs {{ q.required_keywords | join(', ') }}{% endif %}
+            {% if q.banned_keywords %}· not {{ q.banned_keywords | join(', ') }}{% endif %}
+            {% if q.title_pattern %}· /{{ q.title_pattern }}/{% endif %}
+            {% if q.min_seller_rating %}· seller ≥ {{ (q.min_seller_rating * 100) | round | int }}%{% endif %}
+            {% if q.min_seller_reviews %}· ≥ {{ q.min_seller_reviews }} reviews{% endif %}
+            {% if q.blocked_sellers %}· skips {{ q.blocked_sellers | length }} seller{{ 's' if q.blocked_sellers | length != 1 }}{% endif %}
+          </div>
+          <div class="muted error-line" data-field="error" {% if not search.last_error %}hidden{% endif %}>
+            {{ (search.last_error or '')[:110] }}
+          </div>
         </td>
         <td class="muted">vinted.{{ search.tld }}</td>
-        <td><span class="pill {{ search.state }}">{{ search.state }}</span></td>
-        <td class="muted">
+        <td><span class="pill {{ search.state }}" data-field="state">{{ search.state }}</span></td>
+        <td class="muted" data-field="last" data-ts="{{ search.last_success_at or '' }}">
           {% if search.last_success_at %}{{ now - search.last_success_at }}s ago
           {% else %}never{% endif %}
         </td>
-        <td class="muted">
+        <td class="muted" data-field="next" data-ts="{{ search.next_check_at or '' }}">
+          {% if search.next_check_at %}
+            {% if search.next_check_at > now %}in {{ search.next_check_at - now }}s{% else %}due{% endif %}
+          {% else %}—{% endif %}
+        </td>
+        <td class="muted" data-field="newest" data-ts="{{ search.newest_listing_at or '' }}">
           {% if search.newest_listing_at %}{{ now - search.newest_listing_at }}s ago
           {% else %}—{% endif %}
         </td>
-        <td class="muted">{{ search.items_total }}</td>
-        <td>
+        <td class="muted" data-field="found">{{ search.items_total }}</td>
+        <td class="actions">
+          <button class="quiet" type="button" data-edit="{{ search.query_id }}"
+                  aria-expanded="false">Edit</button>
           <form method="post" action="/searches/{{ search.query_id }}/pause" class="inline">
             <input type="hidden" name="paused" value="{{ '0' if search.paused else '1' }}">
             <button class="quiet" type="submit">{{ 'Resume' if search.paused else 'Pause' }}</button>
           </form>
-          <form method="post" action="/searches/{{ search.query_id }}/delete" class="inline">
+          <form method="post" action="/searches/{{ search.query_id }}/delete" class="inline"
+                onsubmit="return confirm('Delete “{{ search.name }}”? Its recorded listings go too.')">
             <button class="quiet" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      <tr class="edit-row" id="edit-{{ search.query_id }}" hidden>
+        <td colspan="8">
+          <form method="post" action="/searches/{{ search.query_id }}/edit">
+            <div class="grid">
+              <div>
+                <label>Name</label>
+                <input type="text" name="name" value="{{ q.name }}">
+              </div>
+              <div>
+                <label>Check every (seconds)</label>
+                <input type="text" name="interval" value="{{ q.poll_interval_s }}" inputmode="numeric">
+              </div>
+              <div>
+                <label>Max total price</label>
+                <input type="text" name="max_total_price" value="{{ q.max_total_price or '' }}"
+                       placeholder="incl. buyer protection">
+              </div>
+              <div>
+                <label>Exclude words</label>
+                <input type="text" name="banned_keywords" value="{{ q.banned_keywords | join(', ') }}">
+              </div>
+              <div>
+                <label>Title must contain (all)</label>
+                <input type="text" name="required_keywords" value="{{ q.required_keywords | join(', ') }}">
+              </div>
+              <div>
+                <label>Title matches regex</label>
+                <input type="text" name="title_pattern" value="{{ q.title_pattern or '' }}">
+              </div>
+              <div>
+                <label>Min. seller rating (%)</label>
+                <input type="text" name="min_seller_rating" inputmode="numeric"
+                       value="{{ (q.min_seller_rating * 100) | round | int if q.min_seller_rating else '' }}">
+              </div>
+              <div>
+                <label>Min. seller reviews</label>
+                <input type="text" name="min_seller_reviews" inputmode="numeric"
+                       value="{{ q.min_seller_reviews or '' }}">
+              </div>
+              <div>
+                <label>Skip sellers</label>
+                <input type="text" name="blocked_sellers" value="{{ q.blocked_sellers | join(', ') }}">
+              </div>
+            </div>
+            <div class="row" style="margin-top:.6rem">
+              <button type="submit">Save</button>
+              <button type="button" class="quiet" data-edit="{{ search.query_id }}">Cancel</button>
+              <span class="muted">The URL itself cannot change — that would be a different search.</span>
+            </div>
           </form>
         </td>
       </tr>
       {% endfor %}
     </table>
-    <p class="muted" style="margin-bottom:0">
-      “stale” means this search has stopped seeing new listings while others on the same
-      site keep finding them — usually a session that needs replacing, which happens
-      automatically.
-    </p>
+    <div class="row" style="justify-content:space-between;margin-top:.6rem">
+      <p class="muted" style="margin:0">
+        “stale” means this search has stopped seeing new listings while others on the same
+        site keep finding them — usually a session that needs replacing, which happens
+        automatically. This table refreshes itself.
+      </p>
+      <form method="post" action="/searches/interval" class="row inline" style="margin:0">
+        <label style="margin:0">Check all every</label>
+        <input type="text" name="interval" value="{{ default_interval }}" inputmode="numeric"
+               size="5" style="width:auto">
+        <span class="muted">s</span>
+        <button class="quiet" type="submit">Apply to all</button>
+      </form>
+    </div>
   </div>
   {% endif %}
 
@@ -329,6 +409,7 @@
         <div class="price">
           <strong>{{ row.price or '—' }}</strong>
           {% if row.total_price %}<span class="muted">{{ row.total_price }} total</span>{% endif %}
+          {% if row.price_dropped %}<span class="tag drop">📉 dropped</span>{% endif %}
         </div>
         {% if row.brand or row.size or row.condition %}
         <div class="tags">
@@ -722,4 +803,81 @@
 })();
 </script>
 {% endif %}
+
+<script>
+(() => {
+  "use strict";
+  // Edit rows.
+  for (const button of document.querySelectorAll("[data-edit]")) {
+    button.addEventListener("click", () => {
+      const row = document.getElementById(`edit-${button.dataset.edit}`);
+      if (!row) return;
+      row.hidden = !row.hidden;
+      for (const b of document.querySelectorAll(`[data-edit="${button.dataset.edit}"]`)) {
+        b.setAttribute("aria-expanded", String(!row.hidden));
+      }
+      if (!row.hidden) row.querySelector("input")?.focus();
+    });
+  }
+
+  // Live status: the table redraws itself from /api/health, and the relative times tick.
+  const table = document.getElementById("searches");
+  if (!table) return;
+  const header = document.querySelector("header .status");
+
+  function ago(ts, now) {
+    if (!ts) return null;
+    const s = Math.max(0, now - ts);
+    if (s < 90) return `${s}s ago`;
+    if (s < 5400) return `${Math.round(s / 60)}m ago`;
+    if (s < 172800) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+  }
+
+  function tick() {
+    const now = Math.floor(Date.now() / 1000);
+    for (const cell of table.querySelectorAll("[data-ts]")) {
+      const ts = Number(cell.dataset.ts);
+      if (!ts) continue;
+      if (cell.dataset.field === "next") {
+        cell.textContent = ts > now ? `in ${ts - now}s` : "due";
+      } else {
+        cell.textContent = ago(ts, now);
+      }
+    }
+  }
+
+  async function refresh() {
+    let data;
+    try {
+      const res = await fetch("/api/health", { headers: { Accept: "application/json" } });
+      if (!res.ok) return;
+      data = await res.json();
+    } catch { return; }
+    if (header) {
+      header.textContent = `${data.alive ? "running" : "not responding"} · ${data.queued_notifications} queued`;
+    }
+    for (const search of data.searches) {
+      const row = table.querySelector(`tr[data-query-id="${search.query_id}"]`);
+      if (!row) continue;  // added since the page loaded; a reload will show it
+      const state = row.querySelector('[data-field="state"]');
+      if (state && state.textContent !== search.state) {
+        state.textContent = search.state;
+        state.className = `pill ${search.state}`;
+      }
+      row.querySelector('[data-field="found"]').textContent = search.items_total;
+      row.querySelector('[data-field="last"]').dataset.ts = search.last_success_at || "";
+      row.querySelector('[data-field="next"]').dataset.ts = search.next_check_at || "";
+      row.querySelector('[data-field="newest"]').dataset.ts = search.newest_listing_at || "";
+      const err = row.querySelector('[data-field="error"]');
+      err.hidden = !search.last_error;
+      err.textContent = (search.last_error || "").slice(0, 110);
+    }
+    tick();
+  }
+
+  setInterval(tick, 1000);
+  setInterval(refresh, 10000);
+})();
+</script>
 {% endblock %}

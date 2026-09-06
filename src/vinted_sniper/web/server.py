@@ -123,12 +123,14 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
 
         snapshot = await health.snapshot(repo)
         destinations = await repo.list_destinations()
+        queries = {query.id: query for query in await repo.list_queries()}
         watched_tlds = [search.tld for search in snapshot.searches]
         return TEMPLATES.TemplateResponse(
             request,
             "dashboard.html",
             {
                 "snapshot": snapshot,
+                "queries": queries,
                 "destinations": destinations,
                 "auth_enabled": token is not None,
                 "recent": _listing_views(await repo.recent_items(limit=25), now=int(time.time())),
@@ -199,6 +201,49 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         )
         for destination_id in destination_ids or []:
             await repo.route(query_id, destination_id)
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/searches/{query_id}/edit")
+    async def edit_search(
+        query_id: int,
+        name: Annotated[str, Form()] = "",
+        interval: Annotated[int, Form()] = 0,
+        max_total_price: Annotated[str, Form()] = "",
+        banned_keywords: Annotated[str, Form()] = "",
+        required_keywords: Annotated[str, Form()] = "",
+        title_pattern: Annotated[str, Form()] = "",
+        min_seller_rating: Annotated[str, Form()] = "",
+        min_seller_reviews: Annotated[str, Form()] = "",
+        blocked_sellers: Annotated[str, Form()] = "",
+        _: None = guard,
+    ) -> Response:
+        query = await repo.get_query(query_id)
+        if query is None:
+            return _redirect_with_error("that search no longer exists")
+        title_pattern = title_pattern.strip()
+        if title_pattern and (problem := filters.validate_pattern(title_pattern)):
+            return _redirect_with_error(f"title pattern does not compile: {problem}")
+        rating = _rating_or_none(min_seller_rating)
+        if min_seller_rating.strip() and rating is None:
+            return _redirect_with_error("minimum seller rating must be between 0 and 100")
+
+        await repo.update_query(
+            query_id,
+            name=name.strip() or query.name,
+            poll_interval_s=max(interval or query.poll_interval_s, MIN_POLL_INTERVAL_S),
+            banned_keywords=_csv(banned_keywords),
+            max_total_price=_decimal_or_none(max_total_price),
+            required_keywords=_csv(required_keywords),
+            title_pattern=title_pattern or None,
+            min_seller_rating=rating,
+            min_seller_reviews=_int_or_none(min_seller_reviews),
+            blocked_sellers=_csv(blocked_sellers),
+        )
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/searches/interval")
+    async def set_every_interval(interval: Annotated[int, Form()], _: None = guard) -> Response:
+        await repo.set_all_intervals(max(interval, MIN_POLL_INTERVAL_S))
         return RedirectResponse("/", status_code=303)
 
     @app.post("/searches/{query_id}/pause")
@@ -403,6 +448,7 @@ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
                 "seller_stars": f"{stars:.1f}" if stars is not None else None,
                 "seller_feedback_count": row["seller_feedback_count"],
                 "favourite_count": row["favourite_count"] or 0,
+                "price_dropped": bool(row["price_changed_at"]),
                 "query_name": row["query_name"],
                 "age": _age(now - row["first_seen_at"]),
             }

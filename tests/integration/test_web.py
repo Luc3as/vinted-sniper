@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterator
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -400,3 +401,88 @@ def test_a_refusal_from_vinted_surfaces_as_a_502_with_the_reason(
 
     assert response.status_code == 502
     assert "error" in response.json()
+
+
+async def test_a_search_can_be_edited_and_the_change_marks_it_for_restart(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    signed_in.post(
+        "/searches",
+        data={"url": "https://www.vinted.fr/catalog?search_text=nike", "interval": "60"},
+        follow_redirects=False,
+    )
+    (query,) = await repo.list_queries()
+    before = query.updated_at
+
+    response = signed_in.post(
+        f"/searches/{query.id}/edit",
+        data={
+            "name": "Nike, cheap",
+            "interval": "300",
+            "max_total_price": "25",
+            "required_keywords": "air max, 90",
+            "title_pattern": r"\b4[0-2]\b",
+            "min_seller_rating": "90",
+            "min_seller_reviews": "5",
+            "blocked_sellers": "scammer",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303 and "error=" not in response.headers["location"]
+
+    edited = await repo.get_query(query.id)
+    assert edited is not None
+    assert edited.name == "Nike, cheap"
+    assert edited.poll_interval_s == 300
+    assert edited.max_total_price == Decimal("25")
+    assert edited.required_keywords == ["air max", "90"]
+    assert edited.title_pattern == r"\b4[0-2]\b"
+    assert edited.min_seller_rating == 0.9
+    assert edited.min_seller_reviews == 5
+    assert edited.blocked_sellers == ["scammer"]
+    assert edited.url == query.url, "the URL is the search's identity and stays put"
+    assert edited.updated_at >= before
+
+
+async def test_an_edit_with_a_broken_regex_is_refused_without_touching_the_search(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    signed_in.post(
+        "/searches",
+        data={"url": "https://www.vinted.fr/catalog?search_text=nike"},
+        follow_redirects=False,
+    )
+    (query,) = await repo.list_queries()
+
+    response = signed_in.post(
+        f"/searches/{query.id}/edit", data={"title_pattern": "("}, follow_redirects=False
+    )
+
+    assert "error=" in response.headers["location"]
+    same = await repo.get_query(query.id)
+    assert same is not None and same.title_pattern is None
+
+
+async def test_every_interval_can_be_changed_at_once(signed_in: TestClient, repo: Repo) -> None:
+    for text in ("a", "b", "c"):
+        signed_in.post(
+            "/searches",
+            data={"url": f"https://www.vinted.fr/catalog?search_text={text}"},
+            follow_redirects=False,
+        )
+
+    signed_in.post("/searches/interval", data={"interval": "240"}, follow_redirects=False)
+
+    assert {q.poll_interval_s for q in await repo.list_queries()} == {240}
+
+
+def test_the_health_feed_carries_what_the_live_table_needs(signed_in: TestClient) -> None:
+    signed_in.post(
+        "/searches",
+        data={"url": "https://www.vinted.fr/catalog?search_text=nike"},
+        follow_redirects=False,
+    )
+    body = signed_in.get("/api/health").json()
+    (search,) = body["searches"]
+    for key in ("state", "items_total", "last_success_at", "next_check_at", "poll_interval_s"):
+        assert key in search

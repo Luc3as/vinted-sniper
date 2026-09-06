@@ -39,6 +39,15 @@ class SearchHealth:
     items_total: int
     blocks: int
     rate_limits: int
+    poll_interval_s: int = 0
+    last_polled_at: int | None = None
+
+    @property
+    def next_check_at(self) -> int | None:
+        """A rough estimate: the real schedule adds jitter and backoff."""
+        if self.paused or self.last_polled_at is None or not self.poll_interval_s:
+            return None
+        return self.last_polled_at + self.poll_interval_s
 
     @property
     def state(self) -> str:
@@ -67,6 +76,10 @@ class SearchHealth:
             "items_total": self.items_total,
             "blocks": self.blocks,
             "rate_limits": self.rate_limits,
+            "paused": self.paused,
+            "poll_interval_s": self.poll_interval_s,
+            "last_polled_at": self.last_polled_at,
+            "next_check_at": self.next_check_at,
         }
 
 
@@ -117,6 +130,8 @@ async def snapshot(repo: Repo) -> Snapshot:
                 items_total=state.items_seen_total if state else 0,
                 blocks=state.count_403 if state else 0,
                 rate_limits=state.count_429 if state else 0,
+                poll_interval_s=query.poll_interval_s,
+                last_polled_at=state.last_polled_at if state else None,
             )
         )
 

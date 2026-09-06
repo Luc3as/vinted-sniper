@@ -52,7 +52,7 @@ class Application:
         self._stop = asyncio.Event()
         self._work_available = asyncio.Event()
         self._poller_tasks: dict[int, asyncio.Task[None]] = {}
-        self._poller_signatures: dict[int, tuple[str, int]] = {}
+        self._poller_signatures: dict[int, tuple[str, int, int]] = {}
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -213,9 +213,9 @@ class Application:
             )
 
     @staticmethod
-    def _signature(query: Query) -> tuple[str, int]:
+    def _signature(query: Query) -> tuple[str, int, int]:
         """What about a search would make its running task out of date."""
-        return (query.url, query.poll_interval_s)
+        return (query.url, query.poll_interval_s, query.updated_at)
 
     async def _guard(self, poller: Poller) -> None:
         """Run a search's loop so that its failure cannot take the others down with it."""

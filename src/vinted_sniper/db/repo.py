@@ -41,6 +41,9 @@ class Query:
     min_seller_rating: float | None = None
     min_seller_reviews: int | None = None
     blocked_sellers: list[str] = field(default_factory=list)
+    # Bumped on every edit; the supervisor restarts a search's task when it changes so
+    # new filters take effect without a process restart.
+    updated_at: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +198,51 @@ class Repo:
     async def delete_query(self, query_id: int) -> None:
         await self._db.execute("DELETE FROM queries WHERE id = ?", (query_id,))
 
+    async def update_query(
+        self,
+        query_id: int,
+        *,
+        name: str,
+        poll_interval_s: int,
+        banned_keywords: list[str],
+        max_total_price: Decimal | None,
+        required_keywords: list[str],
+        title_pattern: str | None,
+        min_seller_rating: float | None,
+        min_seller_reviews: int | None,
+        blocked_sellers: list[str],
+    ) -> None:
+        """Change everything about a search except what it searches for.
+
+        The URL is the search's identity — its high-water mark and its recorded listings
+        hang off it — so changing that means a new search, not an edit.
+        """
+        await self._db.execute(
+            "UPDATE queries SET name = ?, poll_interval_s = ?, banned_keywords_json = ?, "
+            "max_total_price = ?, required_keywords_json = ?, title_pattern = ?, "
+            "min_seller_rating = ?, min_seller_reviews = ?, blocked_sellers_json = ?, "
+            "updated_at = ? WHERE id = ?",
+            (
+                name,
+                poll_interval_s,
+                json.dumps(banned_keywords),
+                float(max_total_price) if max_total_price is not None else None,
+                json.dumps(required_keywords),
+                title_pattern or None,
+                min_seller_rating,
+                min_seller_reviews,
+                json.dumps(blocked_sellers),
+                int(time.time()),
+                query_id,
+            ),
+        )
+
+    async def set_all_intervals(self, poll_interval_s: int) -> int:
+        return await self._db.execute(
+            "UPDATE queries SET poll_interval_s = ?, updated_at = ?",
+            (poll_interval_s, int(time.time())),
+        )
+
     async def block_seller(self, query_id: int, seller_login: str) -> bool:
         """Add a seller to a search's skip list. Returns False if already there or unknown."""
         query = await self.get_query(query_id)
@@ -230,6 +278,7 @@ class Repo:
             min_seller_rating=row["min_seller_rating"],
             min_seller_reviews=row["min_seller_reviews"],
             blocked_sellers=_json_list(row["blocked_sellers_json"]) or [],
+            updated_at=int(row["updated_at"] or 0),
         )
 
     # --- Search state --------------------------------------------------------------
@@ -568,7 +617,7 @@ class Repo:
         return await self._db.fetch_all(
             "SELECT i.*, q.name AS query_name FROM items i "
             "LEFT JOIN queries q ON q.id = i.query_id "
-            "ORDER BY i.first_seen_at DESC LIMIT ?",
+            "ORDER BY COALESCE(i.price_changed_at, i.first_seen_at) DESC LIMIT ?",
             (limit,),
         )
 
