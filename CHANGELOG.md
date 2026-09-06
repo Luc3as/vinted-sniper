@@ -1,0 +1,51 @@
+# Changelog
+
+All notable changes, newest first. Dates are when the change landed on `main`.
+
+## Unreleased
+
+### Fixed
+- A refusal during the session handshake (the anti-bot challenge page) crashed the search's
+  task; the supervisor restarted it every fifteen seconds and every search on the site
+  loaded the homepage four times a minute until the address was blocked outright. A refusal
+  now drops the session without fetching another and backs off as intended.
+- Searches starting on an empty cache each performed their own handshake — seven homepage
+  loads with seven browser personas inside one second, from one address. One bootstrap now
+  runs per site at a time and everyone shares the result.
+- The watchdog could crash, or rotate a session into a site that was already holding us off.
+
+### Added
+- **Site-wide cooldown and request budget.** One refused search holds every search on that
+  site (`poll.cooling_down`, shown as "cooling" in the dashboard and `/status`, kept across
+  restarts). `SITE_REQUESTS_PER_MINUTE` caps the address as a whole, homepage loads included.
+  `STARTUP_STAGGER_S` spreads first checks out. The first refusal on a site is announced to
+  status destinations.
+- **Title and seller filters**: `--require`, `--title-regex`, `--min-seller-rating`,
+  `--min-seller-reviews`, `--block-seller`; also under "More filters" in the dashboard.
+- **Buttons under each Telegram alert**: skip this seller for the search, pause the search.
+  `/resume <id>` undoes the pause. Buttons only work from a paired chat.
+- **Quiet hours per destination** with a digest when they end; `TIMEZONE` setting. A
+  dashboard toggle for health notices per destination.
+- **Price drops**: a listing already announced is announced again when its total price
+  falls by `PRICE_DROP_MIN_PERCENT`, at no extra requests.
+- **Dashboard**: edit a search (everything but the URL), live refresh from `/api/health`,
+  next-check countdown, bulk interval change, price-drop and verdict badges on listings.
+- **Enrichment loop**: hand each listing to an outside agent via the webhook destination's
+  `enrichment_url`; a verdict posted to `/api/items/{id}/enrichment` (deal score, identified
+  model, retail price, match, risk, one line) is woven into the alert — hot deals headlined,
+  dull ones muted. Late hot verdicts get a short follow-up. See `docs/enrichment.md`.
+- **Weekly report** to status destinations on Monday morning (`WEEKLY_REPORT`).
+- **`export` / `import`** of searches, destinations and routes as one JSON document; also
+  `/api/export` and `/api/import`.
+- The Docker image now includes the `impersonate` extra.
+
+### Changed
+- `filters.check()` is a pipeline of small gates.
+- The webhook payload gained additive fields at contract version 1: `event`,
+  `previous_total_price`, `photo_urls`, `seller_reviews`, `enrichment_url`, `search_id`.
+- Rate-limit primitives moved to `vinted_sniper.ratelimit`; `deliver.ratelimit` re-exports.
+
+### Database
+Migrations 0004–0008: search filter columns, destination quiet hours, outbox rebuilt twice
+(notification kinds, previous price), item enrichment columns. Applied automatically at
+startup; all additive, existing rows behave as before.
