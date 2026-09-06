@@ -129,7 +129,7 @@ Where to get each kind of target:
 | Kind | Setup |
 |---|---|
 | `discord` | In your server: Settings → Integrations → Webhooks → New Webhook → Copy URL. Nothing to invite, nothing to host. |
-| `telegram` | Create a bot with [@BotFather](https://t.me/BotFather), set `TELEGRAM_BOT_TOKEN`, then run `vinted-sniper pair-telegram` and tap the link it prints. It finds your chat id for you. |
+| `telegram` | Create a bot with [@BotFather](https://t.me/BotFather), set `TELEGRAM_BOT_TOKEN`, then run `vinted-sniper pair-telegram` and tap the link it prints. It finds your chat id for you. Each alert carries two extra buttons the bot handles itself: skip that seller for the search, and pause the search (`/resume <id>` brings it back). Buttons only work from a paired chat. |
 | `ntfy` | Pick a topic name, install the ntfy app. No account. |
 | `webhook` | Any URL you control: n8n, Home Assistant, a script. Payload below. |
 

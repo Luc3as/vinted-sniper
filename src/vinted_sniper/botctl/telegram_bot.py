@@ -6,7 +6,12 @@ lose them. Instead the app prints a link, you tap it, the bot receives `/start` 
 one-time code, and it records the chat itself. Works the same for a group or a forum topic.
 
 Beyond that it answers `/status`, so you can ask whether everything is still running without
-opening the web UI.
+opening the web UI, and it handles the action buttons under each alert — skipping a seller
+or pausing the search — because those are the two things people reach for right after
+reading one, and the dashboard is a long way from a phone notification.
+
+Buttons are only honoured from a chat that is a paired destination. Anyone who can see the
+alert can see the button; that does not mean anyone should be able to press it.
 """
 
 from __future__ import annotations
@@ -19,9 +24,10 @@ from typing import Any
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from vinted_sniper.db.repo import Repo
+from vinted_sniper.deliver.telegram import CALLBACK_BLOCK_SELLER, CALLBACK_PAUSE_SEARCH
 from vinted_sniper.engine import health
 from vinted_sniper.log import get_logger
 
@@ -129,19 +135,93 @@ def build_dispatcher(repo: Repo) -> Dispatcher:
     async def handle_help(message: Message) -> None:
         await message.answer(
             "/status — is everything still running\n"
+            "/resume <id> — resume a search paused from an alert\n"
             "/start <code> — connect this chat to vinted-sniper\n\n"
-            "Searches and destinations are managed in vinted-sniper itself."
+            "Under each alert: skip that seller for the search, or pause the search.\n"
+            "Everything else is managed in vinted-sniper itself."
         )
 
     @dispatcher.message(Command("status"))
     async def handle_status(message: Message) -> None:
         await message.answer(await _status_text(repo), parse_mode="HTML")
 
+    @dispatcher.callback_query(F.data.startswith(f"{CALLBACK_BLOCK_SELLER}:"))
+    async def handle_block_seller(callback: CallbackQuery) -> None:
+        if not await _from_paired_chat(repo, callback):
+            await callback.answer("This chat is not connected to vinted-sniper.", show_alert=True)
+            return
+        _, _, rest = (callback.data or "").partition(":")
+        raw_id, _, login = rest.partition(":")
+        query_id = _int_or_none(raw_id)
+        if query_id is None or not login:
+            await callback.answer("That button is out of date.")
+            return
+        if await repo.block_seller(query_id, login):
+            log.info("telegram.seller_blocked", query_id=query_id, seller=login)
+            await callback.answer(f"Skipping {login} for this search from now on.")
+        else:
+            await callback.answer(f"{login} is already skipped (or the search is gone).")
+
+    @dispatcher.callback_query(F.data.startswith(f"{CALLBACK_PAUSE_SEARCH}:"))
+    async def handle_pause_search(callback: CallbackQuery) -> None:
+        if not await _from_paired_chat(repo, callback):
+            await callback.answer("This chat is not connected to vinted-sniper.", show_alert=True)
+            return
+        query_id = _int_or_none((callback.data or "").partition(":")[2])
+        query = await repo.get_query(query_id) if query_id is not None else None
+        if query is None:
+            await callback.answer("That search no longer exists.")
+            return
+        if query.paused:
+            await callback.answer(f"“{query.name}” is already paused.")
+            return
+        await repo.set_paused(query.id, True)
+        log.info("telegram.search_paused", query_id=query.id)
+        await callback.answer(
+            f"Paused “{query.name}”. Resume it from the dashboard or /resume {query.id}.",
+            show_alert=True,
+        )
+
+    @dispatcher.message(Command("resume"))
+    async def handle_resume(message: Message, command: CommandObject) -> None:
+        if not await _chat_is_paired(repo, message.chat.id):
+            await message.answer("This chat is not connected to vinted-sniper.")
+            return
+        query_id = _int_or_none((command.args or "").strip())
+        query = await repo.get_query(query_id) if query_id is not None else None
+        if query is None:
+            await message.answer("Usage: /resume <search id> — ids are in /status.")
+            return
+        await repo.set_paused(query.id, False)
+        await message.answer(f"Resumed “{query.name}”.")
+
     @dispatcher.message(F.text)
     async def handle_anything_else(message: Message) -> None:
-        await message.answer("I understand /status and /help.")
+        await message.answer("I understand /status, /resume and /help.")
 
     return dispatcher
+
+
+def _int_or_none(raw: str) -> int | None:
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+async def _chat_is_paired(repo: Repo, chat_id: int) -> bool:
+    wanted = str(chat_id)
+    return any(
+        destination.kind == "telegram" and destination.config.get("chat_id") == wanted
+        for destination in await repo.list_destinations()
+    )
+
+
+async def _from_paired_chat(repo: Repo, callback: CallbackQuery) -> bool:
+    message = callback.message
+    if message is None:
+        return False
+    return await _chat_is_paired(repo, message.chat.id)
 
 
 async def _status_text(repo: Repo) -> str:
@@ -156,7 +236,7 @@ async def _status_text(repo: Repo) -> str:
             if search.last_success_at
             else "never"
         )
-        line = f"• {search.name} — {search.state}, last checked {last}"
+        line = f"• {search.name} (id {search.query_id}) — {search.state}, last checked {last}"
         if search.state == "failing" and search.last_error:
             line += f"\n  {search.last_error[:120]}"
         lines.append(line)

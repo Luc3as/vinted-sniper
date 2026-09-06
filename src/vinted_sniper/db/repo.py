@@ -174,6 +174,20 @@ class Repo:
     async def delete_query(self, query_id: int) -> None:
         await self._db.execute("DELETE FROM queries WHERE id = ?", (query_id,))
 
+    async def block_seller(self, query_id: int, seller_login: str) -> bool:
+        """Add a seller to a search's skip list. Returns False if already there or unknown."""
+        query = await self.get_query(query_id)
+        if query is None:
+            return False
+        login = seller_login.strip()
+        if not login or login.lower() in {s.lower() for s in query.blocked_sellers}:
+            return False
+        await self._db.execute(
+            "UPDATE queries SET blocked_sellers_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps([*query.blocked_sellers, login]), int(time.time()), query_id),
+        )
+        return True
+
     @staticmethod
     def _to_query(row: aiosqlite.Row) -> Query:
         return Query(

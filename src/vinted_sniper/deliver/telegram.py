@@ -82,7 +82,7 @@ class TelegramSender:
         for notification in individually:
             result = await self._post(
                 "sendMessage",
-                self._listing_payload(notification.item),
+                self._listing_payload(notification.item, query_id=notification.query_id),
                 [notification.outbox_id],
             )
             if not result.delivered:
@@ -127,7 +127,7 @@ class TelegramSender:
             payload["message_thread_id"] = self._thread_id
         return payload
 
-    def _listing_payload(self, item: Item) -> dict[str, Any]:
+    def _listing_payload(self, item: Item, *, query_id: int | None = None) -> dict[str, Any]:
         lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line())]
 
         details = " · ".join(
@@ -143,17 +143,22 @@ class TelegramSender:
         if item.listed_at:
             lines.append(f"Listed {item.listed_at.strftime('%H:%M UTC')}")
 
+        keyboard: list[list[dict[str, str]]] = [
+            [
+                {"text": "Open listing", "url": item.url},
+                {"text": "Message seller", "url": item.message_url},
+                {"text": "Buy", "url": item.buy_url},
+            ]
+        ]
+        # A second row of actions the bot handles itself: the two things people most
+        # often want to do from the alert without opening the dashboard.
+        actions = inline_actions(query_id, item.seller_login)
+        if actions:
+            keyboard.append(actions)
+
         payload = self._base_payload() | {
             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
-            "reply_markup": {
-                "inline_keyboard": [
-                    [
-                        {"text": "Open listing", "url": item.url},
-                        {"text": "Message seller", "url": item.message_url},
-                        {"text": "Buy", "url": item.buy_url},
-                    ]
-                ]
-            },
+            "reply_markup": {"inline_keyboard": keyboard},
         }
         if item.photo_url:
             payload["link_preview_options"] = {
@@ -213,6 +218,25 @@ class TelegramSender:
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+# Telegram allows 64 bytes of callback data per button.
+_CALLBACK_LIMIT = 64
+CALLBACK_BLOCK_SELLER = "bs"
+CALLBACK_PAUSE_SEARCH = "ps"
+
+
+def inline_actions(query_id: int | None, seller_login: str | None) -> list[dict[str, str]]:
+    """Callback buttons the bot in botctl answers. Empty when there is no search to act on."""
+    if query_id is None:
+        return []
+    row: list[dict[str, str]] = []
+    if seller_login:
+        data = f"{CALLBACK_BLOCK_SELLER}:{query_id}:{seller_login}"
+        if len(data.encode()) <= _CALLBACK_LIMIT:
+            row.append({"text": "🚫 Skip seller", "callback_data": data})
+    row.append({"text": "⏸ Pause search", "callback_data": f"{CALLBACK_PAUSE_SEARCH}:{query_id}"})
+    return row
 
 
 def _classify(description: str, status_code: int, outbox_ids: list[int]) -> SendResult:

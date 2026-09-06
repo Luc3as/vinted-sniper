@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 import pytest
 
-from vinted_sniper.botctl.telegram_bot import claim_pairing, create_pairing
+from vinted_sniper.botctl.telegram_bot import _chat_is_paired, claim_pairing, create_pairing
 from vinted_sniper.config import Settings
 from vinted_sniper.db.repo import Query, Repo
 from vinted_sniper.deliver.dispatcher import MAX_ATTEMPTS, Dispatcher
@@ -313,3 +313,35 @@ async def test_asking_for_a_second_pairing_link_reuses_the_waiting_destination(
     assert len(await repo.list_destinations()) == 1
     assert await claim_pairing(repo, code, chat_id=7, thread_id=None) == first_id
     assert await repo.destination_ids_for_query(query.id) == [first_id]
+
+
+# --- Actions under an alert ----------------------------------------------------------
+
+
+async def test_skipping_a_seller_from_an_alert_extends_the_search_filter(repo: Repo) -> None:
+    query_id = await repo.add_query(
+        name="x",
+        url="https://www.vinted.fr/catalog?search_text=x",
+        tld="fr",
+        params={"search_text": "x"},
+        poll_interval_s=60,
+        blocked_sellers=["already"],
+    )
+
+    assert await repo.block_seller(query_id, "Scammer99") is True
+    assert await repo.block_seller(query_id, "scammer99") is False, "case-insensitively once"
+    assert await repo.block_seller(query_id, "already") is False
+    assert await repo.block_seller(9999, "nobody") is False
+
+    query = await repo.get_query(query_id)
+    assert query is not None
+    assert query.blocked_sellers == ["already", "Scammer99"]
+
+
+async def test_buttons_are_only_honoured_from_a_paired_chat(repo: Repo) -> None:
+    _, code = await create_pairing(repo, "phone")
+    assert not await _chat_is_paired(repo, 4242)
+
+    await claim_pairing(repo, code, chat_id=4242, thread_id=None)
+    assert await _chat_is_paired(repo, 4242)
+    assert not await _chat_is_paired(repo, 1)

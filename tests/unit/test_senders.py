@@ -12,7 +12,7 @@ import pytest
 from vinted_sniper.db.repo import PendingNotification
 from vinted_sniper.deliver.discord import DiscordSender
 from vinted_sniper.deliver.ratelimit import Gate, TokenBucket
-from vinted_sniper.deliver.telegram import TelegramSender
+from vinted_sniper.deliver.telegram import TelegramSender, inline_actions
 from vinted_sniper.vinted.models import Item
 
 
@@ -253,6 +253,27 @@ async def test_telegram_sends_one_message_per_listing_with_a_photo_preview() -> 
     assert payload["parse_mode"] == "HTML"
     assert payload["link_preview_options"]["prefer_large_media"] is True
     assert payload["reply_markup"]["inline_keyboard"][0][0]["url"].endswith("/items/1")
+
+
+async def test_telegram_alerts_carry_skip_seller_and_pause_buttons() -> None:
+    recorder = Recorder(httpx.Response(200, json={"ok": True}))
+    sender = TelegramSender(
+        {"chat_id": "123"}, bot_token="t", client=recorder.client(), bucket=fast_bucket()
+    )
+
+    await sender.send([notification(1)])
+
+    actions = recorder.payload(0)["reply_markup"]["inline_keyboard"][1]
+    data = [button["callback_data"] for button in actions]
+    query_id = notification(1).query_id
+    assert f"bs:{query_id}:{notification(1).item.seller_login}" in data
+    assert f"ps:{query_id}" in data
+
+
+def test_inline_actions_stay_inside_telegrams_callback_limit() -> None:
+    row = inline_actions(7, "x" * 80)
+    assert [b["text"] for b in row] == ["⏸ Pause search"], "an oversized login drops its button"
+    assert inline_actions(None, "someone") == []
 
 
 @pytest.mark.parametrize(

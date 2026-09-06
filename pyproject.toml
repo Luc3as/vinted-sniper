@@ -94,6 +94,8 @@ ignore = [
 # up — and each needs its own early exit. Splitting them would hide the flow, not clarify it.
 "src/vinted_sniper/deliver/dispatcher.py" = ["C901", "PLR0911"]
 "src/vinted_sniper/engine/poller.py" = ["PLR0911"]  # one return per error type is the point
+# The bot is one handler per command and button, registered in one closure by design.
+"src/vinted_sniper/botctl/telegram_bot.py" = ["C901", "PLR0915"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
