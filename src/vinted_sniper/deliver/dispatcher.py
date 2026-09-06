@@ -234,6 +234,9 @@ class Dispatcher:
             ),
             "known_retail": await self._repo.known_retail(notification.query_id),
             "buyer_feedback": await self._repo.feedback_examples(notification.query_id),
+            # Which language the buyer reads alerts for this search in, so the agent can
+            # write its one-line verdict in it.
+            "reader_language": await self._repo.reader_language_for_query(notification.query_id),
         }
 
     async def notify_status(self, message: str | Callable[[Translator], str]) -> None:

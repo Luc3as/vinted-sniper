@@ -661,6 +661,18 @@ class Repo:
                 )
         return len(items)
 
+    async def reader_language_for_query(self, query_id: int) -> str:
+        """The language the buyer will read this search's alerts in: the most common one
+        among its chat destinations (webhooks do not count — they are the readers' agents)."""
+        rows = await self._db.fetch_all(
+            "SELECT d.language, COUNT(*) AS n FROM query_destinations qd "
+            "JOIN destinations d ON d.id = qd.destination_id "
+            "WHERE qd.query_id = ? AND d.active = 1 AND d.kind != 'webhook' "
+            "GROUP BY d.language ORDER BY n DESC LIMIT 1",
+            (query_id,),
+        )
+        return str(rows[0]["language"]) if rows else i18n.DEFAULT_LANGUAGE
+
     async def destination_ids_of_kind(self, kind: str) -> set[int]:
         rows = await self._db.fetch_all(
             "SELECT id FROM destinations WHERE kind = ? AND active = 1", (kind,)

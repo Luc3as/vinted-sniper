@@ -52,6 +52,7 @@ cares about:
 | `items[].favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour` | Demand. A listing twelve minutes old with six hearts is one the market has already noticed. |
 | `items[].market` | Where the price sits among everything this search has shown in the last 30 days (`null` until there are ten points): `n`, `p10`, `p25`, `median`, `p75`, `median_same_condition`, `this_percentile` (share of listings cheaper than this one), and `sells_fast_under` — the median price of listings that vanished within a day, the closest thing to a sold price the catalog offers. Built from every listing on the page, filters or not, at no extra requests. |
 | `items[].known_retail` | Retail prices earlier verdicts reported for this search, `[{model, price, currency, source}]`. Reuse instead of searching again when the product matches. |
+| `items[].reader_language` | `en` or `sk`: the language the buyer reads this search's alerts in (the most common among its chat destinations). Write `verdict` in it. |
 | `items[].buyer_feedback` | The buyer's thumbs on recent verdicts for this search: `[{title, condition, total_price, agent_score, agent_model, buyer_said}]`. What this particular buyer calls a deal. |
 
 ## What the agent posts back

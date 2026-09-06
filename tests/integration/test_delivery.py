@@ -580,3 +580,25 @@ async def test_status_notices_are_rendered_per_destination_language(
     bodies = {json.loads(r.content)["status"] for r in endpoint.requests}
     assert bodies == {"Running.", "Beží."}
     assert en != sk
+
+
+async def test_the_agent_is_told_which_language_the_buyer_reads(
+    repo: Repo, settings: Settings
+) -> None:
+    query = await a_search(repo)
+    brain = await repo.add_destination(
+        kind="webhook", name="n8n", config={"url": "https://example.test/n8n"}
+    )
+    phone = await repo.add_destination(
+        kind="ntfy", name="phone", config={"topic": "t"}, language="sk"
+    )
+    await repo.route(query.id, brain)
+    await repo.route(query.id, phone)
+    await repo.record_new_items(query, [listing(1)], [brain])
+
+    endpoint = FakeEndpoint()
+    await make_dispatcher(repo, settings, endpoint).drain()
+
+    body = json.loads(endpoint.requests[-1].content)
+    assert body["items"][0]["reader_language"] == "sk"
+    assert await repo.reader_language_for_query(9999) == "en", "no readers: default"
