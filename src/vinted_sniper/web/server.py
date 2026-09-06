@@ -180,6 +180,35 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return JSONResponse({"ok": True, "added": added})
 
+    @app.get("/history", response_class=HTMLResponse)
+    async def history_page(
+        request: Request,
+        session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+        search: int | None = None,
+        status: str | None = None,
+    ) -> Response:
+        if not _authorised(session, token):
+            return RedirectResponse("/login", status_code=303)
+        rows = await repo.delivery_history(limit=200, query_id=search, status=status or None)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "history.html",
+            {
+                "rows": _history_views(rows, now=int(time.time())),
+                "queries": await repo.list_queries(),
+                "selected_search": search,
+                "selected_status": status or "",
+                "auth_enabled": token is not None,
+            },
+        )
+
+    @app.get("/api/history")
+    async def api_history(
+        search: int | None = None, status: str | None = None, _: None = guard
+    ) -> JSONResponse:
+        rows = await repo.delivery_history(limit=200, query_id=search, status=status or None)
+        return JSONResponse({"deliveries": _history_views(rows, now=int(time.time()))})
+
     @app.get("/api/health")
     async def api_health(_: None = guard) -> JSONResponse:
         snapshot = await health.snapshot(repo)
@@ -487,6 +516,44 @@ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
                 "verdict": row["enrich_verdict"] if row["enriched_at"] else None,
                 "query_name": row["query_name"],
                 "age": _age(now - row["first_seen_at"]),
+            }
+        )
+    return views
+
+
+def _history_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
+    views: list[dict[str, Any]] = []
+    for row in rows:
+        currency = row["currency"] or ""
+        payable = row["total_price"] if row["total_price"] is not None else row["price"]
+        when = row["sent_at"] or row["created_at"]
+        views.append(
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "status": row["status"],
+                "attempts": row["attempts"],
+                "error": row["last_error"],
+                "when": when,
+                "age": _age(max(0, now - when)) if when else "",
+                "due_in": (
+                    _age(row["next_attempt_at"] - now).removesuffix(" ago")
+                    if row["status"] == "pending" and row["next_attempt_at"] > now
+                    else None
+                ),
+                "title": row["title"] or (f"Listing {row['item_id']}" if row["item_id"] else "—"),
+                "url": row["url"],
+                "photo": row["photo_url"],
+                "price": f"{payable:.2f} {currency}".strip() if payable is not None else None,
+                "previous_price": (
+                    f"{row['previous_price']:.2f} {currency}".strip()
+                    if row["kind"] == "price_drop" and row["previous_price"]
+                    else None
+                ),
+                "score": row["enrich_score"],
+                "query_name": row["query_name"] or "—",
+                "destination": row["destination_name"] or "—",
+                "destination_kind": row["destination_kind"] or "",
             }
         )
     return views

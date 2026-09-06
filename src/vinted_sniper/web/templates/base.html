@@ -148,6 +148,11 @@
     .tag.score { background: #ede7f6; color: #4527a0; }
     .tag.score.hot { background: #fbe9e7; color: #bf360c; font-weight: 600; }
     .tag.score.cold { opacity: .6; }
+    .pill.sent { background: #e8f5e9; color: #1b5e20; }
+    .pill.pending { background: #fff8e1; color: #f57f17; }
+    .pill.sending { background: #e3f2fd; color: #0d47a1; }
+    .pill.cancelled { opacity: .6; }
+    .history img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; vertical-align: middle; }
     .tag.drop { background: #e8f5e9; color: #1b5e20; }
     tr.edit-row td { background: rgba(0,0,0,.025); }
     td.actions { white-space: nowrap; }
@@ -156,7 +161,9 @@
 </head>
 <body>
   <header>
-    <h1>vinted-sniper</h1>
+    <h1><a href="/" style="color:inherit;text-decoration:none">vinted-sniper</a>
+      <span class="muted" style="font-size:.7em;font-weight:normal;margin-left:.6rem">
+        <a href="/">searches</a> · <a href="/history">history</a></span></h1>
     {% block header_extra %}{% endblock %}
   </header>
   <main>{% block content %}{% endblock %}</main>

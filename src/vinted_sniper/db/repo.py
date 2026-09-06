@@ -690,6 +690,31 @@ class Repo:
                 )
         return len(drops)
 
+    async def delivery_history(
+        self, *, limit: int = 200, query_id: int | None = None, status: str | None = None
+    ) -> list[aiosqlite.Row]:
+        """What was sent where, newest first — the answer to "did my alert go out?"."""
+        sql = (
+            "SELECT o.id, o.kind, o.status, o.attempts, o.created_at, o.sent_at, o.last_error, "
+            "o.next_attempt_at, o.previous_price, "
+            "i.item_id, i.title, i.url, i.price, i.total_price, i.currency, i.photo_url, "
+            "i.enrich_score, q.name AS query_name, d.name AS destination_name, "
+            "d.kind AS destination_kind FROM outbox o "
+            "LEFT JOIN items i ON i.item_id = o.item_id "
+            "LEFT JOIN queries q ON q.id = o.query_id "
+            "LEFT JOIN destinations d ON d.id = o.destination_id WHERE 1 = 1"
+        )
+        params: list[Any] = []
+        if query_id is not None:
+            sql += " AND o.query_id = ?"
+            params.append(query_id)
+        if status:
+            sql += " AND o.status = ?"
+            params.append(status)
+        sql += " ORDER BY o.id DESC LIMIT ?"
+        params.append(limit)
+        return await self._db.fetch_all(sql, tuple(params))
+
     async def weekly_figures(self, since: int) -> dict[str, Any]:
         """What the last stretch looked like, for the report to status destinations."""
         found = await self._db.fetch_one(

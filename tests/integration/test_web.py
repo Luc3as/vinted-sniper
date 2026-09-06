@@ -486,3 +486,39 @@ def test_the_health_feed_carries_what_the_live_table_needs(signed_in: TestClient
     (search,) = body["searches"]
     for key in ("state", "items_total", "last_success_at", "next_check_at", "poll_interval_s"):
         assert key in search
+
+
+async def test_the_history_page_shows_what_was_queued_and_where(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    signed_in.post(
+        "/searches",
+        data={"url": "https://www.vinted.fr/catalog?search_text=nike"},
+        follow_redirects=False,
+    )
+    (query,) = await repo.list_queries()
+    destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    item = parse_item(
+        {
+            "id": 77,
+            "title": "Nike Air Max 90",
+            "url": "https://www.vinted.fr/items/77",
+            "price": {"amount": "30.0", "currency_code": "EUR"},
+            "photo": {
+                "full_size_url": "https://images.vinted.net/77.jpeg",
+                "high_resolution": {"timestamp": 1},
+            },
+        },
+        "fr",
+    )
+    await repo.record_new_items(query, [item], [destination_id])
+
+    page = signed_in.get("/history")
+    assert page.status_code == 200
+    assert "Nike Air Max 90" in page.text
+    assert "phone" in page.text
+    assert "pending" in page.text
+
+    body = signed_in.get("/api/history", params={"status": "pending"}).json()
+    assert body["deliveries"][0]["title"] == "Nike Air Max 90"
+    assert signed_in.get("/api/history", params={"status": "sent"}).json()["deliveries"] == []

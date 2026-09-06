@@ -135,7 +135,7 @@ def build_dispatcher(repo: Repo) -> Dispatcher:
     async def handle_help(message: Message) -> None:
         await message.answer(
             "/status — is everything still running\n"
-            "/resume <id> — resume a search paused from an alert\n"
+            "/pause <id>, /resume <id> — pause or resume a search\n"
             "/start <code> — connect this chat to vinted-sniper\n\n"
             "Under each alert: skip that seller for the search, or pause the search.\n"
             "Everything else is managed in vinted-sniper itself."
@@ -184,22 +184,33 @@ def build_dispatcher(repo: Repo) -> Dispatcher:
 
     @dispatcher.message(Command("resume"))
     async def handle_resume(message: Message, command: CommandObject) -> None:
-        if not await _chat_is_paired(repo, message.chat.id):
-            await message.answer("This chat is not connected to vinted-sniper.")
-            return
-        query_id = _int_or_none((command.args or "").strip())
-        query = await repo.get_query(query_id) if query_id is not None else None
-        if query is None:
-            await message.answer("Usage: /resume <search id> — ids are in /status.")
-            return
-        await repo.set_paused(query.id, False)
-        await message.answer(f"Resumed “{query.name}”.")
+        await _set_paused_from_chat(repo, message, command, paused=False)
+
+    @dispatcher.message(Command("pause"))
+    async def handle_pause(message: Message, command: CommandObject) -> None:
+        await _set_paused_from_chat(repo, message, command, paused=True)
 
     @dispatcher.message(F.text)
     async def handle_anything_else(message: Message) -> None:
-        await message.answer("I understand /status, /resume and /help.")
+        await message.answer("I understand /status, /pause, /resume and /help.")
 
     return dispatcher
+
+
+async def _set_paused_from_chat(
+    repo: Repo, message: Message, command: CommandObject, *, paused: bool
+) -> None:
+    verb = "pause" if paused else "resume"
+    if not await _chat_is_paired(repo, message.chat.id):
+        await message.answer("This chat is not connected to vinted-sniper.")
+        return
+    query_id = _int_or_none((command.args or "").strip())
+    query = await repo.get_query(query_id) if query_id is not None else None
+    if query is None:
+        await message.answer(f"Usage: /{verb} <search id> — ids are in /status.")
+        return
+    await repo.set_paused(query.id, paused)
+    await message.answer(f"{'Paused' if paused else 'Resumed'} “{query.name}”.")
 
 
 def _int_or_none(raw: str) -> int | None:

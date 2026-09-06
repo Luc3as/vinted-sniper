@@ -34,6 +34,8 @@ All notable changes, newest first. Dates are when the change landed on `main`.
   `enrichment_url`; a verdict posted to `/api/items/{id}/enrichment` (deal score, identified
   model, retail price, match, risk, one line) is woven into the alert — hot deals headlined,
   dull ones muted. Late hot verdicts get a short follow-up. See `docs/enrichment.md`.
+- **Delivery history** page (`/history`, `/api/history`): every notification, its kind, where it went, sent/pending/failed with the error, held-until for enrichment — the answer to "did my alert go out?".
+- Telegram `/pause <id>` alongside `/resume <id>`.
 - **Weekly report** to status destinations on Monday morning (`WEEKLY_REPORT`).
 - **`export` / `import`** of searches, destinations and routes as one JSON document; also
   `/api/export` and `/api/import`.

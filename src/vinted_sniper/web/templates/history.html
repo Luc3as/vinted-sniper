@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}vinted-sniper · history{% endblock %}
+
+{% block header_extra %}
+  {% if auth_enabled %}
+  <form method="post" action="/logout" class="inline">
+    <button class="quiet" type="submit">Sign out</button>
+  </form>
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<section>
+  <h2>Delivery history</h2>
+  <div class="card">
+    <form method="get" action="/history" class="row" style="gap:.6rem">
+      <label style="margin:0">Search</label>
+      <select name="search" style="width:auto">
+        <option value="">all</option>
+        {% for q in queries %}
+        <option value="{{ q.id }}" {% if selected_search == q.id %}selected{% endif %}>{{ q.name }}</option>
+        {% endfor %}
+      </select>
+      <label style="margin:0">Status</label>
+      <select name="status" style="width:auto">
+        {% for s in ["", "sent", "pending", "sending", "failed", "cancelled"] %}
+        <option value="{{ s }}" {% if selected_status == s %}selected{% endif %}>{{ s or "all" }}</option>
+        {% endfor %}
+      </select>
+      <button class="quiet" type="submit">Filter</button>
+      <span class="muted">Last 200 notifications, newest first. “cancelled” means expired before delivery or discarded on purpose.</span>
+    </form>
+  </div>
+
+  {% if not rows %}
+  <div class="card"><p class="muted" style="margin:0">Nothing has been queued yet.</p></div>
+  {% else %}
+  <div class="card history">
+    <table>
+      <tr><th></th><th>Listing</th><th>Kind</th><th>Search</th><th>To</th><th>Status</th><th>When</th></tr>
+      {% for row in rows %}
+      <tr>
+        <td>{% if row.photo %}<img src="{{ row.photo }}" alt="" loading="lazy">{% endif %}</td>
+        <td>
+          {% if row.url %}<a href="{{ row.url }}" target="_blank" rel="noreferrer">{{ row.title }}</a>
+          {% else %}{{ row.title }}{% endif %}
+          <div class="muted">
+            {% if row.price %}{{ row.price }}{% endif %}
+            {% if row.previous_price %}<span class="tag drop">📉 was {{ row.previous_price }}</span>{% endif %}
+            {% if row.score is not none %}<span class="tag score {{ 'hot' if row.score >= 75 else ('cold' if row.score < 40 else '') }}">🤖 {{ row.score }}</span>{% endif %}
+          </div>
+        </td>
+        <td class="muted">{{ row.kind.replace('_', ' ') }}</td>
+        <td class="muted">{{ row.query_name }}</td>
+        <td class="muted">{{ row.destination }} <span style="opacity:.6">({{ row.destination_kind }})</span></td>
+        <td>
+          <span class="pill {{ row.status }}">{{ row.status }}</span>
+          {% if row.due_in %}<div class="muted">held, due in {{ row.due_in }}</div>{% endif %}
+          {% if row.attempts > 1 %}<div class="muted">{{ row.attempts }} attempts</div>{% endif %}
+          {% if row.error %}<div class="muted error-line">{{ row.error[:110] }}</div>{% endif %}
+        </td>
+        <td class="muted">{{ row.age }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
