@@ -62,6 +62,7 @@ was found, so you can see the real delay yourself.
 
 | Variable | Default | What it does |
 |---|---|---|
+| `WEEKLY_REPORT` | `true` | Every Monday at 08:00 (`TIMEZONE`), send destinations flagged for status notices a few lines: listings found, alerts sent, price drops, the best verdict, the busiest searches. |
 | `TIMEZONE` | `UTC` | IANA timezone (e.g. `Europe/Bratislava`) that a destination's quiet hours are read in. |
 | `TELEGRAM_BOT_TOKEN` | unset | From [@BotFather](https://t.me/BotFather). Enables Telegram delivery and the pairing bot. |
 

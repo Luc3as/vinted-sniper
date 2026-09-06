@@ -690,6 +690,44 @@ class Repo:
                 )
         return len(drops)
 
+    async def weekly_figures(self, since: int) -> dict[str, Any]:
+        """What the last stretch looked like, for the report to status destinations."""
+        found = await self._db.fetch_one(
+            "SELECT COUNT(*) AS n, COUNT(DISTINCT query_id) AS searches, "
+            "SUM(CASE WHEN price_changed_at >= ? THEN 1 ELSE 0 END) AS drops, "
+            "SUM(CASE WHEN enriched_at >= ? THEN 1 ELSE 0 END) AS judged, "
+            "AVG(CASE WHEN enriched_at >= ? THEN enrich_score END) AS avg_score "
+            "FROM items WHERE first_seen_at >= ? OR price_changed_at >= ?",
+            (since, since, since, since, since),
+        )
+        hot = await self._db.fetch_all(
+            "SELECT i.title, i.enrich_score, i.total_price, i.currency, i.url, "
+            "q.name AS query_name FROM items i LEFT JOIN queries q ON q.id = i.query_id "
+            "WHERE i.enriched_at >= ? AND i.enrich_score IS NOT NULL "
+            "ORDER BY i.enrich_score DESC LIMIT 3",
+            (since,),
+        )
+        busiest = await self._db.fetch_all(
+            "SELECT q.name, COUNT(*) AS n FROM items i JOIN queries q ON q.id = i.query_id "
+            "WHERE i.first_seen_at >= ? GROUP BY q.id ORDER BY n DESC LIMIT 3",
+            (since,),
+        )
+        sent = await self._db.fetch_value(
+            "SELECT COUNT(*) FROM outbox WHERE status = 'sent' AND sent_at >= ?", (since,)
+        )
+        blocks = await self._db.fetch_value("SELECT SUM(count_403) FROM query_state")
+        return {
+            "found": int(found["n"] or 0) if found else 0,
+            "searches": int(found["searches"] or 0) if found else 0,
+            "drops": int(found["drops"] or 0) if found else 0,
+            "judged": int(found["judged"] or 0) if found else 0,
+            "avg_score": float(found["avg_score"]) if found and found["avg_score"] else None,
+            "hot": [dict(row) for row in hot],
+            "busiest": [dict(row) for row in busiest],
+            "sent": int(sent or 0),
+            "blocks_total": int(blocks or 0),
+        }
+
     async def prune_items(self, older_than_days: int) -> int:
         cutoff = int(time.time()) - older_than_days * 86_400
         return await self._db.execute("DELETE FROM items WHERE first_seen_at < ?", (cutoff,))

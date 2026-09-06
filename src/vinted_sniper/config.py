@@ -166,6 +166,12 @@ class Settings(BaseSettings):
         default=None,
         description="Enables Telegram delivery and the /start binding bot when set.",
     )
+    weekly_report: bool = Field(
+        default=True,
+        description="Send a short weekly summary (listings found, price drops, hottest "
+        "verdicts, busiest searches) to destinations flagged for status notices, on "
+        "Monday at 08:00 in TIMEZONE.",
+    )
     timezone: str = Field(
         default="UTC",
         description="IANA timezone (e.g. Europe/Bratislava) that a destination's quiet hours "

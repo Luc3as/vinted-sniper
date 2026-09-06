@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import signal
 import time
+from zoneinfo import ZoneInfo
 
 from vinted_sniper.config import Settings
 from vinted_sniper.db import Database, apply_pending
@@ -24,6 +25,7 @@ from vinted_sniper.db.repo import Query, Repo
 from vinted_sniper.deliver.dispatcher import Dispatcher
 from vinted_sniper.engine.health import Heartbeat
 from vinted_sniper.engine.poller import Poller
+from vinted_sniper.engine.report import WeeklyReport
 from vinted_sniper.engine.watchdog import Watchdog
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted.client import VintedClient
@@ -119,6 +121,14 @@ class Application:
                         tg.create_task(watchdog.run(), name="watchdog")
                         tg.create_task(heartbeat.run(), name="heartbeat")
                         tg.create_task(self._housekeeping(repo), name="housekeeping")
+                        if settings.weekly_report:
+                            report = WeeklyReport(
+                                repo=repo,
+                                zone=ZoneInfo(settings.timezone),
+                                stop=self._stop,
+                                announce=dispatcher.notify_status,
+                            )
+                            tg.create_task(report.run(), name="weekly-report")
                         tg.create_task(
                             self._supervise(tg, repo, client, sessions, dispatcher),
                             name="supervisor",
