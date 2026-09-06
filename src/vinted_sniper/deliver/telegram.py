@@ -170,9 +170,7 @@ class TelegramSender:
         keyboard: list[list[dict[str, str]]] = [_link_row(item)]
         # A second row of actions the bot handles itself: the two things people most
         # often want to do from the alert without opening the dashboard.
-        actions = inline_actions(query_id, item.seller_login)
-        if actions:
-            keyboard.append(actions)
+        keyboard.extend(_action_rows(item, query_id, enrichment))
 
         payload = self._base_payload() | {
             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
@@ -205,7 +203,12 @@ class TelegramSender:
             lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
         return self._base_payload() | {
             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
-            "reply_markup": {"inline_keyboard": [[{"text": "Open listing", "url": item.url}]]},
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "Open listing", "url": item.url}],
+                    feedback_buttons(item.item_id),
+                ]
+            },
             "link_preview_options": {"is_disabled": True},
         }
 
@@ -276,6 +279,27 @@ class TelegramSender:
 _CALLBACK_LIMIT = 64
 CALLBACK_BLOCK_SELLER = "bs"
 CALLBACK_PAUSE_SEARCH = "ps"
+CALLBACK_FEEDBACK = "fb"
+
+
+def feedback_buttons(item_id: int) -> list[dict[str, str]]:
+    """Thumbs on a verdict. What the buyer says here is fed back to the agent as examples
+    of what this particular buyer calls a deal."""
+    return [
+        {"text": "👍 Good call", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:1"},
+        {"text": "👎 Not for me", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:-1"},
+    ]
+
+
+def _action_rows(
+    item: Item, query_id: int | None, enrichment: Enrichment | None
+) -> list[list[dict[str, str]]]:
+    rows: list[list[dict[str, str]]] = []
+    if actions := inline_actions(query_id, item.seller_login):
+        rows.append(actions)
+    if enrichment is not None:
+        rows.append(feedback_buttons(item.item_id))
+    return rows
 
 
 def _link_row(item: Item) -> list[dict[str, str]]:

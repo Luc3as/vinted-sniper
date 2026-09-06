@@ -47,6 +47,7 @@ All notable changes, newest first. Dates are when the change landed on `main`.
   dull ones muted. Late hot verdicts get a short follow-up. See `docs/enrichment.md`.
 - **Delivery history** page (`/history`, `/api/history`): every notification, its kind, where it went, sent/pending/failed with the error, held-until for enrichment — the answer to "did my alert go out?".
 - Telegram `/pause <id>` alongside `/resume <id>`.
+- **Market memory**: every listing on a search's page is recorded as a price point (no extra requests). The webhook payload gains `market` (percentiles, the listing's own percentile, median for the same condition, the price under which listings vanish within a day), demand (`favourites_per_hour`), `known_retail` (retail prices earlier verdicts found, cached per search) and `buyer_feedback` (👍/👎 the buyer gave earlier verdicts, via new buttons under Telegram alerts).
 - **Weekly report** to status destinations on Monday morning (`WEEKLY_REPORT`).
 - **`export` / `import`** of searches, destinations and routes as one JSON document; also
   `/api/export` and `/api/import`.

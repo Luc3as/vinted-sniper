@@ -433,6 +433,8 @@ async def test_telegram_headlines_a_hot_deal_and_mutes_a_dull_one() -> None:
 
     first, second = recorder.payload(0), recorder.payload(1)
     assert first["text"].startswith("🔥 <b>HOT DEAL</b> · deal 91/100 · retail ~140 EUR · -88%")
+    thumbs = first["reply_markup"]["inline_keyboard"][-1]
+    assert [b["callback_data"] for b in thumbs] == ["fb:1:1", "fb:1:-1"]
     assert "Looks like: Nike Air Max 90" in first["text"]
     assert "disable_notification" not in first
     assert second["disable_notification"] is True

@@ -8,6 +8,8 @@ people's automations, so it changes only with a version bump.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -15,6 +17,9 @@ import httpx
 from vinted_sniper.db.repo import PendingNotification
 from vinted_sniper.deliver.base import SendResult, require
 from vinted_sniper.deliver.ratelimit import TokenBucket
+from vinted_sniper.log import get_logger
+
+log = get_logger(__name__)
 
 PAYLOAD_VERSION = 1
 
@@ -31,10 +36,14 @@ class WebhookSender:
         client: httpx.AsyncClient | None = None,
         bucket: TokenBucket | None = None,
         callback_base: str | None = None,
+        context: Callable[[PendingNotification], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self._url = require(config, "url", self.kind)
         self._headers = config.get("headers") or {}
         self._callback_base = callback_base.rstrip("/") if callback_base else None
+        # Extra facts an agent on the other end can lean on: where the price sits in
+        # this search's market, retail prices already found, the buyer's past verdicts.
+        self._context = context
         self._client = client or httpx.AsyncClient(timeout=20.0)
         self._owns_client = client is None
         self._bucket = bucket or TokenBucket(2.0, capacity=4)
@@ -47,11 +56,20 @@ class WebhookSender:
         if not batch:
             return SendResult.ok([])
         outbox_ids = [n.outbox_id for n in batch]
+        items: list[dict[str, Any]] = []
+        for notification in batch:
+            entry = _item_json(notification, self._callback_base)
+            if self._context is not None:
+                try:
+                    entry.update(await self._context(notification))
+                except Exception as exc:  # noqa: BLE001 - a bonus, never a reason not to send
+                    log.warning("webhook.context_failed", error=str(exc))
+            items.append(entry)
         payload = {
             "version": PAYLOAD_VERSION,
             "search": batch[0].query_name,
             "search_id": batch[0].query_id,
-            "items": [_item_json(n, self._callback_base) for n in batch],
+            "items": items,
         }
         await self._bucket.acquire()
         try:
@@ -79,6 +97,19 @@ class WebhookSender:
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+def _minutes_since(ts: int | None) -> int | None:
+    if ts is None:
+        return None
+    return max(0, int((time.time() - ts) / 60))
+
+
+def _per_hour(count: int, since_ts: int | None) -> float | None:
+    if since_ts is None:
+        return None
+    hours = max((time.time() - since_ts) / 3600, 0.25)  # a brand-new listing is not infinite
+    return round(count / hours, 2)
 
 
 def _item_json(notification: PendingNotification, callback_base: str | None) -> dict[str, Any]:
@@ -111,6 +142,11 @@ def _item_json(notification: PendingNotification, callback_base: str | None) -> 
         "seller": item.seller_login,
         "seller_rating": item.seller_rating,
         "seller_reviews": item.seller_feedback_count,
+        # Demand: how many people have hearted it, and how fast that is happening.
+        "favourites": item.favourite_count,
+        "views": item.view_count,
+        "listed_minutes_ago": _minutes_since(item.photo_ts),
+        "favourites_per_hour": _per_hour(item.favourite_count, item.photo_ts),
         # Kept for consumers written against version 1. Both used to be Vinted deep links
         # that no longer resolve; they now point at the listing page, where the buttons are.
         "links": {

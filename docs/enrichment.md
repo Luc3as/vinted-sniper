@@ -49,6 +49,10 @@ cares about:
 | `items[].photo_urls` | Every photo, full size. Two or three are usually enough to identify a product. |
 | `items[].seller`, `seller_rating`, `seller_reviews` | Who is selling, 0–1 rating, review count. |
 | `items[].enrichment_url` | Where to post the verdict. `null` while the dashboard is off. |
+| `items[].favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour` | Demand. A listing twelve minutes old with six hearts is one the market has already noticed. |
+| `items[].market` | Where the price sits among everything this search has shown in the last 30 days (`null` until there are ten points): `n`, `p10`, `p25`, `median`, `p75`, `median_same_condition`, `this_percentile` (share of listings cheaper than this one), and `sells_fast_under` — the median price of listings that vanished within a day, the closest thing to a sold price the catalog offers. Built from every listing on the page, filters or not, at no extra requests. |
+| `items[].known_retail` | Retail prices earlier verdicts reported for this search, `[{model, price, currency, source}]`. Reuse instead of searching again when the product matches. |
+| `items[].buyer_feedback` | The buyer's thumbs on recent verdicts for this search: `[{title, condition, total_price, agent_score, agent_model, buyer_said}]`. What this particular buyer calls a deal. |
 
 ## What the agent posts back
 
@@ -94,9 +98,16 @@ listing as usual, then "Looks like: …" and the verdict in italics.
 
 ## Scoring guidance for the agent
 
-The score is yours to define, but the one the reference workflow uses weighs, in order:
-discount against retail (total price, buyer protection included); whether it is the product
-searched for at all; condition; seller history; and authenticity risk, which caps the score
-rather than merely lowering it — a suspiciously cheap "genuine" item is a 30, not an 85.
-A reverse image search is rarely needed: brand, title and one clear photo identify most
-products, and a text search for the retail price is a fraction of the cost.
+Retail is one leg of three. What a thing costs new says little about what it sells for
+used; `market` says that, and `sells_fast_under` says what people actually pay. The
+reference workflow scores, in order: the listing's percentile in its market (a listing
+under `p10` in good condition from a trusted seller is a bargain; under `p10` from a seller
+with no history and stock photos is a scam, not a discount); demand (`favourites_per_hour`);
+discount against retail; condition and seller history; and authenticity risk, which caps
+the score rather than merely lowering it. `buyer_feedback` tunes all of that to one
+person's taste. A reverse image search is rarely needed: brand, title and one clear photo
+identify most products.
+
+**Verdicts feed back.** A verdict's `model` and `retail_price` are cached per search and
+sent as `known_retail` next time. The 👍/👎 buttons under a Telegram alert become
+`buyer_feedback`.

@@ -27,7 +27,11 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
 from vinted_sniper.db.repo import Repo
-from vinted_sniper.deliver.telegram import CALLBACK_BLOCK_SELLER, CALLBACK_PAUSE_SEARCH
+from vinted_sniper.deliver.telegram import (
+    CALLBACK_BLOCK_SELLER,
+    CALLBACK_FEEDBACK,
+    CALLBACK_PAUSE_SEARCH,
+)
 from vinted_sniper.engine import health
 from vinted_sniper.log import get_logger
 
@@ -181,6 +185,28 @@ def build_dispatcher(repo: Repo) -> Dispatcher:
             f"Paused “{query.name}”. Resume it from the dashboard or /resume {query.id}.",
             show_alert=True,
         )
+
+    @dispatcher.callback_query(F.data.startswith(f"{CALLBACK_FEEDBACK}:"))
+    async def handle_feedback(callback: CallbackQuery) -> None:
+        if not await _from_paired_chat(repo, callback):
+            await callback.answer("This chat is not connected to vinted-sniper.", show_alert=True)
+            return
+        _, _, rest = (callback.data or "").partition(":")
+        raw_id, _, raw_rating = rest.partition(":")
+        item_id = _int_or_none(raw_id)
+        rating = _int_or_none(raw_rating)
+        if item_id is None or rating not in (1, -1):
+            await callback.answer("That button is out of date.")
+            return
+        if await repo.rate_verdict(item_id, rating):
+            log.info("telegram.verdict_rated", item_id=item_id, rating=rating)
+            await callback.answer(
+                "Noted — the agent will see this next time."
+                if rating > 0
+                else "Noted. Fewer of these."
+            )
+        else:
+            await callback.answer("That listing is no longer stored.")
 
     @dispatcher.message(Command("resume"))
     async def handle_resume(message: Message, command: CommandObject) -> None:

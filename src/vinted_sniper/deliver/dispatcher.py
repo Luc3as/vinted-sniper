@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from vinted_sniper.config import Settings
-from vinted_sniper.db.repo import Destination, Repo
+from vinted_sniper.db.repo import Destination, PendingNotification, Repo
 from vinted_sniper.deliver.base import Sender, SenderConfigError
 from vinted_sniper.deliver.discord import DiscordSender
 from vinted_sniper.deliver.ntfy import NtfySender
@@ -220,6 +220,19 @@ class Dispatcher:
 
         return len(result.delivered)
 
+    async def _agent_context(self, notification: PendingNotification) -> dict[str, Any]:
+        """The facts an outside agent should weigh: market position, known retail prices,
+        what the buyer thought of earlier verdicts on this search."""
+        item = notification.item
+        payable = item.total_price if item.total_price is not None else item.price
+        return {
+            "market": await self._repo.market_context(
+                notification.query_id, payable, item.condition
+            ),
+            "known_retail": await self._repo.known_retail(notification.query_id),
+            "buyer_feedback": await self._repo.feedback_examples(notification.query_id),
+        }
+
     async def notify_status(self, message: str) -> None:
         """Send an operational notice to whichever destinations asked for them."""
         for destination_id in await self._repo.status_destination_ids():
@@ -268,7 +281,10 @@ class Dispatcher:
                 )
             case "webhook":
                 return WebhookSender(
-                    config, client=self._client, callback_base=self._settings.dashboard_url
+                    config,
+                    client=self._client,
+                    callback_base=self._settings.dashboard_url,
+                    context=self._agent_context,
                 )
             case "ntfy":
                 return NtfySender(config, client=self._client)

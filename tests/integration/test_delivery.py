@@ -473,3 +473,76 @@ async def test_a_verdict_that_arrives_in_time_does_not_also_send_a_follow_up(
 
     batch = await repo.claim_batch(phone, 10)
     assert len(batch) == 1 and batch[0].kind == "new", "released, enriched, once"
+
+
+# --- Market memory and feedback ------------------------------------------------------
+
+
+async def test_the_webhook_carries_market_position_retail_and_the_buyers_past_verdicts(
+    repo: Repo, settings: Settings
+) -> None:
+    query = await a_search(repo)
+    # Thirty days of market: prices 10..49, uniformly.
+    observed = [
+        Item(
+            item_id=1000 + i,
+            tld="fr",
+            title=f"m{i}",
+            url=f"https://www.vinted.fr/items/{1000 + i}",
+            price=Decimal(10 + i),
+            total_price=Decimal(10 + i),
+            currency="EUR",
+            condition="Very good",
+        )
+        for i in range(40)
+    ]
+    await repo.observe_market(query.id, observed)
+    await repo.remember_retail(query.id, "Nike Air Max 90", Decimal("140"), "EUR", "nike.com")
+
+    brain = await repo.add_destination(
+        kind="webhook", name="n8n", config={"url": "https://example.test/n8n"}
+    )
+    cheap = listing(1)  # total 11.70 → among the cheapest
+    await repo.record_new_items(query, [cheap], [brain])
+    # An earlier verdict the buyer rated.
+    await repo.record_new_items(query, [listing(2)], [])
+    await repo.store_enrichment(2, EnrichmentIn(score=80, model="Nike Air Max 90"))
+    assert await repo.rate_verdict(2, 1)
+
+    endpoint = FakeEndpoint()
+    await make_dispatcher(repo, settings, endpoint).drain()
+    body = json.loads(endpoint.requests[-1].content)
+    sent = body["items"][0]
+
+    assert sent["market"]["n"] == 40
+    assert sent["market"]["median"] == 30.0
+    assert sent["market"]["this_percentile"] <= 5
+    assert sent["market"]["median_same_condition"] is None, "the listing states no condition"
+    same = await repo.market_context(query.id, Decimal("11.70"), "very good")
+    assert same is not None and same["median_same_condition"] == 30.0
+    assert sent["known_retail"][0]["model"] == "Nike Air Max 90"
+    assert sent["buyer_feedback"][0]["buyer_said"] == "good deal"
+    assert "favourites_per_hour" in sent
+
+
+async def test_a_verdict_with_a_retail_price_is_remembered_for_the_search(
+    repo: Repo,
+) -> None:
+    query = await a_search(repo)
+    await repo.record_new_items(query, [listing(1)], [])
+    await repo.store_enrichment(
+        1,
+        EnrichmentIn(
+            model="Nike Air Max 90", retail_price=Decimal("140"), retail_source="nike.com"
+        ),
+    )
+    known = await repo.known_retail(query.id)
+    assert known == [
+        {"model": "Nike Air Max 90", "price": 140.0, "currency": "EUR", "source": "nike.com"}
+    ]
+
+
+async def test_market_context_is_withheld_until_there_is_enough_of_it(repo: Repo) -> None:
+    query = await a_search(repo)
+    await repo.observe_market(query.id, [listing(1), listing(2)])
+    assert await repo.market_context(query.id, Decimal("11.70"), None) is None

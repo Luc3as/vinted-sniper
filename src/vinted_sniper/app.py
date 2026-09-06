@@ -256,6 +256,7 @@ class Application:
                 pruned = await repo.prune_items(self._settings.item_retention_days)
                 if pruned:
                     log.debug("housekeeping.pruned_items", count=pruned)
+                await repo.prune_market(max(self._settings.item_retention_days, 60))
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=HOUSEKEEPING_INTERVAL_S)
 

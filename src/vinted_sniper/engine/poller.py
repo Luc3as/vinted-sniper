@@ -144,6 +144,8 @@ class Poller:
     async def _check(self) -> None:
         items = await self._client.search(self.query.tld, self.query.params)
         state = await self._repo.get_state(self.query.id)
+        # Every listing on the page is a price point, filters or not. Costs nothing.
+        await self._repo.observe_market(self.query.id, items)
 
         candidates: list[Item] = []
         for item in items:

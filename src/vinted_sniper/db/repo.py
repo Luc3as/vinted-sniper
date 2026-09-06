@@ -22,6 +22,13 @@ from vinted_sniper.vinted.models import Item
 # --- Row types ---------------------------------------------------------------------
 
 
+# Market memory: a listing is "gone" once the search has had two hours of checks without
+# seeing it, "sold fast" if it was gone within a day, and a percentile needs a few points.
+_GONE_GRACE_S = 7200
+_SOLD_FAST_S = 86_400
+_MIN_GROUP = 5
+
+
 @dataclass(frozen=True, slots=True)
 class Query:
     """A saved search."""
@@ -620,6 +627,22 @@ class Repo:
             )
             if cursor.rowcount == 0:
                 return False
+            if verdict.model and verdict.retail_price:
+                # The next listing of this product gets the same number for free.
+                await conn.execute(
+                    "INSERT INTO retail_prices (query_id, model, price, currency, source, "
+                    "updated_at) SELECT query_id, ?, ?, currency, ?, ? FROM items "
+                    "WHERE item_id = ? AND query_id IS NOT NULL "
+                    "ON CONFLICT(query_id, model) DO UPDATE SET price = excluded.price, "
+                    "source = excluded.source, updated_at = excluded.updated_at",
+                    (
+                        verdict.model.strip()[:200],
+                        float(verdict.retail_price),
+                        verdict.retail_source,
+                        now,
+                        item_id,
+                    ),
+                )
             released = await conn.execute(
                 "UPDATE outbox SET next_attempt_at = ? "
                 "WHERE item_id = ? AND status = 'pending' AND next_attempt_at > ?",
@@ -694,6 +717,154 @@ class Repo:
                     ],
                 )
         return len(drops)
+
+    # --- Market memory -------------------------------------------------------------
+
+    async def observe_market(self, query_id: int, items: list[Item]) -> None:
+        """Note every listing on the page, filters or not: it is a price point either way."""
+        if not items:
+            return
+        now = int(time.time())
+        await self._db.execute_many(
+            "INSERT INTO market (item_id, query_id, price, total_price, currency, size, "
+            "condition, brand, photo_ts, favourite_count, view_count, first_seen_at, "
+            "last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(item_id, query_id) DO UPDATE SET price = excluded.price, "
+            "total_price = excluded.total_price, favourite_count = excluded.favourite_count, "
+            "view_count = excluded.view_count, last_seen_at = excluded.last_seen_at",
+            [
+                (
+                    item.item_id,
+                    query_id,
+                    float(item.price) if item.price is not None else None,
+                    float(item.total_price) if item.total_price is not None else None,
+                    item.currency,
+                    item.size,
+                    item.condition,
+                    item.brand,
+                    item.photo_ts,
+                    item.favourite_count,
+                    item.view_count,
+                    now,
+                    now,
+                )
+                for item in items
+            ],
+        )
+
+    async def market_context(
+        self, query_id: int, payable: Decimal | None, condition: str | None, *, days: int = 30
+    ) -> dict[str, Any] | None:
+        """Where a price sits among everything this search has seen lately.
+
+        Percentiles of the total price over the window, the same for listings in the same
+        condition, this listing's own percentile, and the price under which listings tend
+        to vanish within a day — the closest thing to a sold price the catalog offers.
+        """
+        since = int(time.time()) - days * 86_400
+        rows = await self._db.fetch_all(
+            "SELECT COALESCE(total_price, price) AS p, condition, first_seen_at, last_seen_at "
+            "FROM market WHERE query_id = ? AND last_seen_at >= ? "
+            "AND COALESCE(total_price, price) IS NOT NULL",
+            (query_id, since),
+        )
+        prices = sorted(float(row["p"]) for row in rows)
+        if len(prices) < 10:  # noqa: PLR2004 - fewer points and percentiles mislead
+            return None
+
+        def pct(values: list[float], q: float) -> float:
+            return values[min(len(values) - 1, int(q * len(values)))]
+
+        same = sorted(
+            float(row["p"])
+            for row in rows
+            if condition and (row["condition"] or "").lower() == condition.lower()
+        )
+        now = int(time.time())
+        # A listing that stopped appearing within a day, while the search kept being
+        # checked, most likely sold. The median price of those is what the market pays.
+        gone_fast = sorted(
+            float(row["p"])
+            for row in rows
+            if row["last_seen_at"] < now - _GONE_GRACE_S
+            and row["last_seen_at"] - row["first_seen_at"] < _SOLD_FAST_S
+        )
+        context: dict[str, Any] = {
+            "n": len(prices),
+            "days": days,
+            "p10": round(pct(prices, 0.10), 2),
+            "p25": round(pct(prices, 0.25), 2),
+            "median": round(pct(prices, 0.50), 2),
+            "p75": round(pct(prices, 0.75), 2),
+            "median_same_condition": (
+                round(pct(same, 0.5), 2) if len(same) >= _MIN_GROUP else None
+            ),
+            "sells_fast_under": (
+                round(pct(gone_fast, 0.5), 2) if len(gone_fast) >= _MIN_GROUP else None
+            ),
+            "this_percentile": None,
+        }
+        if payable is not None:
+            below = sum(1 for p in prices if p < float(payable))
+            context["this_percentile"] = round(100 * below / len(prices))
+        return context
+
+    async def prune_market(self, older_than_days: int) -> int:
+        cutoff = int(time.time()) - older_than_days * 86_400
+        return await self._db.execute("DELETE FROM market WHERE last_seen_at < ?", (cutoff,))
+
+    async def remember_retail(
+        self, query_id: int, model: str, price: Decimal, currency: str | None, source: str | None
+    ) -> None:
+        await self._db.execute(
+            "INSERT INTO retail_prices (query_id, model, price, currency, source, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(query_id, model) DO UPDATE SET "
+            "price = excluded.price, currency = excluded.currency, source = excluded.source, "
+            "updated_at = excluded.updated_at",
+            (query_id, model.strip()[:200], float(price), currency, source, int(time.time())),
+        )
+
+    async def known_retail(self, query_id: int, *, limit: int = 8) -> list[dict[str, Any]]:
+        rows = await self._db.fetch_all(
+            "SELECT model, price, currency, source FROM retail_prices WHERE query_id = ? "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (query_id, limit),
+        )
+        return [dict(row) for row in rows]
+
+    async def rate_verdict(self, item_id: int, rating: int) -> bool:
+        row = await self._db.fetch_one("SELECT query_id FROM items WHERE item_id = ?", (item_id,))
+        if row is None:
+            return False
+        await self._db.execute(
+            "INSERT INTO verdict_feedback (item_id, query_id, rating, rated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(item_id) DO UPDATE SET rating = excluded.rating, "
+            "rated_at = excluded.rated_at",
+            (item_id, row["query_id"], rating, int(time.time())),
+        )
+        return True
+
+    async def feedback_examples(self, query_id: int, *, limit: int = 6) -> list[dict[str, Any]]:
+        """What this buyer thought of recent verdicts on this search, for the agent."""
+        rows = await self._db.fetch_all(
+            "SELECT i.title, i.condition, COALESCE(i.total_price, i.price) AS paid, i.currency, "
+            "i.enrich_score, i.enrich_model, f.rating FROM verdict_feedback f "
+            "JOIN items i ON i.item_id = f.item_id WHERE f.query_id = ? "
+            "ORDER BY f.rated_at DESC LIMIT ?",
+            (query_id, limit),
+        )
+        return [
+            {
+                "title": row["title"],
+                "condition": row["condition"],
+                "total_price": row["paid"],
+                "currency": row["currency"],
+                "agent_score": row["enrich_score"],
+                "agent_model": row["enrich_model"],
+                "buyer_said": "good deal" if row["rating"] > 0 else "not for me",
+            }
+            for row in rows
+        ]
 
     async def typical_listing_gap_s(self, query_id: int) -> int | None:
         """How often this search normally sees a new listing, from the listing times we
