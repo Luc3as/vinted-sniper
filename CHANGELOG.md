@@ -58,6 +58,9 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 - The Docker image now includes the `impersonate` extra.
 
 ### Changed
+- New README (English with a Slovak section) and an original logo (`docs/media/logo/`, light and
+  dark, mark and wordmark); the mark is inlined in the dashboard header and favicon. Upstream's
+  README is kept as `README.upstream.md`.
 - `filters.check()` is a pipeline of small gates.
 - The webhook payload gained additive fields at contract version 1: `event`,
   `previous_total_price`, `photo_urls`, `seller_reviews`, `enrichment_url`, `search_id`.
