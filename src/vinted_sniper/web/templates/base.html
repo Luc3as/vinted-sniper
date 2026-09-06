@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}vinted-sniper{% endblock %}</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Ccircle cx='128' cy='128' r='104' fill='none' stroke='%230B8F97' stroke-width='18'/%3E%3Cg stroke='%230B8F97' stroke-width='18' stroke-linecap='round'%3E%3Cpath d='M128 6v34M128 216v34M6 128h34M216 128h34'/%3E%3C/g%3E%3Cg transform='translate(128 132) rotate(-32) scale(.92)'%3E%3Cpath d='M-38-60h64a12 12 0 0 1 12 12v74l-44 44l-44-44v-74a12 12 0 0 1 12-12z' fill='none' stroke='%2316181D' stroke-width='20' stroke-linejoin='round'/%3E%3Cpath d='M-22 12h44' stroke='%230B8F97' stroke-width='20' stroke-linecap='round'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%230B8F97' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='50' cy='50' r='44' stroke-width='8'/%3E%3Cpath d='M50 0V9M50 91v9M0 50h9M91 50h9' stroke-width='8'/%3E%3Cpath d='M50 44 22 62q-4 3-1 8h58q3-5-1-8z' stroke-width='8'/%3E%3Cpath d='M50 44v-6' stroke-width='8'/%3E%3Ccircle cx='50' cy='31' r='7' stroke-width='7'/%3E%3C/g%3E%3C/svg%3E">
   <style>
     /* --- Tokens. Everything below reads from these, so both colour schemes stay in step. */
     :root {
@@ -239,15 +239,13 @@
 <body>
   <a class="skip" href="#main">Skip to content</a>
   <header>
-    <div class="brand"><a href="/"><svg class="mark" viewBox="0 0 256 256" width="28" height="28" aria-hidden="true">
-        <circle cx="128" cy="128" r="104" fill="none" stroke="var(--accent)" stroke-width="14"/>
-        <g stroke="var(--accent)" stroke-width="14" stroke-linecap="round"><path d="M128 6v34"/><path d="M128 216v34"/><path d="M6 128h34"/><path d="M216 128h34"/></g>
-        <g transform="translate(128 132) rotate(-32) scale(.92)">
-          <path d="M-38-60h64a12 12 0 0 1 12 12v74l-44 44l-44-44v-74a12 12 0 0 1 12-12z" fill="none" stroke="currentColor" stroke-width="16" stroke-linejoin="round"/>
-          <circle cx="0" cy="-34" r="8" fill="none" stroke="currentColor" stroke-width="9"/>
-          <path d="M-22 12h44" stroke="var(--accent)" stroke-width="16" stroke-linecap="round"/>
-        </g>
-      </svg><span>vinted-sniper</span></a></div>
+    <div class="brand"><a href="/"><svg class="mark" viewBox="0 0 100 100" width="26" height="26" aria-hidden="true"
+        fill="none" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M50 40 9 66Q3 70 7 76h86q4-6-2-10z" stroke="currentColor" stroke-width="8"/>
+        <path d="M50 40v-9" stroke="currentColor" stroke-width="8"/>
+        <circle cx="50" cy="20" r="10.5" stroke="var(--accent)" stroke-width="8"/>
+        <circle cx="50" cy="20" r="3" fill="var(--accent)"/>
+      </svg><span>vinted<b style="color:var(--accent);font-weight:800">sniper</b></span></a></div>
     <nav aria-label="Sections">
       <a href="/" {% if nav == 'searches' %}aria-current="page"{% endif %}>Searches</a>
       <a href="/history" {% if nav == 'history' %}aria-current="page"{% endif %}>History</a>

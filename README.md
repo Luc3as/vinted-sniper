@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/logo/wordmark-dark.svg">
-  <img src="docs/media/logo/wordmark-light.svg" alt="vinted-sniper — watch · judge · pounce" width="620">
+  <img src="docs/media/logo/wordmark-light.svg" alt="vinted-sniper — watch · judge · pounce" width="640">
 </picture>
 
 *[Slovenská verzia nižšie ↓](#slovensky)*
@@ -167,7 +167,8 @@ uv run ruff check src tests && uv run mypy src
 MIT, as upstream. Not affiliated with Vinted; it reads public listings anonymously and never
 logs in, buys, or lists anything — it cannot buy on your behalf and never will — Vinted's terms prohibit automated access, so running it is your call
 ([docs/legal.md](docs/legal.md)). The bug fixes here are offered back to
-[jasp-nerd/vinted-sniper](https://github.com/jasp-nerd/vinted-sniper); the logo is this fork's own.
+[jasp-nerd/vinted-sniper](https://github.com/jasp-nerd/vinted-sniper). The logo and wordmark are this fork's own and
+are **not** MIT — see [docs/media/logo/LICENSE.md](docs/media/logo/LICENSE.md).
 
 ---
 

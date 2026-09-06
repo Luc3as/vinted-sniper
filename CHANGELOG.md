@@ -58,6 +58,7 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 - The Docker image now includes the `impersonate` extra.
 
 ### Changed
+- New identity: a coat hanger whose hook is a target ring (mark), the same inside a scope (icon/favicon), and a wordmark set in Outfit converted to paths. Logo files carry their own licence (all rights reserved; code stays MIT).
 - New README (English with a Slovak section) and an original logo (`docs/media/logo/`, light and
   dark, mark and wordmark); the mark is inlined in the dashboard header and favicon. Upstream's
   README is kept as `README.upstream.md`.
