@@ -34,6 +34,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import SecretStr
 
+from vinted_sniper import backup
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine import filters, health, quiet
@@ -165,6 +166,19 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             matches_query=verdict.matches_query,
         )
         return JSONResponse({"ok": True})
+
+    @app.get("/api/export")
+    async def api_export(_: None = guard) -> JSONResponse:
+        """Searches, destinations and routes — the part you typed — as one JSON document."""
+        return JSONResponse(await backup.export_config(repo))
+
+    @app.post("/api/import")
+    async def api_import(document: dict[str, Any], _: None = guard) -> JSONResponse:
+        try:
+            added = await backup.import_config(repo, document)
+        except (ValueError, KeyError, urls.InvalidSearchURLError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return JSONResponse({"ok": True, "added": added})
 
     @app.get("/api/health")
     async def api_health(_: None = guard) -> JSONResponse:

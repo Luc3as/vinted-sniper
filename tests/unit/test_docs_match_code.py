@@ -43,7 +43,18 @@ def test_documented_settings_all_exist() -> None:
 
 @pytest.mark.parametrize(
     "command",
-    ["run", "check", "watch", "searches", "unwatch", "destination", "status", "heartbeat"],
+    [
+        "run",
+        "check",
+        "watch",
+        "searches",
+        "unwatch",
+        "destination",
+        "status",
+        "heartbeat",
+        "export",
+        "import",
+    ],
 )
 def test_commands_named_in_the_docs_exist(command: str) -> None:
     parser = build_parser()

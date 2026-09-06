@@ -89,7 +89,7 @@ ignore = [
 # A route table and a command table are long and branchy by nature. Splitting them to
 # satisfy a complexity metric would scatter related handlers across files for no gain.
 "src/vinted_sniper/web/server.py" = ["C901", "PLR0915", "PLR0917", "PLR0913"]
-"src/vinted_sniper/cli.py" = ["C901", "PLR0911"]
+"src/vinted_sniper/cli.py" = ["C901", "PLR0911", "PLR0912"]
 # One send attempt has several distinct outcomes — delivered, paused, gone, retry, gave
 # up — and each needs its own early exit. Splitting them would hide the flow, not clarify it.
 "src/vinted_sniper/deliver/dispatcher.py" = ["C901", "PLR0911"]

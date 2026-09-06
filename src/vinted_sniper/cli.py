@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import time
 from collections.abc import Sequence
 from decimal import Decimal, InvalidOperation
 
-from vinted_sniper import __version__, app, log
+from vinted_sniper import __version__, app, backup, log
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
 from vinted_sniper.db import Database, apply_pending
 from vinted_sniper.db.repo import Repo
@@ -34,6 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("run", help="Start watching. This is what the container runs.")
     sub.add_parser("migrate", help="Create or update the database, then exit.")
     sub.add_parser("status", help="Show how each search is doing.")
+
+    sub.add_parser("export", help="Print searches, destinations and routes as JSON.")
+    imp = sub.add_parser("import", help="Add searches, destinations and routes from an export.")
+    imp.add_argument("file", help="Path to a JSON file produced by 'export', or - for stdin.")
     sub.add_parser("heartbeat", help="Exit 0 if the app is alive. Used by the health check.")
 
     check = sub.add_parser(
@@ -395,6 +400,35 @@ async def _cmd_heartbeat(settings: Settings) -> int:
         return 0 if await health.is_alive(Repo(db)) else 1
 
 
+async def _cmd_export(settings: Settings) -> int:
+    async with Database(settings.db_path) as db:
+        await apply_pending(db)
+        document = await backup.export_config(Repo(db))
+    print(json.dumps(document, indent=2, ensure_ascii=False))
+    return 0
+
+
+async def _cmd_import(settings: Settings, path: str) -> int:
+    raw = sys.stdin.read() if path == "-" else open(path, encoding="utf-8").read()  # noqa: ASYNC230, SIM115
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"not JSON: {exc}", file=sys.stderr)
+        return 1
+    async with Database(settings.db_path) as db:
+        await apply_pending(db)
+        try:
+            added = await backup.import_config(Repo(db), document)
+        except (ValueError, KeyError, urls.InvalidSearchURLError) as exc:
+            print(f"import failed: {exc}", file=sys.stderr)
+            return 1
+    print(
+        f"Added {added['destinations']} destination(s), {added['searches']} search(es), "
+        f"{added['routes']} route(s). Existing ones were left alone."
+    )
+    return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     settings = Settings()
     log.configure(level=settings.log_level, fmt=settings.log_format)
@@ -421,6 +455,10 @@ async def _run(args: argparse.Namespace) -> int:
             return await _cmd_pair_telegram(settings, args)
         case "status":
             return await _cmd_status(settings)
+        case "export":
+            return await _cmd_export(settings)
+        case "import":
+            return await _cmd_import(settings, args.file)
         case "heartbeat":
             return await _cmd_heartbeat(settings)
         case unknown:

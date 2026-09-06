@@ -99,6 +99,8 @@ vinted-sniper pair-telegram            print a link that connects a Telegram cha
 vinted-sniper status                   how each search is doing
 vinted-sniper migrate                  create or update the database, then exit
 vinted-sniper heartbeat                exit 0 if the app is alive (the health check)
+vinted-sniper export                   searches, destinations and routes as JSON
+vinted-sniper import <file>            add what an export contains (existing entries untouched)
 ```
 
 Options for `watch`:
