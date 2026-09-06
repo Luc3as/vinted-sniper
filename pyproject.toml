@@ -113,7 +113,10 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# tests/ui is deliberately not collected by default: it needs a live dashboard, and
+# pytest-playwright's sync fixtures break pytest-asyncio tests that run after them in
+# the same session. Run it explicitly: pytest tests/ui
+testpaths = ["tests/unit", "tests/integration"]
 addopts = "-q --strict-markers --strict-config"
 filterwarnings = ["error"]
 

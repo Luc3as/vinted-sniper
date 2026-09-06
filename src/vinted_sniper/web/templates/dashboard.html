@@ -1,16 +1,6 @@
 {% extends "base.html" %}
-{% block title %}vinted-sniper{% endblock %}
-{% macro icon(name) -%}
-{%- if name == 'edit' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-{%- elif name == 'pause' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-{%- elif name == 'play' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 4l14 8-14 8Z"/></svg>
-{%- elif name == 'trash' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>
-{%- elif name == 'clone' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
-{%- elif name == 'external' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>
-{%- elif name == 'download' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
-{%- endif -%}
-{%- endmacro %}
-{% macro help(text) -%}<button type="button" class="help" data-tip="{{ text }}" aria-label="{{ text }}">?</button>{%- endmacro %}
+{% block title %}Searches · vinted-sniper{% endblock %}
+{% from "_macros.html" import icon, help %}
 
 {% block header_extra %}
   <span class="status"><span class="dot {{ '' if snapshot.alive else 'off' }}" aria-hidden="true"></span>
@@ -27,7 +17,7 @@
 {% block content %}
 <section id="searches">
   <div class="section-head">
-    <h2>Searches</h2>
+    <h2>{{ icon('search') }}Searches</h2>
     <span class="lede">Each row is one Vinted search being checked on a timer. New listings that pass its filters become alerts.</span>
   </div>
   {% if not snapshot.searches %}
@@ -41,19 +31,19 @@
   {% else %}
   <div class="card">
     <div class="table-wrap">
-    <table id="searches">
+    <table id="searches-table">
       <tr>
         <th>Search</th><th>Site</th>
         <th>State {{ help('ok = checking normally · starting = no check finished yet · cooling = Vinted refused a request, every search on that site waits · stale = no new listing for far longer than usual · failing = the last check errored · paused = you paused it') }}</th>
-        <th>Last checked</th><th>Next check</th>
-        <th>Newest listing {{ help('When the newest listing Vinted returned for this search was posted. If it stops moving while the site is busy, something is wrong.') }}</th>
+        <th>Checked</th><th>Next</th>
+        <th>Newest {{ help('When the newest listing Vinted returned for this search was posted. If it stops moving while the site is busy, something is wrong.') }}</th>
         <th>Found {{ help('Listings this search has recorded since it was created, including the first-check seed.') }}</th><th></th>
       </tr>
       {% for search in snapshot.searches %}
       {% set q = queries[search.query_id] %}
       <tr data-query-id="{{ search.query_id }}">
         <td>
-          <span data-field="name" style="font-weight:600">{{ search.name }}</span>
+          <span data-field="name" class="name">{{ search.name }}</span>
           <div class="muted">
             every {{ q.poll_interval_s }}s
             {% if q.max_total_price %}· ≤ {{ q.max_total_price }} total{% endif %}
@@ -69,29 +59,33 @@
             {{ (search.last_error or '')[:110] }}
           </div>
         </td>
-        <td class="muted">vinted.{{ search.tld }}</td>
+        <td class="muted nowrap">vinted.{{ search.tld }}</td>
         <td><span class="pill {{ search.state }}" data-field="state">{{ search.state }}</span></td>
-        <td class="muted" data-field="last" data-ts="{{ search.last_success_at or '' }}">
+        <td class="muted nowrap" data-field="last" data-ts="{{ search.last_success_at or '' }}">
           {% if search.last_success_at %}{{ now - search.last_success_at }}s ago{% else %}never{% endif %}
         </td>
-        <td class="muted" data-field="next" data-ts="{{ search.next_check_at or '' }}">
+        <td class="muted nowrap" data-field="next" data-ts="{{ search.next_check_at or '' }}">
           {% if search.next_check_at %}{% if search.next_check_at > now %}in {{ search.next_check_at - now }}s{% else %}due{% endif %}{% else %}—{% endif %}
         </td>
-        <td class="muted" data-field="newest" data-ts="{{ search.newest_listing_at or '' }}">
+        <td class="muted nowrap" data-field="newest" data-ts="{{ search.newest_listing_at or '' }}">
           {% if search.newest_listing_at %}{{ now - search.newest_listing_at }}s ago{% else %}—{% endif %}
         </td>
         <td class="muted" data-field="found">{{ search.items_total }}</td>
         <td class="actions">
-          <button class="quiet icon" type="button" data-edit="{{ search.query_id }}" aria-expanded="false" title="Change name, timing and filters">{{ icon('edit') }} Edit</button>
+          <button class="quiet iconbtn" type="button" data-edit="{{ search.query_id }}" aria-expanded="false"
+                  aria-label="Edit “{{ search.name }}”" data-tip="Edit — change name, timing and filters">{{ icon('edit') }}</button>
           <form method="post" action="/searches/{{ search.query_id }}/pause" class="inline">
             <input type="hidden" name="paused" value="{{ '0' if search.paused else '1' }}">
-            <button class="quiet icon" type="submit" title="{{ 'Start checking again' if search.paused else 'Stop checking; nothing is deleted' }}">
-              {{ icon('play') if search.paused else icon('pause') }} {{ 'Resume' if search.paused else 'Pause' }}
+            <button class="quiet iconbtn" type="submit"
+                    aria-label="{{ 'Resume' if search.paused else 'Pause' }} “{{ search.name }}”"
+                    data-tip="{{ 'Resume — start checking again' if search.paused else 'Pause — stop checking; nothing is deleted' }}">
+              {{ icon('play') if search.paused else icon('pause') }}
             </button>
           </form>
           <form method="post" action="/searches/{{ search.query_id }}/delete" class="inline"
                 data-confirm="Delete “{{ search.name }}”? Its recorded listings and market history go with it. Pausing keeps them.">
-            <button class="danger icon" type="submit" title="Remove this search and its history">{{ icon('trash') }} Delete</button>
+            <button class="danger iconbtn" type="submit" aria-label="Delete “{{ search.name }}”"
+                    data-tip="Delete — remove this search and its history">{{ icon('trash') }}</button>
           </form>
         </td>
       </tr>
@@ -181,9 +175,9 @@
   {% endif %}
 
   <div class="card">
-    <h3>Add a search</h3>
+    <h3>{{ icon('plus') }}Add a search</h3>
     <form method="post" action="/searches">
-      <div class="row" style="justify-content:space-between">
+      <div class="row" style="justify-content:space-between;margin-bottom:.45rem">
         <label for="url" style="margin:0">Vinted search URL {{ help('On vinted.sk (or any country site) set your filters — brand, size, price, condition — and copy the address bar once results are showing. Tracking parameters are removed automatically.') }}</label>
         {% if builder_enabled %}
         <button type="button" class="quiet" id="builder-toggle" aria-expanded="false">Build a search instead ▾</button>
@@ -329,7 +323,7 @@
 </section>
 <section id="destinations">
   <div class="section-head">
-    <h2>Destinations</h2>
+    <h2>{{ icon('send') }}Destinations</h2>
     <span class="lede">Where alerts go. Each search chooses which of these it feeds.</span>
   </div>
   {% if destinations %}
@@ -375,12 +369,47 @@
           </form>
         </td>
         <td class="actions">
-          {% if destination.active %}
-          <form method="post" action="/destinations/{{ destination.id }}/delete" class="inline"
-                data-confirm="Remove “{{ destination.name }}”? Searches routed to it will stop alerting there.">
-            <button class="danger icon" type="submit">{{ icon('trash') }} Remove</button>
+          <button class="quiet iconbtn" type="button" data-edit="d{{ destination.id }}" aria-expanded="false"
+                  aria-label="Edit “{{ destination.name }}”" data-tip="Edit — change name and target">{{ icon('edit') }}</button>
+          {% if not destination.active %}
+          <form method="post" action="/destinations/{{ destination.id }}/enable" class="inline">
+            <button class="quiet iconbtn" type="submit" aria-label="Enable “{{ destination.name }}”"
+                    data-tip="Enable — start delivering here again">{{ icon('play') }}</button>
           </form>
           {% endif %}
+          <form method="post" action="/destinations/{{ destination.id }}/delete" class="inline"
+                data-confirm="Delete “{{ destination.name }}” for good? Searches routed to it will stop alerting there.">
+            <button class="danger iconbtn" type="submit" aria-label="Delete “{{ destination.name }}”"
+                    data-tip="Delete this destination">{{ icon('trash') }}</button>
+          </form>
+        </td>
+      </tr>
+      <tr class="edit-row" id="edit-d{{ destination.id }}" hidden>
+        <td colspan="7">
+          <form method="post" action="/destinations/{{ destination.id }}/edit">
+            <h3>Edit “{{ destination.name }}”</h3>
+            <div class="grid">
+              <div>
+                <label for="d-name-{{ destination.id }}">Name</label>
+                <input type="text" id="d-name-{{ destination.id }}" name="name" value="{{ destination.name }}">
+              </div>
+              <div>
+                <label for="d-target-{{ destination.id }}">
+                  {% if destination.kind == 'telegram' %}Chat id
+                  {% elif destination.kind == 'discord' %}Discord webhook URL
+                  {% elif destination.kind == 'ntfy' %}ntfy topic
+                  {% else %}Webhook URL{% endif %}
+                </label>
+                <input type="text" id="d-target-{{ destination.id }}" name="target"
+                       value="{{ destination.config.get('chat_id') or destination.config.get('webhook_url') or destination.config.get('url') or destination.config.get('topic') or '' }}">
+              </div>
+            </div>
+            <div class="row" style="margin-top:.8rem">
+              <button type="submit">Save changes</button>
+              <button type="button" class="quiet" data-edit="d{{ destination.id }}">Cancel</button>
+              <span class="muted">The type ({{ destination.kind }}) cannot change — add a new destination instead.</span>
+            </div>
+          </form>
         </td>
       </tr>
       {% endfor %}
@@ -392,7 +421,7 @@
   {% endif %}
 
   <div class="card">
-    <h3>Add a destination</h3>
+    <h3>{{ icon('plus') }}Add a destination</h3>
     <form method="post" action="/destinations">
       <div class="grid">
         <div>
@@ -450,131 +479,6 @@
     — a backup of everything you typed (not the listings). Restore with <code>vinted-sniper import file.json</code>.
   </p>
 </section>
-<section id="recent">
-  <div class="section-head">
-    <h2>Recently found</h2>
-    <span class="lede">The last 25 listings any search recorded. Badges: <span class="tag drop">📉 dropped</span> price fell since found · <span class="tag score">🤖 87</span> agent’s deal score (hover for its one-line verdict).</span>
-  </div>
-  {% if not recent %}
-  <div class="card"><div class="empty"><strong>Nothing recorded yet.</strong> The first check of each search will fill this in.</div></div>
-  {% else %}
-  <div class="listing-grid">
-    {% for row in recent %}
-    <article class="listing">
-      {% if row.photos %}
-      <button type="button" class="photo" data-photos='{{ row.photos | tojson }}'
-              aria-label="View {{ row.photos | length }} photo{{ 's' if row.photos | length > 1 }} of {{ row.title }}">
-        <img src="{{ row.photos[0] }}" alt="" loading="lazy">
-        {% if row.photos | length > 1 %}
-        <span class="count">{{ row.photos | length }} ▣</span>
-        {% endif %}
-      </button>
-      {% else %}
-      <div class="no-photo">no photo</div>
-      {% endif %}
-      <div class="body">
-        <a class="title" href="{{ row.url }}" target="_blank" rel="noreferrer"
-           title="{{ row.title }}">{{ row.title }}</a>
-        <div class="price">
-          <strong>{{ row.price or '—' }}</strong>
-          {% if row.total_price %}<span class="muted">{{ row.total_price }} total</span>{% endif %}
-          {% if row.price_dropped %}<span class="tag drop">📉 dropped</span>{% endif %}
-          {% if row.deal_score is not none %}
-          <span class="tag score {{ 'hot' if row.deal_score >= 75 else ('cold' if row.deal_score < 40 else '') }}"
-                title="{{ row.verdict or '' }}">🤖 {{ row.deal_score }}</span>
-          {% endif %}
-        </div>
-        {% if row.brand or row.size or row.condition %}
-        <div class="tags">
-          {% if row.brand %}<span class="tag brand">{{ row.brand }}</span>{% endif %}
-          {% if row.size %}<span class="tag">{{ row.size }}</span>{% endif %}
-          {% if row.condition %}<span class="tag">{{ row.condition }}</span>{% endif %}
-        </div>
-        {% endif %}
-        {% if row.seller_login or row.seller_stars or row.favourite_count %}
-        <div class="meta">
-          {% if row.seller_login %}
-            {% if row.seller_url %}
-            <a href="{{ row.seller_url }}" target="_blank" rel="noreferrer">@{{ row.seller_login }}</a>
-            {% else %}<span>@{{ row.seller_login }}</span>{% endif %}
-          {% endif %}
-          {% if row.seller_stars %}
-          <span>⭐ {{ row.seller_stars }}{% if row.seller_feedback_count %} ({{ row.seller_feedback_count }}){% endif %}</span>
-          {% endif %}
-          {% if row.favourite_count %}<span>♥ {{ row.favourite_count }}</span>{% endif %}
-        </div>
-        {% endif %}
-        <div class="meta foot">
-          <span class="search-name">{{ row.query_name or '—' }}</span>
-          <span class="age">{{ row.age }}</span>
-        </div>
-      </div>
-    </article>
-    {% endfor %}
-  </div>
-  {% endif %}
-</section>
-
-{% if recent %}
-<div class="lightbox" id="lightbox" hidden role="dialog" aria-modal="true"
-     aria-label="Listing photos">
-  <button type="button" class="lb-close" aria-label="Close">×</button>
-  <button type="button" class="lb-prev" aria-label="Previous photo">‹</button>
-  <img id="lb-img" src="" alt="Listing photo">
-  <button type="button" class="lb-next" aria-label="Next photo">›</button>
-  <span class="lb-counter" id="lb-counter"></span>
-</div>
-<script>
-(() => {
-  "use strict";
-  const box = document.getElementById("lightbox");
-  const img = document.getElementById("lb-img");
-  const counter = document.getElementById("lb-counter");
-  const prev = box.querySelector(".lb-prev");
-  const next = box.querySelector(".lb-next");
-  let photos = [];
-  let index = 0;
-
-  function show(i) {
-    index = (i + photos.length) % photos.length;
-    img.src = photos[index];
-    counter.textContent = `${index + 1} / ${photos.length}`;
-    const single = photos.length < 2;
-    prev.hidden = next.hidden = counter.hidden = single;
-  }
-
-  function close() {
-    box.hidden = true;
-    img.src = "";
-    document.body.style.overflow = "";
-  }
-
-  for (const button of document.querySelectorAll(".listing .photo")) {
-    button.addEventListener("click", () => {
-      photos = JSON.parse(button.dataset.photos);
-      if (!photos.length) return;
-      box.hidden = false;
-      document.body.style.overflow = "hidden"; // the page should not scroll underneath
-      show(0);
-    });
-  }
-
-  box.querySelector(".lb-close").addEventListener("click", close);
-  prev.addEventListener("click", () => show(index - 1));
-  next.addEventListener("click", () => show(index + 1));
-  box.addEventListener("click", (event) => {
-    if (event.target === box) close();
-  });
-  document.addEventListener("keydown", (event) => {
-    if (box.hidden) return;
-    if (event.key === "Escape") close();
-    if (event.key === "ArrowLeft") show(index - 1);
-    if (event.key === "ArrowRight") show(index + 1);
-  });
-})();
-</script>
-{% endif %}
-
 {% if builder_enabled %}
 <script>
 (() => {
@@ -894,7 +798,7 @@
   }
 
   // Live status: the table redraws itself from /api/health, and the relative times tick.
-  const table = document.getElementById("searches");
+  const table = document.getElementById("searches-table");
   if (!table) return;
   const header = document.querySelector('[data-field="header-status"]');
 

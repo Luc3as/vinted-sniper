@@ -9,7 +9,7 @@
 
 {% block content %}
 <section>
-  <div class="section-head"><h2>How it works</h2><span class="lede">See it first. Know if it’s worth it. Two minutes, no jargon.</span></div>
+  <div class="section-head"><h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01"/><path d="M11 12h1v4h1"/></svg>How it works</h2><span class="lede">See it first. Know if it’s worth it. Two minutes, no jargon.</span></div>
   <div class="card">
     <p>You give it a Vinted search — the address bar after you set your filters. Every few minutes it asks Vinted for that search’s newest listings, exactly as a browser would, without logging in. Anything new that passes your filters is sent to your <strong>destinations</strong> (Telegram, Discord, ntfy, a webhook). The first check of a new search only records what is already there, so you are not flooded.</p>
     <p>Vinted does not like being asked too often. The app paces itself (at most {{ settings_view.site_requests_per_minute }} requests a minute per country site, across all searches), and when Vinted refuses a request every search on that site backs off together — you will see <span class="pill cooling">cooling</span> in the table and get a notice if a destination has health notices on. That is deliberate, not a fault.</p>
@@ -17,7 +17,7 @@
 </section>
 
 <section>
-  <div class="section-head"><h2>Words on the Searches page</h2></div>
+  <div class="section-head"><h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2Z"/><path d="M4 19a2 2 0 0 0 2 2h13"/></svg>Words on the Searches page</h2></div>
   <div class="card">
     <dl class="glossary">
       <dt>Total price</dt>
@@ -41,7 +41,7 @@
 </section>
 
 <section>
-  <div class="section-head"><h2>What an alert contains</h2></div>
+  <div class="section-head"><h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>What an alert contains</h2></div>
   <div class="card">
     <dl class="glossary">
       <dt>📊 cheaper than … %</dt><dd>The market position explained above.</dd>
@@ -57,7 +57,7 @@
 </section>
 
 <section>
-  <div class="section-head"><h2>The AI agent (optional)</h2></div>
+  <div class="section-head"><h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="5" y="7" width="14" height="12" rx="2"/><path d="M12 7V3"/><path d="M9 12h.01M15 12h.01"/><path d="M9 16h6"/></svg>The AI agent (optional)</h2></div>
   <div class="card">
     <p>Add a <strong>plain webhook</strong> destination pointing at your agent (the reference is an n8n workflow with an LLM) and route searches to it alongside Telegram. Each new listing goes to the agent at once with its photos, the market position, retail prices found earlier and your 👍/👎 history; the chat alert waits up to <strong>{{ settings_view.enrichment_wait_s }} s</strong> ({{ 'off — set ENRICHMENT_WAIT_S to turn on' if not settings_view.enrichment_wait_s else 'ENRICHMENT_WAIT_S' }}) for the agent to post back a verdict: what product it really is, what it costs new, whether it matches your search, any authenticity worries, a deal score and one sentence. The verdict is woven into the alert. If the agent is silent, the alert goes out as usual — you never lose one.</p>
     <p class="muted">Contract for building your own agent: <code>docs/enrichment.md</code> in the repository.</p>
@@ -65,7 +65,7 @@
 </section>
 
 <section>
-  <div class="section-head"><h2>Current settings</h2><span class="lede">Set with environment variables; restart to change.</span></div>
+  <div class="section-head"><h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 8h10M18 8h2M4 16h2M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="8" cy="16" r="2"/></svg>Current settings</h2><span class="lede">Set with environment variables; restart to change.</span></div>
   <div class="card">
     <div class="table-wrap"><table>
       <tr><th>Setting</th><th>Value</th><th>Meaning</th></tr>

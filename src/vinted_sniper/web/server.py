@@ -143,10 +143,32 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
     # --- Dashboard -----------------------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse)
-    async def dashboard(
+    async def found_page(
         request: Request,
         session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     ) -> Response:
+        """The landing page: what the searches have found, newest first."""
+        if not _authorised(session, token):
+            return RedirectResponse("/login", status_code=303)
+
+        snapshot = await health.snapshot(repo)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "found.html",
+            {
+                "nav": "found",
+                "snapshot": snapshot,
+                "auth_enabled": token is not None,
+                "recent": _listing_views(await repo.recent_items(limit=60), now=int(time.time())),
+            },
+        )
+
+    @app.get("/searches", response_class=HTMLResponse)
+    async def searches_page(
+        request: Request,
+        session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+    ) -> Response:
+        """The settings page: searches, destinations, export."""
         if not _authorised(session, token):
             return RedirectResponse("/login", status_code=303)
 
@@ -165,7 +187,6 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
                 "languages": i18n.LANGUAGES,
                 "first_run_newest": settings.first_run_mode == "newest",
                 "auth_enabled": token is not None,
-                "recent": _listing_views(await repo.recent_items(limit=25), now=int(time.time())),
                 "now": int(time.time()),
                 "min_interval": MIN_POLL_INTERVAL_S,
                 "default_interval": settings.poll_default_interval_s,
@@ -210,12 +231,15 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
     async def history_page(
         request: Request,
         session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
-        search: int | None = None,
+        search: str | None = None,
         status: str | None = None,
     ) -> Response:
         if not _authorised(session, token):
             return RedirectResponse("/login", status_code=303)
-        rows = await repo.delivery_history(limit=200, query_id=search, status=status or None)
+        # The filter form submits search= (empty) for "all"; an int-typed parameter
+        # would reject that outright with a bare 422, so parse leniently instead.
+        query_id = _int_or_none(search or "")
+        rows = await repo.delivery_history(limit=200, query_id=query_id, status=status or None)
         return TEMPLATES.TemplateResponse(
             request,
             "history.html",
@@ -223,7 +247,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
                 "nav": "history",
                 "rows": _history_views(rows, now=int(time.time())),
                 "queries": await repo.list_queries(),
-                "selected_search": search,
+                "selected_search": query_id,
                 "selected_status": status or "",
                 "auth_enabled": token is not None,
             },
@@ -260,9 +284,11 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
 
     @app.get("/api/history")
     async def api_history(
-        search: int | None = None, status: str | None = None, _: None = guard
+        search: str | None = None, status: str | None = None, _: None = guard
     ) -> JSONResponse:
-        rows = await repo.delivery_history(limit=200, query_id=search, status=status or None)
+        rows = await repo.delivery_history(
+            limit=200, query_id=_int_or_none(search or ""), status=status or None
+        )
         return JSONResponse({"deliveries": _history_views(rows, now=int(time.time()))})
 
     @app.get("/api/health")
@@ -276,7 +302,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
     async def add_search(
         url: Annotated[str, Form()],
         name: Annotated[str, Form()] = "",
-        interval: Annotated[int, Form()] = 0,
+        interval: Annotated[str, Form()] = "",
         max_total_price: Annotated[str, Form()] = "",
         banned_keywords: Annotated[str, Form()] = "",
         required_keywords: Annotated[str, Form()] = "",
@@ -310,7 +336,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             url=normalised,
             tld=tld,
             params=params,
-            poll_interval_s=max(interval or settings.poll_default_interval_s, MIN_POLL_INTERVAL_S),
+            poll_interval_s=max(
+                _int_or_none(interval) or settings.poll_default_interval_s, MIN_POLL_INTERVAL_S
+            ),
             banned_keywords=_csv(banned_keywords),
             max_total_price=_decimal_or_none(max_total_price),
             required_keywords=_csv(required_keywords),
@@ -353,7 +381,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
     async def edit_search(
         query_id: int,
         name: Annotated[str, Form()] = "",
-        interval: Annotated[int, Form()] = 0,
+        interval: Annotated[str, Form()] = "",
         max_total_price: Annotated[str, Form()] = "",
         banned_keywords: Annotated[str, Form()] = "",
         required_keywords: Annotated[str, Form()] = "",
@@ -377,7 +405,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         await repo.update_query(
             query_id,
             name=name.strip() or query.name,
-            poll_interval_s=max(interval or query.poll_interval_s, MIN_POLL_INTERVAL_S),
+            poll_interval_s=max(
+                _int_or_none(interval) or query.poll_interval_s, MIN_POLL_INTERVAL_S
+            ),
             banned_keywords=_csv(banned_keywords),
             max_total_price=_decimal_or_none(max_total_price),
             required_keywords=_csv(required_keywords),
@@ -390,21 +420,24 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         return _redirect_with_notice("Saved. The new settings apply from the next check.")
 
     @app.post("/searches/interval")
-    async def set_every_interval(interval: Annotated[int, Form()], _: None = guard) -> Response:
-        await repo.set_all_intervals(max(interval, MIN_POLL_INTERVAL_S))
-        return RedirectResponse("/", status_code=303)
+    async def set_every_interval(interval: Annotated[str, Form()] = "", _: None = guard) -> Response:
+        value = _int_or_none(interval)
+        if value is None:
+            return _redirect_with_error("the check interval must be a number of seconds")
+        await repo.set_all_intervals(max(value, MIN_POLL_INTERVAL_S))
+        return RedirectResponse("/searches", status_code=303)
 
     @app.post("/searches/{query_id}/pause")
     async def pause_search(
         query_id: int, paused: Annotated[str, Form()], _: None = guard
     ) -> Response:
         await repo.set_paused(query_id, paused == "1")
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/searches", status_code=303)
 
     @app.post("/searches/{query_id}/delete")
     async def delete_search(query_id: int, _: None = guard) -> Response:
         await repo.delete_query(query_id)
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/searches", status_code=303)
 
     # --- Filter data for the advanced search builder -------------------------------
     # Thin JSON pass-throughs the dashboard's picker calls. The taxonomy service does
@@ -472,24 +505,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         quiet_hours = quiet_hours.strip()
         if quiet_hours and (problem := quiet.validate(quiet_hours)):
             return _redirect_with_error(problem)
-        config: dict[str, Any]
-        match kind:
-            case "discord":
-                if not target.startswith("https://"):
-                    return _redirect_with_error("paste the full Discord webhook URL")
-                config = {"webhook_url": target}
-            case "telegram":
-                if not target:
-                    return _redirect_with_error(
-                        "add the chat id, or use the pairing link from the command line"
-                    )
-                config = {"chat_id": target}
-            case "webhook":
-                config = {"url": target}
-            case "ntfy":
-                config = {"topic": target}
-            case _:
-                return _redirect_with_error(f"unknown destination type {kind!r}")
+        config = _destination_config(kind, target)
+        if isinstance(config, str):
+            return _redirect_with_error(config)
 
         await repo.add_destination(
             kind=kind,
@@ -518,19 +536,42 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         if quiet_hours and (problem := quiet.validate(quiet_hours)):
             return _redirect_with_error(problem)
         await repo.set_quiet_hours(destination_id, quiet_hours or None)
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/searches", status_code=303)
 
     @app.post("/destinations/{destination_id}/status")
     async def set_destination_status(
         destination_id: int, enabled: Annotated[str, Form()], _: None = guard
     ) -> Response:
         await repo.set_notify_status(destination_id, enabled == "1")
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/searches", status_code=303)
+
+    @app.post("/destinations/{destination_id}/edit")
+    async def edit_destination(
+        destination_id: int,
+        name: Annotated[str, Form()] = "",
+        target: Annotated[str, Form()] = "",
+        _: None = guard,
+    ) -> Response:
+        destination = await repo.get_destination(destination_id)
+        if destination is None:
+            return _redirect_with_error("that destination no longer exists")
+        config = _destination_config(destination.kind, target.strip())
+        if isinstance(config, str):
+            return _redirect_with_error(config)
+        await repo.update_destination(
+            destination_id, name=name.strip() or destination.name, config=config
+        )
+        return _redirect_with_notice("Destination saved.")
+
+    @app.post("/destinations/{destination_id}/enable")
+    async def enable_destination(destination_id: int, _: None = guard) -> Response:
+        await repo.reactivate_destination(destination_id)
+        return _redirect_with_notice("Destination enabled again. Delivery resumes.")
 
     @app.post("/destinations/{destination_id}/delete")
     async def delete_destination(destination_id: int, _: None = guard) -> Response:
-        await repo.deactivate_destination(destination_id, "removed from the dashboard")
-        return RedirectResponse("/", status_code=303)
+        await repo.delete_destination(destination_id)
+        return _redirect_with_notice("Destination deleted.")
 
     @app.post("/searches/{query_id}/routes")
     async def set_routes(
@@ -544,7 +585,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             await repo.unroute(query_id, destination_id)
         for destination_id in wanted - current:
             await repo.route(query_id, destination_id)
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/searches", status_code=303)
 
     # --- RSS -----------------------------------------------------------------------
 
@@ -563,7 +604,26 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
 
 
 def _redirect_with_error(message: str) -> RedirectResponse:
-    return RedirectResponse(f"/?error={quote(message)}", status_code=303)
+    return RedirectResponse(f"/searches?error={quote(message)}", status_code=303)
+
+
+def _destination_config(kind: str, target: str) -> dict[str, Any] | str:
+    """The config dict a destination of this kind stores, or a human-readable complaint."""
+    match kind:
+        case "discord":
+            if not target.startswith("https://"):
+                return "paste the full Discord webhook URL"
+            return {"webhook_url": target}
+        case "telegram":
+            if not target:
+                return "add the chat id, or use the pairing link from the command line"
+            return {"chat_id": target}
+        case "webhook":
+            return {"url": target}
+        case "ntfy":
+            return {"topic": target}
+        case _:
+            return f"unknown destination type {kind!r}"
 
 
 def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
@@ -688,7 +748,7 @@ def _percent_or_none(raw: str) -> int | None:
 
 
 def _redirect_with_notice(message: str) -> Response:
-    return RedirectResponse(f"/?ok={quote(message)}", status_code=303)
+    return RedirectResponse(f"/searches?ok={quote(message)}", status_code=303)
 
 
 def _int_or_none(raw: str) -> int | None:

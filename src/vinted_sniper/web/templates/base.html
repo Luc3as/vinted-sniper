@@ -4,23 +4,42 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}vinted-sniper{% endblock %}</title>
+  <script>
+    // Runs before the stylesheet is applied so a saved theme never flashes the other one.
+    (() => {
+      const saved = localStorage.getItem("theme");
+      if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
+    })();
+  </script>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%230B8F97' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='50' cy='50' r='44' stroke-width='8'/%3E%3Cpath d='M50 0V9M50 91v9M0 50h9M91 50h9' stroke-width='8'/%3E%3Cpath d='M50 44 22 62q-4 3-1 8h58q3-5-1-8z' stroke-width='8'/%3E%3Cpath d='M50 44v-6' stroke-width='8'/%3E%3Ccircle cx='50' cy='31' r='7' stroke-width='7'/%3E%3C/g%3E%3C/svg%3E">
   <style>
     /* --- Tokens. Everything below reads from these, so both colour schemes stay in step. */
     :root {
+      color-scheme: light;
       --bg: #f6f6f4; --panel: #ffffff; --panel-2: #f0f0ee; --ink: #16181d; --muted: #545b66;
       --line: #dcdcd7; --accent: #0b8f97; --accent-ink: #ffffff; --accent-soft: #d8f1f2;
       --ok: #1f7a3a; --warn: #9a5b00; --bad: #b3261e; --info: #2f5fb3;
       --radius: 10px; --radius-sm: 7px; --shadow: 0 8px 24px rgb(0 0 0 / .10);
       --focus: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent);
     }
+    /* The dark tokens appear twice on purpose: once for "the OS is dark and the user
+       has not overridden it", once for "the user forced dark". CSS has no way to
+       share a block between a media query and an attribute selector. */
     @media (prefers-color-scheme: dark) {
-      :root {
+      :root:not([data-theme="light"]) {
+        color-scheme: dark;
         --bg: #141518; --panel: #1d1f23; --panel-2: #24272c; --ink: #ecedea; --muted: #a2a7ad;
         --line: #33373d; --accent: #3fd0d8; --accent-ink: #062627; --accent-soft: #163b3e;
         --ok: #79c982; --warn: #e5b04e; --bad: #f08a83; --info: #8fb2ee;
         --shadow: 0 8px 24px rgb(0 0 0 / .45);
       }
+    }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #141518; --panel: #1d1f23; --panel-2: #24272c; --ink: #ecedea; --muted: #a2a7ad;
+      --line: #33373d; --accent: #3fd0d8; --accent-ink: #062627; --accent-soft: #163b3e;
+      --ok: #79c982; --warn: #e5b04e; --bad: #f08a83; --info: #8fb2ee;
+      --shadow: 0 8px 24px rgb(0 0 0 / .45);
     }
     @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
 
@@ -41,12 +60,16 @@
       display: flex; align-items: center; gap: 1.25rem; padding: .7rem 1.5rem;
       border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 20;
     }
-    .brand a { color: var(--ink); text-decoration: none; font-weight: 700; letter-spacing: -0.01em;
-               display: inline-flex; align-items: center; gap: .5rem; }
-    .brand .mark { flex: none; }
+    .brand a { color: var(--ink); text-decoration: none; display: inline-flex; align-items: center; }
+    /* The full lockup replaces the old mini-mark + text; the generic `a svg` 1rem rule
+       below must not shrink it, hence the explicit size. Colours ride the theme tokens. */
+    .brand a svg.lockup { width: auto; height: 2.1rem; flex: none; display: block; }
+    @media (max-width: 40rem) { .brand a svg.lockup { height: 1.6rem; } }
     nav { display: flex; gap: .25rem; }
     nav a { color: var(--muted); text-decoration: none; font-weight: 500; padding: .35rem .7rem;
-            border-radius: var(--radius-sm); transition: color .15s, background .15s; }
+            border-radius: var(--radius-sm); transition: color .15s, background .15s;
+            display: inline-flex; align-items: center; gap: .4rem; }
+    nav a svg { width: .95rem; height: .95rem; flex: none; }
     nav a:hover { color: var(--ink); background: var(--panel-2); }
     nav a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
     .header-right { margin-left: auto; display: flex; align-items: center; gap: .75rem; }
@@ -54,24 +77,34 @@
     .dot { width: .55rem; height: .55rem; border-radius: 999px; background: var(--ok); display: inline-block; }
     .dot.off { background: var(--bad); }
 
-    main { max-width: 64rem; margin: 0 auto; padding: 1.5rem; }
-    section { margin-bottom: 2.25rem; }
-    .section-head { display: flex; align-items: baseline; gap: .75rem; margin: 0 0 .6rem; flex-wrap: wrap; }
-    h2 { font-size: 1rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+    /* Wide enough for the tables to breathe, capped so a 4K monitor doesn't stretch
+       rows into unreadable ribbons; the viewport term keeps side gutters on laptops. */
+    main { max-width: min(100rem, 100vw - 2rem); margin: 0 auto; padding: 1.5rem; }
+    @media (max-width: 48rem) { main { max-width: none; padding: 1rem; } }
+    section { margin-bottom: 2.5rem; }
+    .section-head { display: flex; align-items: baseline; gap: .75rem; margin: 0 0 .75rem; flex-wrap: wrap; }
+    h2 { font-size: 1.3rem; font-weight: 700; margin: 0; letter-spacing: -0.015em;
+         display: inline-flex; align-items: center; gap: .5rem; }
+    h2 svg { width: 1.2rem; height: 1.2rem; color: var(--accent); flex: none; }
     .section-head .lede { color: var(--muted); font-size: .88rem; }
-    h3 { font-size: .9rem; margin: 0 0 .5rem; }
+    h3 { font-size: 1rem; font-weight: 650; margin: 0 0 .6rem; display: flex; align-items: center; gap: .45rem; }
+    h3 svg { width: 1rem; height: 1rem; color: var(--accent); flex: none; }
 
     /* --- Cards, tables ------------------------------------------------------------- */
+    /* Tables use the full width; running prose keeps a readable measure. */
+    .card p, .section-head .lede, details.explain p, .glossary dd { max-width: 80ch; }
     .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
             padding: 1rem 1.15rem; margin-bottom: .75rem; }
     .card.subtle { background: var(--panel-2); border-style: dashed; }
-    .table-wrap { overflow-x: auto; }
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: .55rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { font-weight: 600; font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
     tr:last-child td { border-bottom: 0; }
     tr.edit-row td { background: var(--panel-2); }
-    td.actions { white-space: nowrap; }
+    td.actions { white-space: nowrap; text-align: right; }
+    td.nowrap { white-space: nowrap; }
+    td .name { font-weight: 600; display: block; }
     .error-line { max-width: 34rem; }
 
     /* --- Pills, tags ---------------------------------------------------------------- */
@@ -79,11 +112,14 @@
             font-size: .75rem; font-weight: 600; white-space: nowrap; }
     .pill::before { content: ""; width: .45rem; height: .45rem; border-radius: 999px; background: currentColor; }
     .pill.ok, .pill.sent { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
-    .pill.stale, .pill.starting, .pill.paused, .pill.pending, .pill.cooling {
+    .pill.stale, .pill.starting, .pill.pending, .pill.cooling {
       background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
     .pill.failing, .pill.failed { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
     .pill.sending { background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); }
-    .pill.cancelled, .pill.disabled { background: var(--panel-2); color: var(--muted); }
+    /* Paused is the user's own choice, not a problem — neutral, like disabled, so the
+       amber pills keep meaning "look at this". */
+    .pill.paused, .pill.cancelled, .pill.disabled { background: var(--panel-2); color: var(--muted);
+      border: 1px solid var(--line); }
     .tag { border: 1px solid var(--line); background: var(--panel-2); border-radius: 6px; padding: .02rem .45rem;
            font-size: .72rem; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .tag.brand { color: var(--ink); font-weight: 500; }
@@ -112,7 +148,13 @@
     button.danger { background: transparent; color: var(--bad); border-color: var(--line); font-weight: 500; }
     button.danger:hover { background: color-mix(in srgb, var(--bad) 10%, transparent); filter: none; }
     button.icon { display: inline-flex; align-items: center; gap: .35rem; }
+    /* A square icon-only button for table rows: three of them fit where one worded
+       button used to, which is what lets the tables breathe. */
+    button.iconbtn { display: inline-flex; align-items: center; justify-content: center;
+                     width: 2rem; height: 2rem; padding: 0; vertical-align: middle; }
     button svg, a svg { width: 1rem; height: 1rem; }
+    /* The browser's [hidden] rule covers HTML only; the theme button swaps SVG icons. */
+    #theme-toggle svg[hidden] { display: none; }
     .grid { display: grid; gap: .8rem; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
     .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
     .muted { color: var(--muted); font-size: .85rem; }
@@ -125,13 +167,15 @@
     /* --- Help: tooltips and explainers ------------------------------------------------ */
     .help { display: inline-flex; align-items: center; justify-content: center; width: 1.05rem; height: 1.05rem;
             border-radius: 999px; border: 1px solid var(--muted); color: var(--muted); font-size: .68rem; font-weight: 700;
-            cursor: help; position: relative; vertical-align: middle; background: transparent; padding: 0; }
+            cursor: help; vertical-align: middle; background: transparent; padding: 0; }
     .help:hover, .help:focus-visible { color: var(--accent); border-color: var(--accent); }
-    .help::after { content: attr(data-tip); position: absolute; left: 50%; bottom: calc(100% + .45rem); transform: translateX(-50%);
-                   width: max-content; max-width: 18rem; background: var(--ink); color: var(--bg); font-size: .76rem; font-weight: 400;
-                   line-height: 1.4; padding: .45rem .6rem; border-radius: var(--radius-sm); box-shadow: var(--shadow);
-                   opacity: 0; pointer-events: none; transition: opacity .15s; z-index: 30; white-space: normal; text-align: left; }
-    .help:hover::after, .help:focus-visible::after { opacity: 1; }
+    /* One shared tooltip element lives on <body> with position:fixed, so no scroll
+       container (.table-wrap and friends) can ever clip it. Placed by script. */
+    #tip { position: fixed; z-index: 100; max-width: min(20rem, calc(100vw - 1rem));
+           background: var(--ink); color: var(--bg); font-size: .78rem; font-weight: 400;
+           line-height: 1.45; padding: .45rem .65rem; border-radius: var(--radius-sm); box-shadow: var(--shadow);
+           pointer-events: none; white-space: normal; text-align: left; }
+    #tip[hidden] { display: none; }
     details.explain { border: 1px dashed var(--line); border-radius: var(--radius-sm); padding: .5rem .85rem; margin: .5rem 0 0; }
     details.explain summary { cursor: pointer; color: var(--accent); font-size: .85rem; font-weight: 500; list-style: none; }
     details.explain summary::before { content: "▸ "; }
@@ -152,6 +196,7 @@
                     grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); }
     .listing { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
                overflow: hidden; display: flex; flex-direction: column; font-size: .84rem; }
+    .listing[hidden] { display: none; } /* display:flex would otherwise defeat the attribute */
     .listing .photo { position: relative; display: block; width: 100%; aspect-ratio: 4 / 5;
                       padding: 0; border: 0; border-radius: 0; background: var(--bg);
                       cursor: zoom-in; }
@@ -167,13 +212,17 @@
                       line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2;
                       -webkit-box-orient: vertical; overflow: hidden; }
     .listing .title:hover { color: var(--accent); }
-    .listing .price strong { font-size: .95rem; }
-    .listing .price .muted { margin-left: .4rem; font-size: .75rem; }
+    /* The total (what you actually pay) leads; the bare asking price is a footnote below. */
+    .listing .price { display: flex; flex-wrap: wrap; align-items: baseline; gap: .1rem .4rem; }
+    .listing .price .total { font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; cursor: help; }
+    .listing .price .base { flex-basis: 100%; font-size: .73rem; color: var(--muted); cursor: help; }
     .listing .tags { display: flex; flex-wrap: wrap; gap: .3rem; }
     .tag { border: 1px solid var(--line); background: var(--bg); border-radius: 6px;
            padding: .02rem .4rem; font-size: .72rem; color: var(--muted); max-width: 100%;
            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .tag.brand { color: var(--ink); font-weight: 500; }
+    /* Inline glyphs inside a tag stay inline (not flex) so text-overflow keeps working. */
+    .tag > svg { width: .68rem; height: .68rem; vertical-align: -.08em; margin-right: .28rem; opacity: .65; }
     .listing .meta { display: flex; flex-wrap: wrap; gap: .2rem .6rem; font-size: .75rem;
                      color: var(--muted); }
     .listing .meta a { color: inherit; }
@@ -239,19 +288,18 @@
 <body>
   <a class="skip" href="#main">Skip to content</a>
   <header>
-    <div class="brand"><a href="/"><svg class="mark" viewBox="0 0 100 100" width="26" height="26" aria-hidden="true"
-        fill="none" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M50 40 9 66Q3 70 7 76h86q4-6-2-10z" stroke="currentColor" stroke-width="8"/>
-        <path d="M50 40v-9" stroke="currentColor" stroke-width="8"/>
-        <circle cx="50" cy="20" r="10.5" stroke="var(--accent)" stroke-width="8"/>
-        <circle cx="50" cy="20" r="3" fill="var(--accent)"/>
-      </svg><span>vinted<b style="color:var(--accent);font-weight:800">sniper</b></span></a></div>
+    <div class="brand"><a href="/" aria-label="vinted-sniper — dashboard">{% include "_lockup.svg" %}</a></div>
     <nav aria-label="Sections">
-      <a href="/" {% if nav == 'searches' %}aria-current="page"{% endif %}>Searches</a>
-      <a href="/history" {% if nav == 'history' %}aria-current="page"{% endif %}>History</a>
-      <a href="/help" {% if nav == 'help' %}aria-current="page"{% endif %}>Help</a>
+      <a href="/" {% if nav == 'found' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4Z"/><path d="M19 16.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8Z"/></svg>Found</a>
+      <a href="/searches" {% if nav == 'searches' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>Searches</a>
+      <a href="/history" {% if nav == 'history' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>History</a>
+      <a href="/help" {% if nav == 'help' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .3c0 1.7-2.5 2.2-2.5 3.7"/><path d="M12 17h.01"/></svg>Help</a>
     </nav>
-    <div class="header-right">{% block header_extra %}{% endblock %}</div>
+    <div class="header-right">{% block header_extra %}{% endblock %}<button type="button" id="theme-toggle" class="quiet iconbtn" data-tip="Theme">
+      <svg data-mode="auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor" stroke="none"/></svg>
+      <svg data-mode="light" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" hidden><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>
+      <svg data-mode="dark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+    </button></div>
   </header>
   <main id="main">
     {% if request is defined and request.query_params.get('ok') %}
@@ -268,6 +316,75 @@
     document.addEventListener("submit", (event) => {
       const form = event.target.closest("form[data-confirm]");
       if (form && !window.confirm(form.dataset.confirm)) event.preventDefault();
+    });
+    // One tooltip element for the whole page. position:fixed means no scroll container
+    // (like .table-wrap) can clip it; measuring after render lets it clamp to the
+    // viewport sides and flip below the trigger when there is no room above.
+    const tip = document.createElement("div");
+    tip.id = "tip";
+    tip.setAttribute("role", "tooltip");
+    tip.hidden = true;
+    document.body.append(tip);
+    let tipFor = null;
+    const showTip = (el) => {
+      const text = el.dataset.tip;
+      if (!text) return;
+      tipFor = el;
+      tip.textContent = text;
+      tip.style.left = "0px";
+      tip.style.top = "0px";
+      tip.hidden = false;
+      const r = el.getBoundingClientRect();
+      const margin = 8;
+      let x = r.left + r.width / 2 - tip.offsetWidth / 2;
+      x = Math.max(margin, Math.min(x, innerWidth - margin - tip.offsetWidth));
+      let y = r.top - tip.offsetHeight - 8;
+      if (y < margin) y = r.bottom + 8;
+      tip.style.left = `${x}px`;
+      tip.style.top = `${y}px`;
+    };
+    const hideTip = () => { tip.hidden = true; tipFor = null; };
+    document.addEventListener("mouseover", (event) => {
+      const el = event.target.closest?.("[data-tip]");
+      if (el) showTip(el);
+      else if (tipFor) hideTip();
+    });
+    document.addEventListener("focusin", (event) => {
+      const el = event.target.closest?.("[data-tip]");
+      if (el) showTip(el); else if (tipFor) hideTip();
+    });
+    // Scrolling moves the trigger, so the fixed-position tip follows it.
+    document.addEventListener("scroll", () => { if (tipFor) showTip(tipFor); }, true);
+
+    // Theme switch: system → light → dark → system. "system" clears the override so
+    // the prefers-color-scheme media query decides again.
+    const themeBtn = document.getElementById("theme-toggle");
+    const themeOrder = ["auto", "light", "dark"];
+    const themeTips = {
+      auto: "Theme: matching your system. Click to force light.",
+      light: "Theme: always light. Click to force dark.",
+      dark: "Theme: always dark. Click to follow your system again.",
+    };
+    let themeMode = localStorage.getItem("theme");
+    if (themeMode !== "light" && themeMode !== "dark") themeMode = "auto";
+    const applyTheme = () => {
+      if (themeMode === "auto") {
+        delete document.documentElement.dataset.theme;
+        localStorage.removeItem("theme");
+      } else {
+        document.documentElement.dataset.theme = themeMode;
+        localStorage.setItem("theme", themeMode);
+      }
+      // toggleAttribute, not .hidden: SVG elements lack the hidden property.
+      for (const icon of themeBtn.querySelectorAll("svg")) icon.toggleAttribute("hidden", icon.dataset.mode !== themeMode);
+      themeBtn.dataset.tip = themeTips[themeMode];
+      themeBtn.setAttribute("aria-label", themeTips[themeMode]);
+    };
+    applyTheme();
+    themeBtn.addEventListener("click", () => {
+      themeMode = themeOrder[(themeOrder.indexOf(themeMode) + 1) % themeOrder.length];
+      applyTheme();
+      if (tipFor === themeBtn) showTip(themeBtn); // the tooltip is open — refresh its text
     });
   </script>
 </body>

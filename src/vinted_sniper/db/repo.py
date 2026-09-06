@@ -520,6 +520,35 @@ class Repo:
             "UPDATE destinations SET failure_count = 0 WHERE id = ?", (destination_id,)
         )
 
+    async def reactivate_destination(self, destination_id: int) -> None:
+        """Bring a disabled destination back — the user fixed whatever got it disabled."""
+        await self._db.execute(
+            "UPDATE destinations SET active = 1, deactivated_reason = NULL, failure_count = 0 "
+            "WHERE id = ?",
+            (destination_id,),
+        )
+
+    async def update_destination(
+        self, destination_id: int, *, name: str, config: dict[str, Any]
+    ) -> None:
+        await self._db.execute(
+            "UPDATE destinations SET name = ?, config_json = ? WHERE id = ?",
+            (name, json.dumps(config), destination_id),
+        )
+
+    async def delete_destination(self, destination_id: int) -> None:
+        """Remove a destination for real. Delivery history keeps its rows; the destination
+        name there simply goes blank (the join is LEFT for exactly this reason)."""
+        await self._db.execute(
+            "UPDATE outbox SET status = 'cancelled', last_error = 'destination deleted' "
+            "WHERE destination_id = ? AND status IN ('pending', 'sending')",
+            (destination_id,),
+        )
+        await self._db.execute(
+            "DELETE FROM query_destinations WHERE destination_id = ?", (destination_id,)
+        )
+        await self._db.execute("DELETE FROM destinations WHERE id = ?", (destination_id,))
+
     @staticmethod
     def _to_destination(row: aiosqlite.Row) -> Destination:
         return Destination(

@@ -233,7 +233,7 @@ async def test_the_dashboard_shows_what_is_being_watched(signed_in: TestClient, 
         follow_redirects=False,
     )
 
-    body = signed_in.get("/").text
+    body = signed_in.get("/searches").text
 
     assert "my search" in body
     assert "vinted.fr" in body
@@ -310,8 +310,8 @@ def _page_with_tree() -> Response:
 def test_the_dashboard_offers_the_builder_when_the_service_is_wired(
     builder_client: TestClient, signed_in: TestClient
 ) -> None:
-    assert "Build a search instead" in builder_client.get("/").text
-    assert "Build a search instead" not in signed_in.get("/").text
+    assert "Build a search instead" in builder_client.get("/searches").text
+    assert "Build a search instead" not in signed_in.get("/searches").text
 
 
 def test_the_filter_endpoints_need_a_login(client: TestClient) -> None:
@@ -621,3 +621,234 @@ def test_no_inline_event_handlers_in_the_templates() -> None:
     for page in templates.glob("*.html"):
         text = page.read_text(encoding="utf-8")
         assert " onsubmit=" not in text and " onclick=" not in text, page.name
+
+
+# --- Form abuse: empty and garbage input never surfaces a raw 422 ---------------------
+# Every HTML form submits its empty fields as empty strings, and the "all" options of
+# the history filter submit search= with no value. None of that may leak FastAPI's raw
+# JSON validation error at the user; the worst allowed outcome is a redirect with error=.
+
+
+def test_the_history_filter_set_to_all_is_not_an_error(signed_in: TestClient) -> None:
+    """The exact submit the Filter button makes with both selects on "all"."""
+    response = signed_in.get("/history", params={"search": "", "status": ""})
+
+    assert response.status_code == 200
+    assert "Delivery history" in response.text
+
+
+def test_garbage_in_the_history_search_filter_falls_back_to_all(signed_in: TestClient) -> None:
+    response = signed_in.get("/history", params={"search": "abc", "status": "sent"})
+
+    assert response.status_code == 200
+
+
+def test_the_history_api_tolerates_the_same_empty_filters(signed_in: TestClient) -> None:
+    response = signed_in.get("/api/history", params={"search": "", "status": ""})
+
+    assert response.status_code == 200
+    assert "deliveries" in response.json()
+
+
+async def test_adding_a_search_with_a_cleared_interval_uses_the_default(
+    signed_in: TestClient, repo: Repo, web_settings: Settings
+) -> None:
+    response = signed_in.post(
+        "/searches",
+        data={"url": "https://www.vinted.fr/catalog?search_text=nike", "interval": ""},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303 and "error=" not in response.headers["location"]
+    (query,) = await repo.list_queries()
+    assert query.poll_interval_s == web_settings.poll_default_interval_s
+
+
+async def test_adding_a_search_with_a_garbage_interval_uses_the_default(
+    signed_in: TestClient, repo: Repo, web_settings: Settings
+) -> None:
+    response = signed_in.post(
+        "/searches",
+        data={"url": "https://www.vinted.fr/catalog?search_text=nike", "interval": "soon"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    (query,) = await repo.list_queries()
+    assert query.poll_interval_s == web_settings.poll_default_interval_s
+
+
+async def test_editing_with_a_cleared_interval_keeps_the_old_one(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    signed_in.post(
+        "/searches",
+        data={"url": "https://www.vinted.fr/catalog?search_text=nike", "interval": "300"},
+        follow_redirects=False,
+    )
+    (query,) = await repo.list_queries()
+
+    response = signed_in.post(
+        f"/searches/{query.id}/edit", data={"interval": ""}, follow_redirects=False
+    )
+
+    assert response.status_code == 303 and "error=" not in response.headers["location"]
+    edited = await repo.get_query(query.id)
+    assert edited is not None and edited.poll_interval_s == 300
+
+
+async def test_apply_to_all_with_a_blank_interval_says_so_instead_of_crashing(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    signed_in.post(
+        "/searches",
+        data={"url": "https://www.vinted.fr/catalog?search_text=nike", "interval": "300"},
+        follow_redirects=False,
+    )
+
+    for bad in ("", "fast", "  "):
+        response = signed_in.post(
+            "/searches/interval", data={"interval": bad}, follow_redirects=False
+        )
+        assert response.status_code == 303, bad
+        assert "error=" in response.headers["location"], bad
+    assert (await repo.list_queries())[0].poll_interval_s == 300, "nothing was changed"
+
+
+async def test_every_form_survives_all_optional_fields_submitted_empty(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """One pass over each mutating form with every optional field as the browser sends
+    it when left blank: present, empty. A raw 422 anywhere here is a regression."""
+    signed_in.post(
+        "/searches",
+        data={
+            "url": "https://www.vinted.fr/catalog?search_text=nike",
+            "name": "",
+            "interval": "",
+            "max_total_price": "",
+            "banned_keywords": "",
+            "required_keywords": "",
+            "title_pattern": "",
+            "min_seller_rating": "",
+            "min_seller_reviews": "",
+            "blocked_sellers": "",
+            "max_market_percentile": "",
+        },
+        follow_redirects=False,
+    )
+    (query,) = await repo.list_queries()
+    destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+
+    empty_edit = {
+        "name": "",
+        "interval": "",
+        "max_total_price": "",
+        "banned_keywords": "",
+        "required_keywords": "",
+        "title_pattern": "",
+        "min_seller_rating": "",
+        "min_seller_reviews": "",
+        "blocked_sellers": "",
+        "max_market_percentile": "",
+    }
+    attempts = [
+        ("post", f"/searches/{query.id}/edit", empty_edit),
+        ("post", f"/searches/{query.id}/pause", {"paused": "1"}),
+        ("post", f"/destinations/{destination_id}/quiet", {"quiet_hours": ""}),
+        ("post", f"/destinations/{destination_id}/language", {"language": "en"}),
+        ("post", f"/destinations/{destination_id}/status", {"enabled": "1"}),
+        ("get", "/history", {"search": "", "status": ""}),
+        ("get", "/api/history", {"search": "", "status": ""}),
+    ]
+    for method, path, payload in attempts:
+        if method == "get":
+            response = signed_in.get(path, params=payload)
+        else:
+            response = signed_in.post(path, data=payload, follow_redirects=False)
+        assert response.status_code in (200, 303), f"{method} {path} -> {response.status_code}"
+
+
+# --- Destination edit, enable, delete -----------------------------------------------
+
+
+async def test_a_destination_can_be_edited(signed_in: TestClient, repo: Repo) -> None:
+    destination_id = await repo.add_destination(
+        kind="ntfy", name="phone", config={"topic": "old-topic"}
+    )
+
+    response = signed_in.post(
+        f"/destinations/{destination_id}/edit",
+        data={"name": "tablet", "target": "new-topic"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303 and "ok=" in response.headers["location"]
+    edited = await repo.get_destination(destination_id)
+    assert edited is not None
+    assert edited.name == "tablet"
+    assert edited.config == {"topic": "new-topic"}
+
+
+async def test_editing_keeps_kind_validation(signed_in: TestClient, repo: Repo) -> None:
+    destination_id = await repo.add_destination(
+        kind="discord", name="server", config={"webhook_url": "https://discord.com/api/webhooks/1/a"}
+    )
+
+    response = signed_in.post(
+        f"/destinations/{destination_id}/edit",
+        data={"name": "server", "target": "not-a-url"},
+        follow_redirects=False,
+    )
+
+    assert "error=" in response.headers["location"]
+    same = await repo.get_destination(destination_id)
+    assert same is not None and same.config["webhook_url"].startswith("https://")
+
+
+async def test_a_disabled_destination_can_be_enabled_again(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    await repo.deactivate_destination(destination_id, "the far end vanished")
+
+    response = signed_in.post(
+        f"/destinations/{destination_id}/enable", follow_redirects=False
+    )
+
+    assert response.status_code == 303 and "ok=" in response.headers["location"]
+    destination = await repo.get_destination(destination_id)
+    assert destination is not None and destination.active
+
+
+async def test_deleting_a_destination_removes_it_even_when_disabled(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    await repo.deactivate_destination(destination_id, "gone")
+
+    response = signed_in.post(
+        f"/destinations/{destination_id}/delete", follow_redirects=False
+    )
+
+    assert response.status_code == 303 and "ok=" in response.headers["location"]
+    assert await repo.list_destinations() == []
+
+
+async def test_deleting_a_destination_unroutes_it(signed_in: TestClient, repo: Repo) -> None:
+    destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    signed_in.post(
+        "/searches",
+        data={
+            "url": "https://www.vinted.fr/catalog?search_text=nike",
+            "destination_ids": [str(destination_id)],
+        },
+        follow_redirects=False,
+    )
+    (query,) = await repo.list_queries()
+    assert await repo.destination_ids_for_query(query.id) == [destination_id]
+
+    signed_in.post(f"/destinations/{destination_id}/delete", follow_redirects=False)
+
+    assert await repo.destination_ids_for_query(query.id) == []
+    assert await repo.list_destinations() == []

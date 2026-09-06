@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, help %}
+{% block title %}vinted-sniper{% endblock %}
+
+{% block header_extra %}
+  <span class="status"><span class="dot {{ '' if snapshot.alive else 'off' }}" aria-hidden="true"></span>
+    <span data-field="header-status">{% if snapshot.alive %}running{% else %}not responding{% endif %} · {{ snapshot.queued_notifications }} queued</span>
+    {{ help('“queued” = alerts written but not yet delivered: waiting for a destination to be paired, held for an AI verdict, inside quiet hours, or retrying.') }}
+  </span>
+  {% if auth_enabled %}
+  <form method="post" action="/logout" class="inline">
+    <button class="quiet" type="submit">Sign out</button>
+  </form>
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<section id="recent">
+  <div class="section-head">
+    <h2>{{ icon('sparkle') }}Found</h2>
+    <span class="lede">The latest listings any search recorded. Badges: <span class="tag drop">📉 dropped</span> price fell since found · <span class="tag score">🤖 87</span> agent’s deal score (hover for its one-line verdict).</span>
+  </div>
+  {% if not recent %}
+  <div class="card"><div class="empty"><strong>Nothing recorded yet.</strong> The first check of each search will fill this in.
+    Set one up under <a href="/searches">Searches</a>.</div></div>
+  {% else %}
+  <div class="row" style="margin:0 0 .75rem">
+    <input type="search" id="recent-filter" placeholder="Filter — title, brand, seller or search…"
+           style="max-width:20rem" aria-label="Filter recent listings">
+    <label class="row" style="margin:0;color:var(--ink)">
+      <input type="checkbox" id="recent-drops"> 📉 price drops only
+    </label>
+    <span class="muted" id="recent-count" role="status"></span>
+  </div>
+  <div class="listing-grid">
+    {% for row in recent %}
+    <article class="listing">
+      {% if row.photos %}
+      <button type="button" class="photo" data-photos='{{ row.photos | tojson }}'
+              aria-label="View {{ row.photos | length }} photo{{ 's' if row.photos | length > 1 }} of {{ row.title }}">
+        <img src="{{ row.photos[0] }}" alt="" loading="lazy">
+        {% if row.photos | length > 1 %}
+        <span class="count">{{ row.photos | length }} ▣</span>
+        {% endif %}
+      </button>
+      {% else %}
+      <div class="no-photo">no photo</div>
+      {% endif %}
+      <div class="body">
+        <a class="title" href="{{ row.url }}" target="_blank" rel="noreferrer"
+           title="{{ row.title }}">{{ row.title }}</a>
+        <div class="price">
+          {% if row.total_price %}
+          <span class="total" data-tip="What you actually pay: the asking price plus Vinted’s buyer-protection fee.">{{ row.total_price }}</span>
+          {% else %}
+          <span class="total">{{ row.price or '—' }}</span>
+          {% endif %}
+          {% if row.price_dropped %}<span class="tag drop">📉 dropped</span>{% endif %}
+          {% if row.deal_score is not none %}
+          <span class="tag score {{ 'hot' if row.deal_score >= 75 else ('cold' if row.deal_score < 40 else '') }}"
+                {% if row.verdict %}data-tip="{{ row.verdict }}"{% endif %}>🤖 {{ row.deal_score }}</span>
+          {% endif %}
+          {% if row.total_price and row.price %}
+          <span class="base" data-tip="The seller’s asking price, before the buyer-protection fee.">{{ row.price }} + fee</span>
+          {% endif %}
+        </div>
+        {% if row.brand or row.size or row.condition %}
+        <div class="tags">
+          {% if row.brand %}<span class="tag brand" data-tip="Brand">{{ icon('label') }}{{ row.brand }}</span>{% endif %}
+          {% if row.size %}<span class="tag size" data-tip="Size">{{ icon('ruler') }}{{ row.size }}</span>{% endif %}
+          {% if row.condition %}<span class="tag" data-tip="Condition">{{ icon('sparkle') }}{{ row.condition }}</span>{% endif %}
+        </div>
+        {% endif %}
+        {% if row.seller_login or row.seller_stars or row.favourite_count %}
+        <div class="meta">
+          {% if row.seller_login %}
+            {% if row.seller_url %}
+            <a href="{{ row.seller_url }}" target="_blank" rel="noreferrer">@{{ row.seller_login }}</a>
+            {% else %}<span>@{{ row.seller_login }}</span>{% endif %}
+          {% endif %}
+          {% if row.seller_stars %}
+          <span>⭐ {{ row.seller_stars }}{% if row.seller_feedback_count %} ({{ row.seller_feedback_count }}){% endif %}</span>
+          {% endif %}
+          {% if row.favourite_count %}<span>♥ {{ row.favourite_count }}</span>{% endif %}
+        </div>
+        {% endif %}
+        <div class="meta foot">
+          <span class="search-name">{{ row.query_name or '—' }}</span>
+          <span class="age">{{ row.age }}</span>
+        </div>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  <div class="row" style="justify-content:center;margin-top:.75rem">
+    <button type="button" class="quiet" id="recent-more" hidden>Show more</button>
+  </div>
+  {% endif %}
+</section>
+
+{% if recent %}
+<div class="lightbox" id="lightbox" hidden role="dialog" aria-modal="true"
+     aria-label="Listing photos">
+  <button type="button" class="lb-close" aria-label="Close">×</button>
+  <button type="button" class="lb-prev" aria-label="Previous photo">‹</button>
+  <img id="lb-img" src="" alt="Listing photo">
+  <button type="button" class="lb-next" aria-label="Next photo">›</button>
+  <span class="lb-counter" id="lb-counter"></span>
+</div>
+<script>
+(() => {
+  "use strict";
+  const box = document.getElementById("lightbox");
+  const img = document.getElementById("lb-img");
+  const counter = document.getElementById("lb-counter");
+  const prev = box.querySelector(".lb-prev");
+  const next = box.querySelector(".lb-next");
+  let photos = [];
+  let index = 0;
+
+  function show(i) {
+    index = (i + photos.length) % photos.length;
+    img.src = photos[index];
+    counter.textContent = `${index + 1} / ${photos.length}`;
+    const single = photos.length < 2;
+    prev.hidden = next.hidden = counter.hidden = single;
+  }
+
+  function close() {
+    box.hidden = true;
+    img.src = "";
+    document.body.style.overflow = "";
+  }
+
+  for (const button of document.querySelectorAll(".listing .photo")) {
+    button.addEventListener("click", () => {
+      photos = JSON.parse(button.dataset.photos);
+      if (!photos.length) return;
+      box.hidden = false;
+      document.body.style.overflow = "hidden"; // the page should not scroll underneath
+      show(0);
+    });
+  }
+
+  box.querySelector(".lb-close").addEventListener("click", close);
+  prev.addEventListener("click", () => show(index - 1));
+  next.addEventListener("click", () => show(index + 1));
+  box.addEventListener("click", (event) => {
+    if (event.target === box) close();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (box.hidden) return;
+    if (event.key === "Escape") close();
+    if (event.key === "ArrowLeft") show(index - 1);
+    if (event.key === "ArrowRight") show(index + 1);
+  });
+})();
+</script>
+<script>
+(() => {
+  "use strict";
+  // Client-side filter plus show-more paging over the loaded cards.
+  const grid = document.querySelector(".listing-grid");
+  if (!grid) return;
+  const cards = [...grid.querySelectorAll(".listing")];
+  const input = document.getElementById("recent-filter");
+  const drops = document.getElementById("recent-drops");
+  const more = document.getElementById("recent-more");
+  const count = document.getElementById("recent-count");
+  const PAGE = 12;
+  let shown = PAGE;
+
+  const matches = (card) => {
+    const q = input.value.trim().toLowerCase();
+    if (q && !card.textContent.toLowerCase().includes(q)) return false;
+    if (drops.checked && !card.querySelector(".tag.drop")) return false;
+    return true;
+  };
+  const render = () => {
+    const hits = cards.filter(matches);
+    for (const card of cards) card.hidden = true;
+    for (const card of hits.slice(0, shown)) card.hidden = false;
+    more.hidden = hits.length <= shown;
+    const visible = Math.min(shown, hits.length);
+    count.textContent = hits.length === cards.length
+      ? `showing ${visible} of ${cards.length}`
+      : `showing ${visible} of ${hits.length} matching`;
+  };
+  input.addEventListener("input", () => { shown = PAGE; render(); });
+  drops.addEventListener("change", () => { shown = PAGE; render(); });
+  more.addEventListener("click", () => { shown += PAGE; render(); });
+  render();
+})();
+</script>
+{% endif %}
+{% endblock %}
