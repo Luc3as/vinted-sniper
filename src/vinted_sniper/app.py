@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
+import time
 
 from vinted_sniper.config import Settings
 from vinted_sniper.db import Database, apply_pending
@@ -88,6 +89,7 @@ class Application:
                 client = VintedClient(
                     None, sessions, keep_raw=settings.keep_raw_json, budget=budget
                 )
+                await self._restore_cooldowns(repo, sessions)
                 dispatcher = Dispatcher(
                     repo=repo,
                     settings=settings,
@@ -225,6 +227,16 @@ class Application:
             raise
         except Exception as exc:
             log.exception("poller.crashed", query_id=poller.query.id, error=str(exc))
+
+    @staticmethod
+    async def _restore_cooldowns(repo: Repo, sessions: SessionManager) -> None:
+        """A restart must not turn a hold into a fresh volley of requests."""
+        now = time.time()
+        for query in await repo.list_queries():
+            raw = await repo.get_state_value(f"cooldown_until:{query.tld}")
+            if raw and raw.isdigit() and int(raw) > now:
+                sessions.cooldown.close(query.tld, int(raw) - now)
+                log.info("cooldown.restored", tld=query.tld, seconds=round(int(raw) - now))
 
     # --- Background chores ---------------------------------------------------------
 

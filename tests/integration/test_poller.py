@@ -18,6 +18,7 @@ import pytest
 from tests.conftest import ScriptedTransport
 from vinted_sniper.config import Settings
 from vinted_sniper.db.repo import Repo
+from vinted_sniper.engine import health
 from vinted_sniper.engine.poller import Poller
 from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.pacing import SiteCooldown
@@ -548,3 +549,17 @@ async def test_price_drop_tracking_can_be_switched_off(
     transport.queue_catalog([make_item(1, photo_ts=now - 5, price="10.0")])
     await poller.tick()
     assert await repo.outbox_depth() == 0
+
+
+async def test_a_hold_is_written_down_and_shows_as_cooling(
+    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
+) -> None:
+    clock = FakeClock()
+    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock)
+    transport.queue_status(403, "Forbidden")
+    await poller.tick()
+
+    snapshot = await health.snapshot(repo)
+    (search,) = snapshot.searches
+    assert search.state == "cooling"
+    assert search.cooling_until is not None and search.cooling_until > time.time()

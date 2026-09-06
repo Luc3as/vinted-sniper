@@ -138,7 +138,8 @@
       <p class="muted" style="margin:0">
         “stale” means this search has stopped seeing new listings while others on the same
         site keep finding them — usually a session that needs replacing, which happens
-        automatically. This table refreshes itself.
+        automatically. “cooling” means the site refused one search and every search on it
+        is waiting out the same backoff. This table refreshes itself.
       </p>
       <form method="post" action="/searches/interval" class="row inline" style="margin:0">
         <label style="margin:0">Check all every</label>

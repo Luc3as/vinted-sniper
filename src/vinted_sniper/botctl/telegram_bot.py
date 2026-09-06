@@ -237,6 +237,8 @@ async def _status_text(repo: Repo) -> str:
             else "never"
         )
         line = f"• {search.name} (id {search.query_id}) — {search.state}, last checked {last}"
+        if search.state == "cooling" and search.cooling_until:
+            line += f" (site held for {max(0, search.cooling_until - int(time.time())) // 60} min)"
         if search.state == "failing" and search.last_error:
             line += f"\n  {search.last_error[:120]}"
         lines.append(line)

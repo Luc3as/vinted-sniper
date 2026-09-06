@@ -41,6 +41,8 @@ class SearchHealth:
     rate_limits: int
     poll_interval_s: int = 0
     last_polled_at: int | None = None
+    # Set when the whole site is being held off after a refusal; see vinted/pacing.py.
+    cooling_until: int | None = None
 
     @property
     def next_check_at(self) -> int | None:
@@ -54,6 +56,8 @@ class SearchHealth:
         """A one-word summary, chosen so the unhappy cases are never mistaken for quiet."""
         if self.paused:
             return "paused"
+        if self.cooling_until is not None:
+            return "cooling"
         if self.last_success_at is None:
             return "starting"
         if self.last_status and self.last_status != "ok":
@@ -80,6 +84,7 @@ class SearchHealth:
             "poll_interval_s": self.poll_interval_s,
             "last_polled_at": self.last_polled_at,
             "next_check_at": self.next_check_at,
+            "cooling_until": self.cooling_until,
         }
 
 
@@ -112,6 +117,13 @@ async def snapshot(repo: Repo) -> Snapshot:
     """Gather the current state of every search in one pass."""
     queries = await repo.list_queries()
     states = {state.query_id: state for state in await repo.all_states()}
+    now = int(time.time())
+
+    cooling: dict[str, int] = {}
+    for tld in {query.tld for query in queries}:
+        raw = await repo.get_state_value(f"cooldown_until:{tld}")
+        if raw and raw.isdigit() and int(raw) > now:
+            cooling[tld] = int(raw)
 
     searches = []
     for query in queries:
@@ -132,6 +144,7 @@ async def snapshot(repo: Repo) -> Snapshot:
                 rate_limits=state.count_429 if state else 0,
                 poll_interval_s=query.poll_interval_s,
                 last_polled_at=state.last_polled_at if state else None,
+                cooling_until=cooling.get(query.tld),
             )
         )
 

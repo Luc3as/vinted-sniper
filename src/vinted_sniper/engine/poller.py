@@ -103,6 +103,11 @@ class Poller:
             delay = self._backoff()
             first_on_site = not self._sessions.cooldown.is_closed(self.query.tld)
             self._sessions.cooldown.close(self.query.tld, delay)
+            # Written down so the dashboard and /status can show "cooling down" rather
+            # than a row of failures, and so a restart does not forget the hold.
+            await self._repo.set_state_value(
+                f"cooldown_until:{self.query.tld}", str(int(time.time() + delay))
+            )
             self._log.warning("poll.blocked", error=str(exc), retry_in_s=round(delay))
             if first_on_site and self._announce is not None:
                 with contextlib.suppress(Exception):
