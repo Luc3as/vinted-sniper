@@ -5,6 +5,12 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 ## Unreleased
 
 ### Fixed
+- The watchdog called niche searches "stale" whenever a busy search on the same site kept
+  finding listings — "Rab Downpour" measured against "waterproof jacket" looked frozen forever.
+  A search whose page is not even full is never stale, and a full-page search is judged
+  against its own usual gap between listings (six times it, two hours at least).
+- Console logs no longer use ANSI colours unless `LOG_COLOR=true`; Portainer's log viewer
+  rendered them as a smear of repeated words.
 - The "Message seller" and "Buy" buttons under Telegram alerts linked to Vinted deep links
   (`/items/{id}/want_it/new`, `/transaction/buy/new`) that have answered "page not found" since
   the site's front end was rebuilt. They are replaced by "Seller profile"; asking and buying

@@ -431,7 +431,7 @@ async def _cmd_import(settings: Settings, path: str) -> int:
 
 async def _run(args: argparse.Namespace) -> int:
     settings = Settings()
-    log.configure(level=settings.log_level, fmt=settings.log_format)
+    log.configure(level=settings.log_level, fmt=settings.log_format, colors=settings.log_color)
 
     match args.command:
         case "run":

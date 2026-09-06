@@ -235,3 +235,64 @@ async def test_old_listings_are_pruned(repo: Repo, db: Database) -> None:
 
     assert await repo.prune_items(older_than_days=30) == 1
     assert await repo.known_item_ids([1]) == set()
+
+
+async def test_a_niche_search_is_not_stale_just_because_a_busy_one_keeps_moving(
+    repo: Repo, db: Database, transport: ScriptedTransport, settings: Settings
+) -> None:
+    """'Rab Downpour' sees a listing a week; 'waterproof jacket' one every few minutes.
+    Measured against the busy one, the niche one looked frozen forever."""
+    niche = await add_search(repo, "rab downpour")
+    busy = await add_search(repo, "waterproof jacket")
+    now = int(time.time())
+
+    # The niche search's page is not even full.
+    await set_state(
+        db, niche, last_success_at=now, stale_cycles=12, newest_raw_ts=now - 86_400, last_returned=4
+    )
+    await set_state(db, busy, last_success_at=now, stale_cycles=0, newest_raw_ts=now - 30)
+
+    watchdog, announcements = make_watchdog(repo, db, transport, settings)
+    assert await watchdog.check() == []
+    assert announcements == []
+
+
+async def test_a_full_page_search_is_judged_against_its_own_pace(
+    repo: Repo, db: Database, transport: ScriptedTransport, settings: Settings
+) -> None:
+    slow = await add_search(repo, "slow but full")
+    busy = await add_search(repo, "busy")
+    now = int(time.time())
+    query = await repo.get_query(slow)
+    assert query is not None
+
+    # This search normally sees one listing every ~4 hours.
+    listings = [
+        Item(
+            item_id=i,
+            tld="fr",
+            title=f"x{i}",
+            url=f"https://www.vinted.fr/items/{i}",
+            photo_ts=now - i * 4 * 3600,
+        )
+        for i in range(1, 13)
+    ]
+    await repo.record_new_items(query, listings, [])
+
+    await set_state(db, busy, last_success_at=now, stale_cycles=0, newest_raw_ts=now - 30)
+    watchdog, _ = make_watchdog(repo, db, transport, settings)
+
+    # Quiet for 10 hours with a 4-hour rhythm: unremarkable.
+    await set_state(
+        db,
+        slow,
+        last_success_at=now,
+        stale_cycles=12,
+        newest_raw_ts=now - 10 * 3600,
+        last_returned=96,
+    )
+    assert await watchdog.check() == []
+
+    # Quiet for 30 hours — more than six times its usual gap — with a full page: stuck.
+    await set_state(db, slow, newest_raw_ts=now - 30 * 3600)
+    assert [s.query_id for s in await watchdog.check()] == [slow]

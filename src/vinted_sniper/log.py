@@ -8,6 +8,7 @@ among a dozen healthy ones.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from typing import Any
 
@@ -17,10 +18,17 @@ import structlog
 _NOISY_LOGGERS = ("httpx", "httpcore", "aiogram.event", "uvicorn.access")
 
 
-def configure(level: str = "INFO", fmt: str = "console") -> None:
-    """Set up structlog and the standard library logger it bridges to."""
+def configure(level: str = "INFO", fmt: str = "console", *, colors: bool | None = None) -> None:
+    """Set up structlog and the standard library logger it bridges to.
+
+    Colours are off unless asked for. A container started with a TTY reports one even when
+    the reader is Portainer's log viewer, which does not understand the escape codes and
+    renders every coloured line as a smear of repeated words.
+    """
+    if colors is None:
+        colors = os.environ.get("VINTED_SNIPER_LOG_COLOR", "").lower() in {"1", "true", "yes"}
     renderer: structlog.typing.Processor = (
-        structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
+        structlog.dev.ConsoleRenderer(colors=colors and sys.stderr.isatty())
         if fmt == "console"
         else structlog.processors.JSONRenderer()
     )

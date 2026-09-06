@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     # --- Logging -------------------------------------------------------------------
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["console", "json"] = "console"
+    log_color: bool = Field(
+        default=False,
+        description="ANSI colours in console logs. Off by default: Portainer's and Docker's "
+        "log viewers render the escape codes as garbled, repeated words.",
+    )
 
     # --- Vinted transport ----------------------------------------------------------
     http_impersonate: bool = Field(

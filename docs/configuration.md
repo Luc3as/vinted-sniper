@@ -81,6 +81,7 @@ was found, so you can see the real delay yourself.
 | Variable | Default | What it does |
 |---|---|---|
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
+| `LOG_COLOR` | `false` | ANSI colours in console logs. Leave off when the reader is Portainer or `docker logs`; they render the escape codes as repeated words. |
 | `LOG_FORMAT` | `console` | `json` when something else is collecting the logs. |
 | `FETCH_MODE` | `live` | `mock` replays recorded responses from disk instead of calling Vinted. |
 | `MOCK_SCENARIO_DIR` | unset | Required when `FETCH_MODE=mock`. |

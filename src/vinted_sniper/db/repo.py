@@ -6,6 +6,7 @@ of the code deals in ordinary Python objects rather than rows.
 
 from __future__ import annotations
 
+import itertools
 import json
 import time
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ class QueryState:
     items_seen_total: int = 0
     count_403: int = 0
     count_429: int = 0
+    last_returned: int | None = None
 
     @property
     def is_first_run(self) -> bool:
@@ -310,6 +312,7 @@ class Repo:
             items_seen_total=row["items_seen_total"],
             count_403=row["count_403"],
             count_429=row["count_429"],
+            last_returned=row["last_returned"],
         )
 
     async def all_states(self) -> list[QueryState]:
@@ -327,6 +330,7 @@ class Repo:
                 items_seen_total=row["items_seen_total"],
                 count_403=row["count_403"],
                 count_429=row["count_429"],
+                last_returned=row["last_returned"],
             )
             for row in rows
         ]
@@ -355,8 +359,9 @@ class Repo:
             "UPDATE query_state SET last_polled_at = ?, last_success_at = ?, last_status = 'ok', "
             "last_error = NULL, newest_raw_ts = ?, "
             "newest_item_ts = COALESCE(?, newest_item_ts), "
-            "items_seen_total = items_seen_total + ?, stale_cycles = ? WHERE query_id = ?",
-            (now, now, newest_raw_ts, newest_item_ts, seen, stale_cycles, query_id),
+            "items_seen_total = items_seen_total + ?, stale_cycles = ?, last_returned = ? "
+            "WHERE query_id = ?",
+            (now, now, newest_raw_ts, newest_item_ts, seen, stale_cycles, seen, query_id),
         )
 
     # --- Destinations --------------------------------------------------------------
@@ -689,6 +694,21 @@ class Repo:
                     ],
                 )
         return len(drops)
+
+    async def typical_listing_gap_s(self, query_id: int) -> int | None:
+        """How often this search normally sees a new listing, from the listing times we
+        have recorded for it — the median gap between consecutive photo timestamps.
+        None until there are enough to say."""
+        rows = await self._db.fetch_all(
+            "SELECT photo_ts FROM items WHERE query_id = ? AND photo_ts IS NOT NULL "
+            "ORDER BY photo_ts DESC LIMIT 60",
+            (query_id,),
+        )
+        stamps = [int(row["photo_ts"]) for row in rows]
+        if len(stamps) < 8:  # noqa: PLR2004 - fewer and the median is noise
+            return None
+        gaps = sorted(a - b for a, b in itertools.pairwise(stamps) if a > b)
+        return gaps[len(gaps) // 2] if gaps else None
 
     async def delivery_history(
         self, *, limit: int = 200, query_id: int | None = None, status: str | None = None
