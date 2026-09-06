@@ -267,7 +267,9 @@ class TelegramSender:
                 f"{API_ROOT}/bot{self._token}/{method}", json=payload
             )
         except httpx.HTTPError as exc:
-            return SendResult.transient(outbox_ids, f"could not reach Telegram: {exc}")
+            return SendResult.transient(
+                outbox_ids, f"could not reach Telegram: {self._redact(str(exc))}"
+            )
 
         try:
             body = response.json()
@@ -290,6 +292,11 @@ class TelegramSender:
             )
 
         return _classify(description, response.status_code, outbox_ids)
+
+    def _redact(self, text: str) -> str:
+        """The bot token appears in Telegram API URLs; it must never reach a log or the
+        history page by way of an error message."""
+        return text.replace(self._token, "<bot-token>")
 
     async def aclose(self) -> None:
         if self._owns_client:

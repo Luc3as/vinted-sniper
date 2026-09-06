@@ -90,7 +90,7 @@
             </button>
           </form>
           <form method="post" action="/searches/{{ search.query_id }}/delete" class="inline"
-                onsubmit="return confirm('Delete “{{ search.name }}”?\n\nIts recorded listings and market history go with it. Pausing keeps them.')">
+                data-confirm="Delete “{{ search.name }}”? Its recorded listings and market history go with it. Pausing keeps them.">
             <button class="danger icon" type="submit" title="Remove this search and its history">{{ icon('trash') }} Delete</button>
           </form>
         </td>
@@ -377,7 +377,7 @@
         <td class="actions">
           {% if destination.active %}
           <form method="post" action="/destinations/{{ destination.id }}/delete" class="inline"
-                onsubmit="return confirm('Remove “{{ destination.name }}”? Searches routed to it will stop alerting there.')">
+                data-confirm="Remove “{{ destination.name }}”? Searches routed to it will stop alerting there.">
             <button class="danger icon" type="submit">{{ icon('trash') }} Remove</button>
           </form>
           {% endif %}

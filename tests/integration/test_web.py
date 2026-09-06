@@ -569,3 +569,55 @@ def test_the_help_page_explains_the_words(signed_in: TestClient) -> None:
     assert page.status_code == 200
     for phrase in ("Only the cheapest", "Total price", "Quiet hours", "Current settings"):
         assert phrase in page.text
+
+
+# --- Security --------------------------------------------------------------------------
+
+
+def test_every_response_carries_the_security_headers(signed_in: TestClient) -> None:
+    response = signed_in.get("/")
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+    assert "form-action 'self'" in response.headers["content-security-policy"]
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+def test_a_form_posted_from_another_site_is_refused(signed_in: TestClient, repo: Repo) -> None:
+    payload = {"url": "https://www.vinted.fr/catalog?search_text=csrf"}
+    response = signed_in.post(
+        "/searches",
+        data=payload,
+        headers={"Origin": "https://evil.example", "Referer": "https://evil.example/page"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 403
+
+    same = signed_in.post(
+        "/searches", data=payload, headers={"Origin": "http://testserver"}, follow_redirects=False
+    )
+    assert same.status_code == 303
+
+
+def test_wrong_tokens_are_throttled(client: TestClient) -> None:
+    for _ in range(5):
+        assert client.post("/login", data={"access_token": "nope"}).status_code == 401
+    blocked = client.post("/login", data={"access_token": "nope"})
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+
+
+def test_the_session_cookie_is_httponly_and_strict(client: TestClient) -> None:
+    response = client.post("/login", data={"access_token": TOKEN}, follow_redirects=False)
+    cookie = response.headers["set-cookie"].lower()
+    assert "httponly" in cookie
+    assert "samesite=strict" in cookie
+
+
+def test_no_inline_event_handlers_in_the_templates() -> None:
+    """A name with a quote in it must stay text; inline handlers turn it into code."""
+
+    templates = Path(__file__).resolve().parents[2] / "src/vinted_sniper/web/templates"
+    for page in templates.glob("*.html"):
+        text = page.read_text(encoding="utf-8")
+        assert " onsubmit=" not in text and " onclick=" not in text, page.name

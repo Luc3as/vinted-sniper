@@ -57,6 +57,9 @@ All notable changes, newest first. Dates are when the change landed on `main`.
   `/api/export` and `/api/import`.
 - The Docker image now includes the `impersonate` extra.
 
+### Security
+- Security headers on every response (CSP with `frame-ancestors 'none'` and `form-action 'self'`, `X-Frame-Options`, `nosniff`, `Referrer-Policy`); state-changing requests from another origin are refused; session cookie is `SameSite=Strict` and `Secure` behind HTTPS; five wrong tokens from one address earn a 60 s cooldown; no inline event handlers in templates; the Telegram bot token is redacted from stored error messages. `SECURITY.md` documents the threat model.
+
 ### Changed
 - New identity: a coat hanger whose hook is a target ring (mark), the same inside a scope (icon/favicon), and a wordmark set in Outfit converted to paths. Logo files carry their own licence (all rights reserved; code stays MIT).
 - New README (English with a Slovak section) and an original logo (`docs/media/logo/`, light and

@@ -44,6 +44,12 @@ from vinted_sniper.log import get_logger
 from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.errors import VintedError
 from vinted_sniper.vinted.taxonomy import FACET_CODES, Taxonomy
+from vinted_sniper.web.security import (
+    LoginThrottle,
+    SameOriginMiddleware,
+    SecurityHeadersMiddleware,
+    client_address,
+)
 
 log = get_logger(__name__)
 
@@ -63,6 +69,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
     token = settings.web_auth_token  # None means no password: the dashboard just opens
 
     app = FastAPI(title="vinted-sniper", docs_url=None, redoc_url=None)
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(SameOriginMiddleware)
+    throttle = LoginThrottle()
 
     async def require_login(
         session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
@@ -95,19 +104,32 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
     async def login(request: Request, access_token: Annotated[str, Form()]) -> Response:
         if token is None:
             return RedirectResponse("/", status_code=303)
+        client = client_address(request)
+        if (wait := throttle.retry_after(client)) > 0:
+            return TEMPLATES.TemplateResponse(
+                request,
+                "login.html",
+                {"error": f"Too many wrong tokens. Try again in {int(wait) + 1} s."},
+                status_code=429,
+                headers={"Retry-After": str(int(wait) + 1)},
+            )
         if not _authorised(access_token, token):
+            throttle.failed(client)
+            log.warning("web.login_failed", client=client)
             return TEMPLATES.TemplateResponse(
                 request,
                 "login.html",
                 {"error": "That token does not match."},
                 status_code=401,
             )
+        throttle.succeeded(client)
         response = RedirectResponse("/", status_code=303)
         response.set_cookie(
             SESSION_COOKIE,
             access_token,
             httponly=True,
-            samesite="lax",
+            samesite="strict",
+            secure=request.url.scheme == "https",
             max_age=30 * 86_400,
         )
         return response
