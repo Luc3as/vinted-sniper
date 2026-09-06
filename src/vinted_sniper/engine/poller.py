@@ -9,6 +9,7 @@ connection is not, and hammering it makes it worse.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import contextlib
 import random
 import time
@@ -34,6 +35,9 @@ log = get_logger(__name__)
 
 # Spread checks out so a dozen searches do not all fire on the same second.
 _JITTER_FRACTION = 0.15
+
+# Below this many price points a percentile is a guess; the market filter waits.
+MIN_MARKET_SAMPLE = 10
 
 
 class Poller:
@@ -152,6 +156,18 @@ class Poller:
             if filters.check(item, self.query) is None:
                 candidates.append(item)
 
+        # Where does each candidate's price sit among what this search has been seeing?
+        # Used as a filter if the search asks for one, and remembered for the alert either
+        # way ("cheaper than 88% of 312 listings seen this month").
+        positions = await self._market_positions(candidates)
+        if self.query.max_market_percentile is not None:
+            ceiling = self.query.max_market_percentile
+            candidates = [
+                item
+                for item in candidates
+                if item.item_id not in positions or positions[item.item_id][0] <= ceiling
+            ]
+
         known = await self._repo.known_item_ids([item.item_id for item in candidates])
         if known and not state.is_first_run:
             await self._announce_price_drops([c for c in candidates if c.item_id in known])
@@ -177,6 +193,13 @@ class Poller:
                 keep_raw=self._settings.keep_raw_json,
                 hold_s=hold_s,
                 never_hold=await self._repo.destination_ids_of_kind("webhook") if hold_s else None,
+            )
+            await self._repo.record_market_position(
+                {
+                    i.item_id: positions[i.item_id]
+                    for i in selection.to_record
+                    if i.item_id in positions
+                }
             )
             if selection.to_notify and self._work_available is not None:
                 self._work_available.set()
@@ -206,6 +229,22 @@ class Poller:
             self._log.info("poll.new_items", count=len(selection.to_notify), returned=len(items))
         else:
             self._log.debug("poll.nothing_new", returned=len(items))
+
+    async def _market_positions(self, items: list[Item]) -> dict[int, tuple[int, int]]:
+        """Percentile (share of listings cheaper) and sample size, per listing with a price."""
+        if not items:
+            return {}
+        prices = await self._repo.market_prices(self.query.id)
+        if len(prices) < MIN_MARKET_SAMPLE:
+            return {}
+        positions: dict[int, tuple[int, int]] = {}
+        for item in items:
+            payable = item.total_price if item.total_price is not None else item.price
+            if payable is None:
+                continue
+            below = bisect.bisect_left(prices, float(payable))
+            positions[item.item_id] = (round(100 * below / len(prices)), len(prices))
+        return positions
 
     async def _announce_price_drops(self, seen_again: list[Item]) -> None:
         """A listing already recorded, now cheaper. No extra request: it is on the page

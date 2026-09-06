@@ -82,6 +82,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--block-seller", default="", help="Comma-separated seller usernames to skip."
     )
     watch.add_argument(
+        "--cheapest",
+        type=int,
+        default=0,
+        help="Only listings in the cheapest N%% of what this search has seen in 30 days.",
+    )
+    watch.add_argument(
         "--to",
         default="",
         help="Comma-separated destination ids to notify. Defaults to all active ones.",
@@ -236,6 +242,7 @@ async def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
             min_seller_rating=min_rating,
             min_seller_reviews=args.min_seller_reviews or None,
             blocked_sellers=_csv(args.block_seller),
+            max_market_percentile=args.cheapest or None,
         )
 
         if args.to.strip():

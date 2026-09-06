@@ -138,6 +138,7 @@ class DiscordSender:
             if value:
                 fields.append({"name": name, "value": value[:1024], "inline": True})
         fields.append({"name": "Location", "value": _location(item.tld), "inline": True})
+        fields.extend(_market_field(notification))
         if item.seller_rating is not None:
             fields.append({"name": "Seller rating", "value": _rating(item), "inline": True})
         if item.seller_login:
@@ -237,6 +238,11 @@ def _location(tld: str) -> str:
     iso = _ISO_BY_TLD.get(tld, tld.upper())
     flag = "".join(chr(0x1F1E6 + ord(letter) - ord("A")) for letter in iso)
     return f"{flag} {iso}"
+
+
+def _market_field(notification: PendingNotification) -> list[dict[str, Any]]:
+    market = notification.market_line()
+    return [{"name": "Market", "value": market[:1024], "inline": False}] if market else []
 
 
 def _verdict_field(notification: PendingNotification) -> dict[str, Any] | None:

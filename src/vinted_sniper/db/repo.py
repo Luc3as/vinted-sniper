@@ -50,6 +50,8 @@ class Query:
     min_seller_rating: float | None = None
     min_seller_reviews: int | None = None
     blocked_sellers: list[str] = field(default_factory=list)
+    # Only announce listings priced in the cheapest N% of what this search has seen.
+    max_market_percentile: int | None = None
     # Bumped on every edit; the supervisor restarts a search's task when it changes so
     # new filters take effect without a process restart.
     updated_at: int = 0
@@ -110,6 +112,17 @@ class PendingNotification:
     kind: str = "new"
     previous_price: Decimal | None = None
     enrichment: Enrichment | None = None
+    # Where the price sat among this search's listings when found: (percentile, sample).
+    market_percentile: int | None = None
+    market_n: int | None = None
+
+    def market_line(self) -> str | None:
+        """Plain words for the market position: "cheaper than 88% of 312 listings seen
+        this month". Nobody should need to know what a percentile is."""
+        if self.market_percentile is None or not self.market_n:
+            return None
+        cheaper_than = 100 - self.market_percentile
+        return f"cheaper than {cheaper_than}% of {self.market_n} similar listings seen this month"
 
     @property
     def is_price_drop(self) -> bool:
@@ -164,14 +177,15 @@ class Repo:
         min_seller_rating: float | None = None,
         min_seller_reviews: int | None = None,
         blocked_sellers: list[str] | None = None,
+        max_market_percentile: int | None = None,
     ) -> int:
         now = int(time.time())
         query_id = await self._db.insert(
             "INSERT INTO queries (name, url, tld, params_json, poll_interval_s, "
             "banned_keywords_json, max_total_price, required_keywords_json, title_pattern, "
             "min_seller_rating, min_seller_reviews, blocked_sellers_json, "
-            "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "max_market_percentile, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 name,
                 url,
@@ -185,6 +199,7 @@ class Repo:
                 min_seller_rating,
                 min_seller_reviews,
                 json.dumps(blocked_sellers or []),
+                max_market_percentile,
                 now,
                 now,
             ),
@@ -228,6 +243,7 @@ class Repo:
         min_seller_rating: float | None,
         min_seller_reviews: int | None,
         blocked_sellers: list[str],
+        max_market_percentile: int | None = None,
     ) -> None:
         """Change everything about a search except what it searches for.
 
@@ -238,7 +254,7 @@ class Repo:
             "UPDATE queries SET name = ?, poll_interval_s = ?, banned_keywords_json = ?, "
             "max_total_price = ?, required_keywords_json = ?, title_pattern = ?, "
             "min_seller_rating = ?, min_seller_reviews = ?, blocked_sellers_json = ?, "
-            "updated_at = ? WHERE id = ?",
+            "max_market_percentile = ?, updated_at = ? WHERE id = ?",
             (
                 name,
                 poll_interval_s,
@@ -249,10 +265,35 @@ class Repo:
                 min_seller_rating,
                 min_seller_reviews,
                 json.dumps(blocked_sellers),
+                max_market_percentile,
                 int(time.time()),
                 query_id,
             ),
         )
+
+    async def clone_query(self, query_id: int, *, url: str, tld: str, name: str) -> int | None:
+        """The same search, filters and routing, on another country's site."""
+        source = await self.get_query(query_id)
+        if source is None:
+            return None
+        new_id = await self.add_query(
+            name=name,
+            url=url,
+            tld=tld,
+            params=source.params,
+            poll_interval_s=source.poll_interval_s,
+            banned_keywords=source.banned_keywords,
+            max_total_price=source.max_total_price,
+            required_keywords=source.required_keywords,
+            title_pattern=source.title_pattern,
+            min_seller_rating=source.min_seller_rating,
+            min_seller_reviews=source.min_seller_reviews,
+            blocked_sellers=source.blocked_sellers,
+            max_market_percentile=source.max_market_percentile,
+        )
+        for destination_id in await self.destination_ids_for_query(query_id):
+            await self.route(new_id, destination_id)
+        return new_id
 
     async def set_all_intervals(self, poll_interval_s: int) -> int:
         return await self._db.execute(
@@ -295,6 +336,7 @@ class Repo:
             min_seller_rating=row["min_seller_rating"],
             min_seller_reviews=row["min_seller_reviews"],
             blocked_sellers=_json_list(row["blocked_sellers_json"]) or [],
+            max_market_percentile=row["max_market_percentile"],
             updated_at=int(row["updated_at"] or 0),
         )
 
@@ -809,6 +851,27 @@ class Repo:
             context["this_percentile"] = round(100 * below / len(prices))
         return context
 
+    async def market_prices(self, query_id: int, *, days: int = 30) -> list[float]:
+        """Every total price this search has seen in the window, sorted. The poller uses it
+        to place a fresh listing on the scale without another round trip per listing."""
+        since = int(time.time()) - days * 86_400
+        rows = await self._db.fetch_all(
+            "SELECT COALESCE(total_price, price) AS p FROM market "
+            "WHERE query_id = ? AND last_seen_at >= ? AND COALESCE(total_price, price) IS NOT NULL "
+            "ORDER BY p",
+            (query_id, since),
+        )
+        return [float(row["p"]) for row in rows]
+
+    async def record_market_position(self, positions: dict[int, tuple[int, int]]) -> None:
+        """Remember where each listing sat in its market when it was found."""
+        if not positions:
+            return
+        await self._db.execute_many(
+            "UPDATE items SET market_percentile = ?, market_n = ? WHERE item_id = ?",
+            [(pct, n, item_id) for item_id, (pct, n) in positions.items()],
+        )
+
     async def prune_market(self, older_than_days: int) -> int:
         cutoff = int(time.time()) - older_than_days * 86_400
         return await self._db.execute("DELETE FROM market WHERE last_seen_at < ?", (cutoff,))
@@ -1029,6 +1092,8 @@ class Repo:
                     Decimal(str(row["previous_price"])) if row["kind"] == "price_drop" else None
                 ),
                 enrichment=Enrichment.from_row(row),
+                market_percentile=row["market_percentile"],
+                market_n=row["market_n"],
             )
             for row in rows
         ]

@@ -11,7 +11,10 @@
 
 {% block content %}
 <section>
-  <h2>Delivery history</h2>
+  <div class="section-head">
+    <h2>Delivery history</h2>
+    <span class="lede">Every alert, newest first: what it was, where it went, and whether it got there. The answer to “did my alert go out?”.</span>
+  </div>
   <div class="card">
     <form method="get" action="/history" class="row" style="gap:.6rem">
       <label style="margin:0">Search</label>
@@ -28,14 +31,15 @@
         {% endfor %}
       </select>
       <button class="quiet" type="submit">Filter</button>
-      <span class="muted">Last 200 notifications, newest first. “cancelled” means expired before delivery or discarded on purpose.</span>
+      <span class="muted">Last 200. <span class="pill sent">sent</span> delivered · <span class="pill pending">pending</span> waiting (paired? quiet hours? held for a verdict?) · <span class="pill failed">failed</span> gave up, reason shown · <span class="pill cancelled">cancelled</span> expired or discarded on purpose.</span>
     </form>
   </div>
 
   {% if not rows %}
-  <div class="card"><p class="muted" style="margin:0">Nothing has been queued yet.</p></div>
+  <div class="card"><div class="empty"><strong>Nothing has been queued yet.</strong> Alerts appear here the moment a search finds something.</div></div>
   {% else %}
   <div class="card history">
+    <div class="table-wrap">
     <table>
       <tr><th></th><th>Listing</th><th>Kind</th><th>Search</th><th>To</th><th>Status</th><th>When</th></tr>
       {% for row in rows %}
@@ -63,6 +67,7 @@
       </tr>
       {% endfor %}
     </table>
+    </div>
   </div>
   {% endif %}
 </section>

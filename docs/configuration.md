@@ -117,9 +117,11 @@ Options for `watch`:
 | `--min-seller-rating N` | Skip sellers rated below N percent. Sellers with no rating yet are skipped too. |
 | `--min-seller-reviews N` | Skip sellers with fewer than N reviews. |
 | `--block-seller a,b` | Skip these seller usernames outright. |
+| `--cheapest N` | Only listings priced in the cheapest N% of what this search has seen in the last 30 days (every listing on the page counts, filters or not). Adapts to the market by itself; inactive until ten price points exist. The alert states the position in words: "cheaper than 88% of 312 similar listings seen this month". |
 
 The same fields are under "More filters" when adding a search in the dashboard, and every
-search has an **Edit** button there for changing them afterwards — the change takes effect
+search has an **Edit** button there (which also offers **Clone** — the same search, filters
+and destinations on another country site) for changing them afterwards — the change takes effect
 on the next check, no restart needed. Only the URL is fixed: it is what the search *is*.
 | `--to 1,2` | Destination ids to notify. Defaults to all active ones. |
 

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Help · vinted-sniper{% endblock %}
+
+{% block header_extra %}
+  {% if auth_enabled %}
+  <form method="post" action="/logout" class="inline"><button class="quiet" type="submit">Sign out</button></form>
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<section>
+  <div class="section-head"><h2>How it works</h2><span class="lede">Two minutes, no jargon.</span></div>
+  <div class="card">
+    <p>You give it a Vinted search — the address bar after you set your filters. Every few minutes it asks Vinted for that search’s newest listings, exactly as a browser would, without logging in. Anything new that passes your filters is sent to your <strong>destinations</strong> (Telegram, Discord, ntfy, a webhook). The first check of a new search only records what is already there, so you are not flooded.</p>
+    <p>Vinted does not like being asked too often. The app paces itself (at most {{ settings_view.site_requests_per_minute }} requests a minute per country site, across all searches), and when Vinted refuses a request every search on that site backs off together — you will see <span class="pill cooling">cooling</span> in the table and get a notice if a destination has health notices on. That is deliberate, not a fault.</p>
+  </div>
+</section>
+
+<section>
+  <div class="section-head"><h2>Words on the Searches page</h2></div>
+  <div class="card">
+    <dl class="glossary">
+      <dt>Total price</dt>
+      <dd>What you actually pay: the asking price plus Vinted’s buyer-protection fee. All price filters and alerts use the total. Vinted’s own price filter does not.</dd>
+      <dt>Only the cheapest … %</dt>
+      <dd>Every check sees up to 96 listings; all of them are remembered for 30 days with their price, filters or not. When a new listing arrives, we count how many remembered ones are cheaper. Set it to 25 and you only hear about listings in the cheapest quarter of the current market. It follows the season by itself — no need to guess a price. It needs 10 remembered listings before it starts filtering, so on a niche search it may take a few days. The alert says it in words: <em>“cheaper than 88 % of 312 similar listings seen this month”</em> — the higher, the better.</dd>
+      <dt>Check every</dt>
+      <dd>Seconds between checks. Vinted’s own listing feed lags by minutes, so checking faster than every 2 minutes finds nothing sooner and gets the address blocked. 120–600 is sensible; the “Apply to all” box changes every search at once.</dd>
+      <dt>States</dt>
+      <dd><span class="pill ok">ok</span> normal · <span class="pill starting">starting</span> no check finished yet · <span class="pill cooling">cooling</span> Vinted refused a request on this site and all searches on it are waiting · <span class="pill stale">stale</span> no new listing for far longer than this search usually goes (only when its page is full and other searches on the site keep moving) · <span class="pill failing">failing</span> the last check errored, the reason is under the name · <span class="pill paused">paused</span> you paused it.</dd>
+      <dt>Newest listing</dt>
+      <dd>When the newest listing Vinted returned was posted. A healthy busy search moves this every few minutes. A niche search may not move it for days — that is fine.</dd>
+      <dt>Found</dt>
+      <dd>How many listings this search has recorded, including the first-check seed.</dd>
+      <dt>Clone</dt>
+      <dd>Runs the same search, filters and destinations on another country site. Vinted lets you buy across EU sites, and .de, .pl or .cz have far more listings than .sk. A listing that shows on several sites is only alerted once.</dd>
+      <dt>Pause vs Delete</dt>
+      <dd>Pause stops checking and keeps everything. Delete removes the search, its recorded listings and its market memory.</dd>
+    </dl>
+  </div>
+</section>
+
+<section>
+  <div class="section-head"><h2>What an alert contains</h2></div>
+  <div class="card">
+    <dl class="glossary">
+      <dt>📊 cheaper than … %</dt><dd>The market position explained above.</dd>
+      <dt>📉 Price drop</dt><dd>A listing you already saw got at least {{ settings_view.price_drop_min_percent }} % cheaper. Costs no extra requests: the listing was on the page anyway.</dd>
+      <dt>🔥 HOT DEAL · 🤖 · 💤</dt><dd>Only if an AI agent is connected (below). 🔥 the agent scored it {{ settings_view.enrichment_highlight_score }} or more; 🤖 a normal verdict; 💤 scored under {{ settings_view.enrichment_silent_below }} or “not the product you searched for” — delivered without a notification sound.</dd>
+      <dt>Skip seller</dt><dd>Adds the seller to that search’s skip list. Undo it in the search’s Edit form.</dd>
+      <dt>Pause search</dt><dd>Same as the Pause button here. <code>/resume &lt;id&gt;</code> in Telegram brings it back; ids are in <code>/status</code>.</dd>
+      <dt>👍 / 👎</dt><dd>Tells the agent whether it called this one right. Your last few answers on a search are shown to it next time, so it learns what <em>you</em> call a deal.</dd>
+      <dt>Quiet hours</dt><dd>Per destination. Nothing is sent inside the window; what turned up arrives together when it ends (Telegram folds more than five into one message). Times are read in <code>{{ settings_view.timezone }}</code>.</dd>
+      <dt>Health notices</dt><dd>Warnings and the Monday summary go only to destinations with this switched on. Have at least one.</dd>
+    </dl>
+  </div>
+</section>
+
+<section>
+  <div class="section-head"><h2>The AI agent (optional)</h2></div>
+  <div class="card">
+    <p>Add a <strong>plain webhook</strong> destination pointing at your agent (the reference is an n8n workflow with an LLM) and route searches to it alongside Telegram. Each new listing goes to the agent at once with its photos, the market position, retail prices found earlier and your 👍/👎 history; the chat alert waits up to <strong>{{ settings_view.enrichment_wait_s }} s</strong> ({{ 'off — set ENRICHMENT_WAIT_S to turn on' if not settings_view.enrichment_wait_s else 'ENRICHMENT_WAIT_S' }}) for the agent to post back a verdict: what product it really is, what it costs new, whether it matches your search, any authenticity worries, a deal score and one sentence. The verdict is woven into the alert. If the agent is silent, the alert goes out as usual — you never lose one.</p>
+    <p class="muted">Contract for building your own agent: <code>docs/enrichment.md</code> in the repository.</p>
+  </div>
+</section>
+
+<section>
+  <div class="section-head"><h2>Current settings</h2><span class="lede">Set with environment variables; restart to change.</span></div>
+  <div class="card">
+    <div class="table-wrap"><table>
+      <tr><th>Setting</th><th>Value</th><th>Meaning</th></tr>
+      <tr><td><code>POLL_DEFAULT_INTERVAL_S</code></td><td>{{ settings_view.poll_default_interval_s }}</td><td>Default seconds between checks for a new search.</td></tr>
+      <tr><td><code>SITE_REQUESTS_PER_MINUTE</code></td><td>{{ settings_view.site_requests_per_minute }}</td><td>Ceiling on requests to one country site from this address, all searches together.</td></tr>
+      <tr><td><code>PRICE_DROP_MIN_PERCENT</code></td><td>{{ settings_view.price_drop_min_percent }}</td><td>A listing is announced again when its total price falls by at least this much.</td></tr>
+      <tr><td><code>ENRICHMENT_WAIT_S</code></td><td>{{ settings_view.enrichment_wait_s }}</td><td>How long chat alerts wait for an agent’s verdict. 0 = no agent.</td></tr>
+      <tr><td><code>ENRICHMENT_HIGHLIGHT_SCORE</code> / <code>SILENT_BELOW</code></td><td>{{ settings_view.enrichment_highlight_score }} / {{ settings_view.enrichment_silent_below }}</td><td>Score for 🔥 · score under which the phone does not buzz.</td></tr>
+      <tr><td><code>OUTBOX_EXPIRY_MINUTES</code></td><td>{{ settings_view.outbox_expiry_minutes }}</td><td>An alert not delivered within this long is dropped (except during quiet hours).</td></tr>
+      <tr><td><code>ITEM_RETENTION_DAYS</code></td><td>{{ settings_view.item_retention_days }}</td><td>How long recorded listings are kept.</td></tr>
+      <tr><td><code>WEEKLY_REPORT</code></td><td>{{ 'on' if settings_view.weekly_report else 'off' }}</td><td>Monday 08:00 summary to destinations with health notices.</td></tr>
+      <tr><td><code>TIMEZONE</code></td><td>{{ settings_view.timezone }}</td><td>For quiet hours and the weekly report.</td></tr>
+      <tr><td>Telegram bot</td><td>{{ 'configured' if settings_view.telegram else 'not configured' }}</td><td><code>TELEGRAM_BOT_TOKEN</code>; pair a chat with <code>vinted-sniper pair-telegram</code>.</td></tr>
+    </table></div>
+    <p class="muted" style="margin-bottom:0">Full reference: <code>docs/configuration.md</code>. Troubleshooting (“listings stop arriving”, “Vinted refuses us”): <code>docs/troubleshooting.md</code>.</p>
+  </div>
+</section>
+{% endblock %}

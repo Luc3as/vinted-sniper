@@ -146,8 +146,11 @@ class TelegramSender:
         query_id: int | None = None,
         headline: str | None = None,
         enrichment: Enrichment | None = None,
+        market_line: str | None = None,
     ) -> dict[str, Any]:
         lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line())]
+        if market_line:
+            lines.append(f"📊 {html.escape(market_line)}")
         if headline:
             lines.insert(0, f"📉 <b>{html.escape(headline)}</b>")
         silent = enrichment is not None and enrichment.is_dull(self._silent_below)

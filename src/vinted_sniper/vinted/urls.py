@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from typing import Final
-from urllib.parse import parse_qsl, urlencode, urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 # Vinted runs one site per country. The domain decides the catalog, the currency and the
 # sellers you see, so it travels with the search from bootstrap through to the link in
@@ -169,6 +169,13 @@ def catalog_page(tld: str) -> str:
 
 def site_root(tld: str) -> str:
     return f"https://www.vinted.{tld}/"
+
+
+def swap_tld(url: str, tld: str) -> str:
+    """The same URL on another country site. Vinted's catalog, brand, size and status ids
+    are shared across its sites, so nothing but the domain changes."""
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    return urlunparse(parsed._replace(netloc=f"www.vinted.{tld}"))
 
 
 def item_url(tld: str, item_id: int) -> str:

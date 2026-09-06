@@ -147,6 +147,8 @@ def _item_json(notification: PendingNotification, callback_base: str | None) -> 
         "views": item.view_count,
         "listed_minutes_ago": _minutes_since(item.photo_ts),
         "favourites_per_hour": _per_hour(item.favourite_count, item.photo_ts),
+        "market_percentile": notification.market_percentile,
+        "market_n": notification.market_n,
         # Kept for consumers written against version 1. Both used to be Vinted deep links
         # that no longer resolve; they now point at the listing page, where the buttons are.
         "links": {

@@ -45,6 +45,9 @@ All notable changes, newest first. Dates are when the change landed on `main`.
   `enrichment_url`; a verdict posted to `/api/items/{id}/enrichment` (deal score, identified
   model, retail price, match, risk, one line) is woven into the alert — hot deals headlined,
   dull ones muted. Late hot verdicts get a short follow-up. See `docs/enrichment.md`.
+- **Clone a search to another country** from its Edit form: same filters and destinations on vinted.de/.pl/.cz/…; a listing shown on several sites is alerted once.
+- **"Only the cheapest N%" filter** (`--cheapest`, or the field in the dashboard): the listing's price against everything the search has seen in 30 days. Alerts say the position in words ("cheaper than 88% of 312 similar listings seen this month").
+- **Dashboard rewritten for people who have not read the docs**: plain-language `?` tooltips on every field and column, a state legend, "how the filters work together" explainers, a Help page with a glossary and the running settings, success notices after every action, confirmations on delete, SVG icons, a sticky nav with the current page marked, keyboard focus rings, reduced-motion support, and dark mode that no longer has hard-coded light colours.
 - **Delivery history** page (`/history`, `/api/history`): every notification, its kind, where it went, sent/pending/failed with the error, held-until for enrichment — the answer to "did my alert go out?".
 - Telegram `/pause <id>` alongside `/resume <id>`.
 - **Market memory**: every listing on a search's page is recorded as a price point (no extra requests). The webhook payload gains `market` (percentiles, the listing's own percentile, median for the same condition, the price under which listings vanish within a day), demand (`favourites_per_hour`), `known_retail` (retail prices earlier verdicts found, cached per search) and `buyer_feedback` (👍/👎 the buyer gave earlier verdicts, via new buttons under Telegram alerts).

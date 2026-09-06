@@ -563,3 +563,81 @@ async def test_a_hold_is_written_down_and_shows_as_cooling(
     (search,) = snapshot.searches
     assert search.state == "cooling"
     assert search.cooling_until is not None and search.cooling_until > time.time()
+
+
+# --- Market percentile filter ----------------------------------------------------------
+
+
+async def test_the_market_filter_keeps_only_the_cheapest_share_once_it_knows_the_market(
+    transport: ScriptedTransport,
+    repo: Repo,
+    settings: Settings,
+    db: Any,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    query_id = await repo.add_query(
+        name="cheap only",
+        url="https://www.vinted.fr/catalog?search_text=x",
+        tld="fr",
+        params={"search_text": "x"},
+        poll_interval_s=60,
+        max_market_percentile=25,
+    )
+    query = await repo.get_query(query_id)
+    assert query is not None
+    poller, _ = poller_for(query, transport, repo, settings, db=db)
+    destination = await repo.add_destination(kind="ntfy", name="t", config={"topic": "t"})
+    await repo.route(query_id, destination)
+    now = int(time.time())
+
+    # First check seeds a market of twenty prices, 10..29 (silent first run).
+    transport.queue_catalog(
+        [make_item(i, photo_ts=now - 600, price=str(10 + i)) for i in range(20)]
+    )
+    await poller.tick()
+    assert await repo.outbox_depth() == 0
+
+    # A listing at 12 is in the cheapest quarter; one at 25 is not.
+    transport.queue_catalog(
+        [
+            make_item(100, photo_ts=now - 5, price="12.0"),
+            make_item(101, photo_ts=now - 4, price="25.0"),
+        ]
+    )
+    await poller.tick()
+
+    (queued,) = await repo.claim_batch(destination, 10)
+    assert queued.item.item_id == 100
+    assert queued.market_percentile is not None and queued.market_percentile <= 25
+    assert queued.market_n == 22
+    assert queued.market_line() is not None and "similar listings" in queued.market_line()
+
+
+async def test_the_market_filter_waits_until_there_is_a_market(
+    transport: ScriptedTransport,
+    repo: Repo,
+    settings: Settings,
+    db: Any,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    query_id = await repo.add_query(
+        name="cheap only",
+        url="https://www.vinted.fr/catalog?search_text=x",
+        tld="fr",
+        params={"search_text": "x"},
+        poll_interval_s=60,
+        max_market_percentile=25,
+    )
+    query = await repo.get_query(query_id)
+    assert query is not None
+    poller, _ = poller_for(query, transport, repo, settings, db=db)
+    destination = await repo.add_destination(kind="ntfy", name="t", config={"topic": "t"})
+    await repo.route(query_id, destination)
+    now = int(time.time())
+
+    transport.queue_catalog([make_item(1, photo_ts=now - 600, price="10.0")])
+    await poller.tick()
+    transport.queue_catalog([make_item(2, photo_ts=now - 5, price="99.0")])
+    await poller.tick()
+
+    assert await repo.outbox_depth() == 1, "too few points to judge, so nothing is withheld"

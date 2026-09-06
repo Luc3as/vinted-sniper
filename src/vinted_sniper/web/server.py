@@ -26,6 +26,7 @@ from collections.abc import Iterator
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 
 import uvicorn
@@ -135,9 +136,11 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             request,
             "dashboard.html",
             {
+                "nav": "searches",
                 "snapshot": snapshot,
                 "queries": queries,
                 "destinations": destinations,
+                "first_run_newest": settings.first_run_mode == "newest",
                 "auth_enabled": token is not None,
                 "recent": _listing_views(await repo.recent_items(limit=25), now=int(time.time())),
                 "now": int(time.time()),
@@ -194,11 +197,41 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             request,
             "history.html",
             {
+                "nav": "history",
                 "rows": _history_views(rows, now=int(time.time())),
                 "queries": await repo.list_queries(),
                 "selected_search": search,
                 "selected_status": status or "",
                 "auth_enabled": token is not None,
+            },
+        )
+
+    @app.get("/help", response_class=HTMLResponse)
+    async def help_page(
+        request: Request,
+        session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+    ) -> Response:
+        if not _authorised(session, token):
+            return RedirectResponse("/login", status_code=303)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "help.html",
+            {
+                "nav": "help",
+                "auth_enabled": token is not None,
+                "settings_view": {
+                    "poll_default_interval_s": settings.poll_default_interval_s,
+                    "site_requests_per_minute": settings.site_requests_per_minute,
+                    "price_drop_min_percent": settings.price_drop_min_percent,
+                    "enrichment_wait_s": settings.enrichment_wait_s,
+                    "enrichment_highlight_score": settings.enrichment_highlight_score,
+                    "enrichment_silent_below": settings.enrichment_silent_below,
+                    "timezone": settings.timezone,
+                    "weekly_report": settings.weekly_report,
+                    "outbox_expiry_minutes": settings.outbox_expiry_minutes,
+                    "item_retention_days": settings.item_retention_days,
+                    "telegram": settings.telegram_bot_token is not None,
+                },
             },
         )
 
@@ -228,6 +261,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         min_seller_rating: Annotated[str, Form()] = "",
         min_seller_reviews: Annotated[str, Form()] = "",
         blocked_sellers: Annotated[str, Form()] = "",
+        max_market_percentile: Annotated[str, Form()] = "",
         destination_ids: Annotated[list[int] | None, Form()] = None,
         _: None = guard,
     ) -> Response:
@@ -261,10 +295,36 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             min_seller_rating=rating,
             min_seller_reviews=_int_or_none(min_seller_reviews),
             blocked_sellers=_csv(blocked_sellers),
+            max_market_percentile=_percent_or_none(max_market_percentile),
         )
         for destination_id in destination_ids or []:
             await repo.route(query_id, destination_id)
-        return RedirectResponse("/", status_code=303)
+        return _redirect_with_notice(
+            "Search added. Its first check records what is already listed without alerting."
+        )
+
+    @app.post("/searches/{query_id}/clone")
+    async def clone_search(query_id: int, tld: Annotated[str, Form()], _: None = guard) -> Response:
+        """The same search on another country's site. Vinted's filter ids are shared across
+        its sites, so the URL only needs a new domain; the routing comes along."""
+        source = await repo.get_query(query_id)
+        if source is None:
+            return _redirect_with_error("that search no longer exists")
+        tld = tld.strip().lower()
+        if tld not in urls.KNOWN_TLDS:
+            return _redirect_with_error(f"vinted.{tld} is not a site I know")
+        if tld == source.tld:
+            return _redirect_with_error(f"that search already runs on vinted.{tld}")
+        target = urls.normalise_search_url(urls.swap_tld(source.url, tld))
+        if await repo.find_query_by_url(target) is not None:
+            return _redirect_with_error(f"this search already exists on vinted.{tld}")
+        base_name = source.name.removesuffix(f" ({source.tld})")
+        new_id = await repo.clone_query(query_id, url=target, tld=tld, name=f"{base_name} ({tld})")
+        if new_id is None:
+            return _redirect_with_error("that search no longer exists")
+        return _redirect_with_notice(
+            f"Cloned to vinted.{tld} with the same filters and destinations."
+        )
 
     @app.post("/searches/{query_id}/edit")
     async def edit_search(
@@ -278,6 +338,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         min_seller_rating: Annotated[str, Form()] = "",
         min_seller_reviews: Annotated[str, Form()] = "",
         blocked_sellers: Annotated[str, Form()] = "",
+        max_market_percentile: Annotated[str, Form()] = "",
         _: None = guard,
     ) -> Response:
         query = await repo.get_query(query_id)
@@ -301,8 +362,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             min_seller_rating=rating,
             min_seller_reviews=_int_or_none(min_seller_reviews),
             blocked_sellers=_csv(blocked_sellers),
+            max_market_percentile=_percent_or_none(max_market_percentile),
         )
-        return RedirectResponse("/", status_code=303)
+        return _redirect_with_notice("Saved. The new settings apply from the next check.")
 
     @app.post("/searches/interval")
     async def set_every_interval(interval: Annotated[int, Form()], _: None = guard) -> Response:
@@ -467,7 +529,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
 
 
 def _redirect_with_error(message: str) -> RedirectResponse:
-    return RedirectResponse(f"/?error={message}", status_code=303)
+    return RedirectResponse(f"/?error={quote(message)}", status_code=303)
 
 
 def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
@@ -578,6 +640,21 @@ def _id_list(raw: str) -> str:
 
 def _csv(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _percent_or_none(raw: str) -> int | None:
+    raw = raw.strip().rstrip("%")
+    if not raw:
+        return None
+    try:
+        value = int(float(raw))
+    except ValueError:
+        return None
+    return value if 1 <= value <= 100 else None  # noqa: PLR2004
+
+
+def _redirect_with_notice(message: str) -> Response:
+    return RedirectResponse(f"/?ok={quote(message)}", status_code=303)
 
 
 def _int_or_none(raw: str) -> int | None:

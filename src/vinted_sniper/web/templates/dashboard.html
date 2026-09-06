@@ -1,10 +1,21 @@
 {% extends "base.html" %}
 {% block title %}vinted-sniper{% endblock %}
+{% macro icon(name) -%}
+{%- if name == 'edit' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+{%- elif name == 'pause' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+{%- elif name == 'play' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 4l14 8-14 8Z"/></svg>
+{%- elif name == 'trash' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>
+{%- elif name == 'clone' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+{%- elif name == 'external' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>
+{%- elif name == 'download' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+{%- endif -%}
+{%- endmacro %}
+{% macro help(text) -%}<button type="button" class="help" data-tip="{{ text }}" aria-label="{{ text }}">?</button>{%- endmacro %}
 
 {% block header_extra %}
-  <span class="status">
-    {% if snapshot.alive %}running{% else %}not responding{% endif %}
-    · {{ snapshot.queued_notifications }} queued
+  <span class="status"><span class="dot {{ '' if snapshot.alive else 'off' }}" aria-hidden="true"></span>
+    <span data-field="header-status">{% if snapshot.alive %}running{% else %}not responding{% endif %} · {{ snapshot.queued_notifications }} queued</span>
+    {{ help('“queued” = alerts written but not yet delivered: waiting for a destination to be paired, held for an AI verdict, inside quiet hours, or retrying.') }}
   </span>
   {% if auth_enabled %}
   <form method="post" action="/logout" class="inline">
@@ -14,32 +25,39 @@
 {% endblock %}
 
 {% block content %}
-{% if request.query_params.get('error') %}
-  <p class="error">{{ request.query_params.get('error') }}</p>
-{% endif %}
-
-<section>
-  <h2>Searches</h2>
+<section id="searches">
+  <div class="section-head">
+    <h2>Searches</h2>
+    <span class="lede">Each row is one Vinted search being checked on a timer. New listings that pass its filters become alerts.</span>
+  </div>
   {% if not snapshot.searches %}
-    <div class="card muted">
-      Nothing being watched yet. Add a search below: open Vinted, set up the search you
-      want, and copy the address bar once results are showing.
+    <div class="card">
+      <div class="empty">
+        <strong>Nothing is being watched yet.</strong>
+        Open Vinted, set up the search you want, copy the address bar once results are showing, and paste it below.
+        The first check only records what is already listed — you will not be flooded.
+      </div>
     </div>
   {% else %}
   <div class="card">
+    <div class="table-wrap">
     <table id="searches">
       <tr>
-        <th>Search</th><th>Site</th><th>State</th>
-        <th>Last checked</th><th>Next check</th><th>Newest listing</th><th>Found</th><th></th>
+        <th>Search</th><th>Site</th>
+        <th>State {{ help('ok = checking normally · starting = no check finished yet · cooling = Vinted refused a request, every search on that site waits · stale = no new listing for far longer than usual · failing = the last check errored · paused = you paused it') }}</th>
+        <th>Last checked</th><th>Next check</th>
+        <th>Newest listing {{ help('When the newest listing Vinted returned for this search was posted. If it stops moving while the site is busy, something is wrong.') }}</th>
+        <th>Found {{ help('Listings this search has recorded since it was created, including the first-check seed.') }}</th><th></th>
       </tr>
       {% for search in snapshot.searches %}
       {% set q = queries[search.query_id] %}
       <tr data-query-id="{{ search.query_id }}">
         <td>
-          <span data-field="name">{{ search.name }}</span>
+          <span data-field="name" style="font-weight:600">{{ search.name }}</span>
           <div class="muted">
             every {{ q.poll_interval_s }}s
-            {% if q.max_total_price %}· ≤ {{ q.max_total_price }}{% endif %}
+            {% if q.max_total_price %}· ≤ {{ q.max_total_price }} total{% endif %}
+            {% if q.max_market_percentile %}· cheapest {{ q.max_market_percentile }}% only{% endif %}
             {% if q.required_keywords %}· needs {{ q.required_keywords | join(', ') }}{% endif %}
             {% if q.banned_keywords %}· not {{ q.banned_keywords | join(', ') }}{% endif %}
             {% if q.title_pattern %}· /{{ q.title_pattern }}/{% endif %}
@@ -54,116 +72,125 @@
         <td class="muted">vinted.{{ search.tld }}</td>
         <td><span class="pill {{ search.state }}" data-field="state">{{ search.state }}</span></td>
         <td class="muted" data-field="last" data-ts="{{ search.last_success_at or '' }}">
-          {% if search.last_success_at %}{{ now - search.last_success_at }}s ago
-          {% else %}never{% endif %}
+          {% if search.last_success_at %}{{ now - search.last_success_at }}s ago{% else %}never{% endif %}
         </td>
         <td class="muted" data-field="next" data-ts="{{ search.next_check_at or '' }}">
-          {% if search.next_check_at %}
-            {% if search.next_check_at > now %}in {{ search.next_check_at - now }}s{% else %}due{% endif %}
-          {% else %}—{% endif %}
+          {% if search.next_check_at %}{% if search.next_check_at > now %}in {{ search.next_check_at - now }}s{% else %}due{% endif %}{% else %}—{% endif %}
         </td>
         <td class="muted" data-field="newest" data-ts="{{ search.newest_listing_at or '' }}">
-          {% if search.newest_listing_at %}{{ now - search.newest_listing_at }}s ago
-          {% else %}—{% endif %}
+          {% if search.newest_listing_at %}{{ now - search.newest_listing_at }}s ago{% else %}—{% endif %}
         </td>
         <td class="muted" data-field="found">{{ search.items_total }}</td>
         <td class="actions">
-          <button class="quiet" type="button" data-edit="{{ search.query_id }}"
-                  aria-expanded="false">Edit</button>
+          <button class="quiet icon" type="button" data-edit="{{ search.query_id }}" aria-expanded="false" title="Change name, timing and filters">{{ icon('edit') }} Edit</button>
           <form method="post" action="/searches/{{ search.query_id }}/pause" class="inline">
             <input type="hidden" name="paused" value="{{ '0' if search.paused else '1' }}">
-            <button class="quiet" type="submit">{{ 'Resume' if search.paused else 'Pause' }}</button>
+            <button class="quiet icon" type="submit" title="{{ 'Start checking again' if search.paused else 'Stop checking; nothing is deleted' }}">
+              {{ icon('play') if search.paused else icon('pause') }} {{ 'Resume' if search.paused else 'Pause' }}
+            </button>
           </form>
           <form method="post" action="/searches/{{ search.query_id }}/delete" class="inline"
-                onsubmit="return confirm('Delete “{{ search.name }}”? Its recorded listings go too.')">
-            <button class="quiet" type="submit">Delete</button>
+                onsubmit="return confirm('Delete “{{ search.name }}”?\n\nIts recorded listings and market history go with it. Pausing keeps them.')">
+            <button class="danger icon" type="submit" title="Remove this search and its history">{{ icon('trash') }} Delete</button>
           </form>
         </td>
       </tr>
       <tr class="edit-row" id="edit-{{ search.query_id }}" hidden>
         <td colspan="8">
           <form method="post" action="/searches/{{ search.query_id }}/edit">
+            <h3>Edit “{{ q.name }}”</h3>
             <div class="grid">
               <div>
-                <label>Name</label>
-                <input type="text" name="name" value="{{ q.name }}">
+                <label for="e-name-{{ q.id }}">Name</label>
+                <input type="text" id="e-name-{{ q.id }}" name="name" value="{{ q.name }}">
               </div>
               <div>
-                <label>Check every (seconds)</label>
-                <input type="text" name="interval" value="{{ q.poll_interval_s }}" inputmode="numeric">
+                <label for="e-interval-{{ q.id }}">Check every (seconds) {{ help('How often to ask Vinted. 120–600 is sensible: faster does not find things sooner (Vinted itself lags) and does get the address blocked.') }}</label>
+                <input type="text" id="e-interval-{{ q.id }}" name="interval" value="{{ q.poll_interval_s }}" inputmode="numeric">
               </div>
               <div>
-                <label>Max total price</label>
-                <input type="text" name="max_total_price" value="{{ q.max_total_price or '' }}"
-                       placeholder="incl. buyer protection">
+                <label for="e-price-{{ q.id }}">Max total price {{ help('The most you will pay including buyer protection. Vinted’s own price filter ignores the protection fee.') }}</label>
+                <input type="text" id="e-price-{{ q.id }}" name="max_total_price" value="{{ q.max_total_price or '' }}" placeholder="e.g. 45">
               </div>
               <div>
-                <label>Exclude words</label>
-                <input type="text" name="banned_keywords" value="{{ q.banned_keywords | join(', ') }}">
+                <label for="e-pct-{{ q.id }}">Only the cheapest … % {{ help('Compares each new listing with everything this search has seen in the last 30 days. “25” means: only tell me if it is cheaper than three quarters of them. Adapts to the market by itself; needs 10 listings before it kicks in.') }}</label>
+                <input type="text" id="e-pct-{{ q.id }}" name="max_market_percentile" value="{{ q.max_market_percentile or '' }}" placeholder="e.g. 25" inputmode="numeric">
               </div>
               <div>
-                <label>Title must contain (all)</label>
-                <input type="text" name="required_keywords" value="{{ q.required_keywords | join(', ') }}">
+                <label for="e-req-{{ q.id }}">Title must contain (all) {{ help('Comma-separated words that must all be in the title. Vinted’s text search also matches descriptions, which is where most of the noise comes from.') }}</label>
+                <input type="text" id="e-req-{{ q.id }}" name="required_keywords" value="{{ q.required_keywords | join(', ') }}" placeholder="torrentshell, 3l">
               </div>
               <div>
-                <label>Title matches regex</label>
-                <input type="text" name="title_pattern" value="{{ q.title_pattern or '' }}">
+                <label for="e-ban-{{ q.id }}">Exclude words {{ help('Skip listings whose title contains any of these.') }}</label>
+                <input type="text" id="e-ban-{{ q.id }}" name="banned_keywords" value="{{ q.banned_keywords | join(', ') }}" placeholder="replica, fake, kids">
               </div>
               <div>
-                <label>Min. seller rating (%)</label>
-                <input type="text" name="min_seller_rating" inputmode="numeric"
-                       value="{{ (q.min_seller_rating * 100) | round | int if q.min_seller_rating else '' }}">
+                <label for="e-re-{{ q.id }}">Title matches pattern {{ help('Optional regular expression for the title, case-insensitive. Leave empty unless you know regex. Example: 3L|three layer keeps titles mentioning either spelling.') }}</label>
+                <input type="text" id="e-re-{{ q.id }}" name="title_pattern" value="{{ q.title_pattern or '' }}">
               </div>
               <div>
-                <label>Min. seller reviews</label>
-                <input type="text" name="min_seller_reviews" inputmode="numeric"
-                       value="{{ q.min_seller_reviews or '' }}">
+                <label for="e-rating-{{ q.id }}">Min. seller rating (%) {{ help('Skip sellers rated below this. Sellers with no rating yet are skipped too. 90 is a sensible floor.') }}</label>
+                <input type="text" id="e-rating-{{ q.id }}" name="min_seller_rating" inputmode="numeric" value="{{ (q.min_seller_rating * 100) | round | int if q.min_seller_rating else '' }}">
               </div>
               <div>
-                <label>Skip sellers</label>
-                <input type="text" name="blocked_sellers" value="{{ q.blocked_sellers | join(', ') }}">
+                <label for="e-reviews-{{ q.id }}">Min. seller reviews {{ help('Skip sellers with fewer reviews than this. A cheap item from a seller with no history is a gamble.') }}</label>
+                <input type="text" id="e-reviews-{{ q.id }}" name="min_seller_reviews" inputmode="numeric" value="{{ q.min_seller_reviews or '' }}">
+              </div>
+              <div>
+                <label for="e-block-{{ q.id }}">Skip sellers {{ help('Usernames to ignore, comma-separated. The “Skip seller” button under a Telegram alert adds to this list.') }}</label>
+                <input type="text" id="e-block-{{ q.id }}" name="blocked_sellers" value="{{ q.blocked_sellers | join(', ') }}">
               </div>
             </div>
-            <div class="row" style="margin-top:.6rem">
-              <button type="submit">Save</button>
+            <div class="row" style="margin-top:.8rem">
+              <button type="submit">Save changes</button>
               <button type="button" class="quiet" data-edit="{{ search.query_id }}">Cancel</button>
-              <span class="muted">The URL itself cannot change — that would be a different search.</span>
+              <span class="muted">The URL cannot change — that would be a different search. Add a new one instead.</span>
             </div>
+          </form>
+          <form method="post" action="/searches/{{ search.query_id }}/clone" class="row" style="margin-top:.9rem;padding-top:.8rem;border-top:1px dashed var(--line)">
+            <label for="clone-{{ q.id }}" style="margin:0">{{ icon('clone') }} Also watch this on</label>
+            <select id="clone-{{ q.id }}" name="tld" style="width:auto">
+              {% for t in known_tlds if t != q.tld %}
+              <option value="{{ t }}" {% if t in ('cz', 'de', 'pl', 'at', 'hu') and loop.first %}{% endif %}>vinted.{{ t }}</option>
+              {% endfor %}
+            </select>
+            <button class="quiet" type="submit">Clone</button>
+            <span class="muted">Same filters and destinations, another country. Vinted lets you buy across EU sites, and the bigger markets (.de, .pl, .cz) have far more listings than .sk. A listing shown on several sites is only alerted once.</span>
           </form>
         </td>
       </tr>
       {% endfor %}
     </table>
-    <div class="row" style="justify-content:space-between;margin-top:.6rem">
-      <p class="muted" style="margin:0">
-        “stale” means this search has stopped seeing new listings while others on the same
-        site keep finding them — usually a session that needs replacing, which happens
-        automatically. “cooling” means the site refused one search and every search on it
-        is waiting out the same backoff. This table refreshes itself.
-      </p>
+    </div>
+    <div class="row" style="justify-content:space-between;margin-top:.8rem">
+      <div class="legend">
+        <span><span class="pill ok">ok</span> checking normally</span>
+        <span><span class="pill cooling">cooling</span> site refused a request, all searches on it wait</span>
+        <span><span class="pill stale">stale</span> quiet far longer than usual</span>
+        <span><span class="pill failing">failing</span> last check errored</span>
+        <span class="muted">Refreshes every 10 s.</span>
+      </div>
       <form method="post" action="/searches/interval" class="row inline" style="margin:0">
-        <label style="margin:0">Check all every</label>
-        <input type="text" name="interval" value="{{ default_interval }}" inputmode="numeric"
-               size="5" style="width:auto">
+        <label for="all-interval" style="margin:0">Check all every</label>
+        <input type="text" id="all-interval" name="interval" value="{{ default_interval }}" inputmode="numeric" class="short">
         <span class="muted">s</span>
-        <button class="quiet" type="submit">Apply to all</button>
+        <button class="quiet" type="submit" title="Sets the interval on every search at once — handy when Vinted is grumpy">Apply to all</button>
       </form>
     </div>
   </div>
   {% endif %}
 
   <div class="card">
+    <h3>Add a search</h3>
     <form method="post" action="/searches">
       <div class="row" style="justify-content:space-between">
-        <label for="url" style="margin:0">Vinted search URL</label>
+        <label for="url" style="margin:0">Vinted search URL {{ help('On vinted.sk (or any country site) set your filters — brand, size, price, condition — and copy the address bar once results are showing. Tracking parameters are removed automatically.') }}</label>
         {% if builder_enabled %}
-        <button type="button" class="quiet" id="builder-toggle" aria-expanded="false">
-          Build a search instead ▾
-        </button>
+        <button type="button" class="quiet" id="builder-toggle" aria-expanded="false">Build a search instead ▾</button>
         {% endif %}
       </div>
-      <input type="url" id="url" name="url" required
-             placeholder="https://www.vinted.fr/catalog?search_text=...">
+      <input type="url" id="url" name="url" required placeholder="https://www.vinted.sk/catalog?search_text=...">
+      <span class="hint">Any country site works: .sk, .cz, .de, .pl, … The site you copied from is the one that will be watched.</span>
 
       {% if builder_enabled %}
       <div id="builder" hidden>
@@ -227,175 +254,193 @@
         <p class="muted" id="b-preview" style="margin:.6rem 0 0"></p>
       </div>
       {% endif %}
-      <div class="grid" style="margin-top:.75rem">
+
+      <div class="grid" style="margin-top:.85rem">
         <div>
           <label for="name">Name (optional)</label>
-          <input type="text" id="name" name="name">
+          <input type="text" id="name" name="name" placeholder="defaults to the search text">
         </div>
         <div>
-          <label for="interval">Check every (seconds)</label>
-          <input type="text" id="interval" name="interval"
-                 value="{{ default_interval }}" inputmode="numeric">
+          <label for="interval">Check every (seconds) {{ help('120–600 is sensible. Faster does not find listings sooner and does get the address blocked.') }}</label>
+          <input type="text" id="interval" name="interval" value="{{ default_interval }}" inputmode="numeric">
         </div>
         <div>
-          <label for="max_total_price">Max total price</label>
-          <input type="text" id="max_total_price" name="max_total_price"
-                 placeholder="incl. buyer protection">
+          <label for="max_total_price">Max total price {{ help('The most you will pay including buyer protection — Vinted’s own price filter ignores the fee.') }}</label>
+          <input type="text" id="max_total_price" name="max_total_price" placeholder="e.g. 45">
         </div>
         <div>
-          <label for="banned_keywords">Exclude words</label>
-          <input type="text" id="banned_keywords" name="banned_keywords"
-                 placeholder="fake, replica">
+          <label for="max_market_percentile">Only the cheapest … % {{ help('“25” = only tell me about listings cheaper than three quarters of what this search has seen in the last 30 days. Adapts by itself; needs 10 listings first.') }}</label>
+          <input type="text" id="max_market_percentile" name="max_market_percentile" placeholder="e.g. 25" inputmode="numeric">
+        </div>
+        <div>
+          <label for="banned_keywords">Exclude words {{ help('Skip listings whose title contains any of these.') }}</label>
+          <input type="text" id="banned_keywords" name="banned_keywords" placeholder="replica, fake, kids">
         </div>
       </div>
-      <details style="margin-top:.75rem">
+      <details class="explain" style="margin-top:.75rem">
         <summary>More filters — title and seller</summary>
         <div class="grid" style="margin-top:.5rem">
           <div>
-            <label for="required_keywords">Title must contain (all)</label>
-            <input type="text" id="required_keywords" name="required_keywords"
-                   placeholder="torrentshell, 3l">
+            <label for="required_keywords">Title must contain (all) {{ help('All of these words must be in the title. Cuts the noise from Vinted matching descriptions.') }}</label>
+            <input type="text" id="required_keywords" name="required_keywords" placeholder="torrentshell, 3l">
           </div>
           <div>
-            <label for="title_pattern">Title matches regex</label>
-            <input type="text" id="title_pattern" name="title_pattern"
-                   placeholder="\b(M|L)\b|size 4[0-2]">
+            <label for="title_pattern">Title matches pattern {{ help('Optional regular expression, case-insensitive. Only if you know regex.') }}</label>
+            <input type="text" id="title_pattern" name="title_pattern" placeholder="3L|three layer">
           </div>
           <div>
-            <label for="min_seller_rating">Min. seller rating (%)</label>
-            <input type="text" id="min_seller_rating" name="min_seller_rating"
-                   placeholder="90" inputmode="numeric">
+            <label for="min_seller_rating">Min. seller rating (%) {{ help('Skip sellers rated below this; unrated sellers are skipped too.') }}</label>
+            <input type="text" id="min_seller_rating" name="min_seller_rating" placeholder="90" inputmode="numeric">
           </div>
           <div>
-            <label for="min_seller_reviews">Min. seller reviews</label>
-            <input type="text" id="min_seller_reviews" name="min_seller_reviews"
-                   placeholder="5" inputmode="numeric">
+            <label for="min_seller_reviews">Min. seller reviews {{ help('Skip sellers with fewer reviews.') }}</label>
+            <input type="text" id="min_seller_reviews" name="min_seller_reviews" placeholder="5" inputmode="numeric">
           </div>
           <div>
-            <label for="blocked_sellers">Skip sellers</label>
-            <input type="text" id="blocked_sellers" name="blocked_sellers"
-                   placeholder="usernames, comma-separated">
+            <label for="blocked_sellers">Skip sellers {{ help('Usernames to ignore, comma-separated.') }}</label>
+            <input type="text" id="blocked_sellers" name="blocked_sellers" placeholder="usernames, comma-separated">
           </div>
         </div>
       </details>
       {% if destinations %}
-      <div style="margin-top:.75rem">
-        <label>Send to</label>
+      <div style="margin-top:.85rem">
+        <label>Send alerts to {{ help('Which destinations this search feeds. A search with none selected still records listings, it just tells nobody.') }}</label>
         <div class="row">
           {% for destination in destinations if destination.active %}
-          <label class="row" style="margin:0">
+          <label class="row" style="margin:0;color:var(--ink)">
             <input type="checkbox" name="destination_ids" value="{{ destination.id }}" checked>
-            {{ destination.name }}
+            {{ destination.name }} <span class="muted">({{ destination.kind }})</span>
           </label>
           {% endfor %}
         </div>
       </div>
       {% endif %}
-      <p class="muted">
-        Anything below {{ min_interval }} seconds is ignored — Vinted's own catalog lags
-        further behind than that, so checking faster finds nothing sooner.
-      </p>
-      <button type="submit">Watch this search</button>
+      <div class="row" style="margin-top:1rem">
+        <button type="submit">Add search</button>
+        <span class="muted">The first check records what is already listed and alerts about nothing{% if first_run_newest %} — except one listing, so you can see delivery works{% endif %}.</span>
+      </div>
     </form>
+    <details class="explain">
+      <summary>How the filters work together</summary>
+      <p>A listing has to pass <em>every</em> filter you set. Vinted’s own filters (brand, size, category, price) are in the URL and Vinted applies them before we see anything. Ours run on what comes back: the total-price cap, the “cheapest … %” market cap, title words, and seller checks.</p>
+      <p><strong>“Only the cheapest … %”</strong> is the one worth understanding. Every check, this search sees up to 96 listings; all of them are remembered for 30 days with their price. When a new listing appears, we count how many remembered ones are cheaper. “25” means: alert only if fewer than 25 % of them are cheaper — i.e. it is in the cheapest quarter of the current market. Unlike a fixed price cap, this follows the season and the market by itself. The alert also tells you, in words: “cheaper than 88 % of 312 similar listings seen this month”.</p>
+    </details>
   </div>
 </section>
-
-<section>
-  <h2>Destinations</h2>
+<section id="destinations">
+  <div class="section-head">
+    <h2>Destinations</h2>
+    <span class="lede">Where alerts go. Each search chooses which of these it feeds.</span>
+  </div>
   {% if destinations %}
   <div class="card">
+    <div class="table-wrap">
     <table>
-      <tr><th>Name</th><th>Type</th><th>State</th><th>Quiet hours</th><th>Health notices</th><th></th></tr>
+      <tr>
+        <th>Name</th><th>Type</th><th>State</th>
+        <th>Quiet hours {{ help('A daily window when nothing is sent, e.g. 23:00-07:00. Listings found meanwhile are kept and arrive together when it ends, instead of being dropped.') }}</th>
+        <th>Health notices {{ help('Also send warnings here: “Vinted is refusing us”, “a search went quiet”, the Monday summary. Turn it on for at least one destination or you will not hear about problems.') }}</th>
+        <th></th>
+      </tr>
       {% for destination in destinations %}
       <tr>
-        <td>{{ destination.name }}</td>
+        <td style="font-weight:600">{{ destination.name }}</td>
         <td class="muted">{{ destination.kind }}</td>
         <td>
           {% if destination.active %}<span class="pill ok">active</span>
-          {% else %}<span class="pill failing">disabled</span>{% endif %}
+          {% else %}<span class="pill disabled">disabled</span>{% endif %}
         </td>
         <td>
-          <form method="post" action="/destinations/{{ destination.id }}/quiet" class="inline">
-            <input type="text" name="quiet_hours" value="{{ destination.quiet_hours or '' }}"
-                   placeholder="23:00-07:00" size="11" style="width:auto">
+          <form method="post" action="/destinations/{{ destination.id }}/quiet" class="row inline" style="margin:0">
+            <input type="text" name="quiet_hours" value="{{ destination.quiet_hours or '' }}" placeholder="23:00-07:00" class="short" aria-label="Quiet hours for {{ destination.name }}">
             <button class="quiet" type="submit">Set</button>
           </form>
         </td>
         <td>
           <form method="post" action="/destinations/{{ destination.id }}/status" class="inline">
             <input type="hidden" name="enabled" value="{{ '0' if destination.notify_status else '1' }}">
-            <button class="quiet" type="submit">
-              {{ 'on — turn off' if destination.notify_status else 'off — turn on' }}
+            <button class="quiet" type="submit" aria-pressed="{{ 'true' if destination.notify_status else 'false' }}">
+              {{ 'On — turn off' if destination.notify_status else 'Off — turn on' }}
             </button>
           </form>
         </td>
-        <td>
+        <td class="actions">
           {% if destination.active %}
-          <form method="post" action="/destinations/{{ destination.id }}/delete" class="inline">
-            <button class="quiet" type="submit">Remove</button>
+          <form method="post" action="/destinations/{{ destination.id }}/delete" class="inline"
+                onsubmit="return confirm('Remove “{{ destination.name }}”? Searches routed to it will stop alerting there.')">
+            <button class="danger icon" type="submit">{{ icon('trash') }} Remove</button>
           </form>
           {% endif %}
         </td>
       </tr>
       {% endfor %}
     </table>
+    </div>
   </div>
+  {% else %}
+  <div class="card"><div class="empty"><strong>No destination yet.</strong> Searches will record listings but tell nobody. Add one below — Telegram is the easiest: run <code>vinted-sniper pair-telegram</code> and tap the link.</div></div>
   {% endif %}
 
   <div class="card">
+    <h3>Add a destination</h3>
     <form method="post" action="/destinations">
       <div class="grid">
         <div>
           <label for="kind">Type</label>
           <select id="kind" name="kind">
-            <option value="discord">Discord webhook</option>
             <option value="telegram">Telegram chat</option>
+            <option value="discord">Discord webhook</option>
             <option value="ntfy">ntfy topic</option>
-            <option value="webhook">Plain webhook</option>
+            <option value="webhook">Plain webhook (n8n, Home Assistant, …)</option>
           </select>
         </div>
         <div>
           <label for="dest_name">Name</label>
-          <input type="text" id="dest_name" name="name" placeholder="my server">
+          <input type="text" id="dest_name" name="name" placeholder="my phone">
         </div>
         <div style="grid-column: 1 / -1">
-          <label for="target">Webhook URL, chat id, or topic</label>
+          <label for="target">Webhook URL, chat id, or topic {{ help('Telegram: easier to run “vinted-sniper pair-telegram” in the container and tap the link — it finds the chat id for you. Discord: Server settings → Integrations → Webhooks → copy URL. ntfy: any topic name. Webhook: an https URL you control; the payload is documented in docs/configuration.md.') }}</label>
           <input type="text" id="target" name="target" required>
         </div>
         <div>
-          <label for="quiet_hours">Quiet hours (optional)</label>
+          <label for="quiet_hours">Quiet hours (optional) {{ help('e.g. 23:00-07:00 in your timezone. Alerts found meanwhile arrive as one digest when it ends.') }}</label>
           <input type="text" id="quiet_hours" name="quiet_hours" placeholder="23:00-07:00">
         </div>
         <div>
-          <label class="row" style="margin-top:1.6rem">
+          <label class="row" style="margin-top:1.6rem;color:var(--ink)">
             <input type="checkbox" name="notify_status" value="1"> Also send health notices here
           </label>
         </div>
       </div>
-      <p class="muted">
-        For Discord: server settings → Integrations → Webhooks → copy the URL. For Telegram,
-        <code>vinted-sniper pair-telegram</code> gives you a link that sets this up for you.
-        During quiet hours nothing is sent; what turned up arrives as a digest when they end.
-        Health notices are the "site is refusing us" and "search went stale" warnings.
-      </p>
-      <button type="submit">Add destination</button>
+      <div class="row" style="margin-top:1rem"><button type="submit">Add destination</button></div>
     </form>
+    <details class="explain">
+      <summary>What a Telegram alert looks like, and what the buttons do</summary>
+      <ul>
+        <li><strong>Top line</strong> — “🔥 HOT DEAL”, “🤖 …” or “💤 …” appears only when an AI agent judged the listing (optional, see Help). 💤 also means the phone will not buzz.</li>
+        <li><strong>📊 cheaper than 88 % of 312 similar listings</strong> — where the price sits among what this search has seen in the last 30 days. Higher is better.</li>
+        <li><strong>📉 Price drop</strong> — a listing you already saw got cheaper.</li>
+        <li><strong>Open listing / Seller profile</strong> — links to Vinted.</li>
+        <li><strong>Skip seller</strong> — never show this seller again for this search. <strong>Pause search</strong> — stop it until you resume (here or with /resume).</li>
+        <li><strong>👍 / 👎</strong> — tell the agent whether it called this one right; it learns your taste.</li>
+      </ul>
+    </details>
   </div>
 </section>
 
 <section>
   <p class="muted">
-    <a href="/api/export" download="vinted-sniper-config.json">Download searches &amp; destinations as JSON</a>
-    — restore with <code>vinted-sniper import file.json</code>.
+    <a href="/api/export" download="vinted-sniper-config.json">{{ icon('download') }} Download searches &amp; destinations as JSON</a>
+    — a backup of everything you typed (not the listings). Restore with <code>vinted-sniper import file.json</code>.
   </p>
 </section>
-
-<section>
-  <h2>Recently found</h2>
-  {% if not recent %}
-  <div class="card">
-    <p class="muted" style="margin:0">Nothing yet.</p>
+<section id="recent">
+  <div class="section-head">
+    <h2>Recently found</h2>
+    <span class="lede">The last 25 listings any search recorded. Badges: <span class="tag drop">📉 dropped</span> price fell since found · <span class="tag score">🤖 87</span> agent’s deal score (hover for its one-line verdict).</span>
   </div>
+  {% if not recent %}
+  <div class="card"><div class="empty"><strong>Nothing recorded yet.</strong> The first check of each search will fill this in.</div></div>
   {% else %}
   <div class="listing-grid">
     {% for row in recent %}
@@ -835,7 +880,7 @@
   // Live status: the table redraws itself from /api/health, and the relative times tick.
   const table = document.getElementById("searches");
   if (!table) return;
-  const header = document.querySelector("header .status");
+  const header = document.querySelector('[data-field="header-status"]');
 
   function ago(ts, now) {
     if (!ts) return null;
@@ -869,6 +914,8 @@
     if (header) {
       header.textContent = `${data.alive ? "running" : "not responding"} · ${data.queued_notifications} queued`;
     }
+    const dot = document.querySelector("header .dot");
+    if (dot) dot.classList.toggle("off", !data.alive);
     for (const search of data.searches) {
       const row = table.querySelector(`tr[data-query-id="${search.query_id}"]`);
       if (!row) continue;  // added since the page loaded; a reload will show it

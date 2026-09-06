@@ -522,3 +522,50 @@ async def test_the_history_page_shows_what_was_queued_and_where(
     body = signed_in.get("/api/history", params={"status": "pending"}).json()
     assert body["deliveries"][0]["title"] == "Nike Air Max 90"
     assert signed_in.get("/api/history", params={"status": "sent"}).json()["deliveries"] == []
+
+
+async def test_a_search_can_be_cloned_to_another_country_with_its_filters_and_routing(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    signed_in.post(
+        "/searches",
+        data={
+            "url": "https://www.vinted.sk/catalog?search_text=rab%20downpour&brand_ids[]=53",
+            "max_total_price": "60",
+            "max_market_percentile": "25",
+            "destination_ids": [str(destination_id)],
+        },
+        follow_redirects=False,
+    )
+    (source,) = await repo.list_queries()
+
+    response = signed_in.post(
+        f"/searches/{source.id}/clone", data={"tld": "de"}, follow_redirects=False
+    )
+    assert "ok=" in response.headers["location"]
+
+    _, clone = await repo.list_queries()
+    assert clone.tld == "de"
+    assert clone.url.startswith("https://www.vinted.de/catalog?")
+    assert clone.params == source.params
+    assert clone.max_total_price == source.max_total_price
+    assert clone.max_market_percentile == 25
+    assert clone.name.endswith("(de)") and "(sk) (de)" not in clone.name
+    assert await repo.destination_ids_for_query(clone.id) == [destination_id]
+
+    again = signed_in.post(
+        f"/searches/{source.id}/clone", data={"tld": "de"}, follow_redirects=False
+    )
+    assert "error=" in again.headers["location"], "cloning twice is refused"
+    same_site = signed_in.post(
+        f"/searches/{source.id}/clone", data={"tld": "sk"}, follow_redirects=False
+    )
+    assert "error=" in same_site.headers["location"]
+
+
+def test_the_help_page_explains_the_words(signed_in: TestClient) -> None:
+    page = signed_in.get("/help")
+    assert page.status_code == 200
+    for phrase in ("Only the cheapest", "Total price", "Quiet hours", "Current settings"):
+        assert phrase in page.text

@@ -5,57 +5,144 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}vinted-sniper{% endblock %}</title>
   <style>
+    /* --- Tokens. Everything below reads from these, so both colour schemes stay in step. */
     :root {
-      --bg: #fbfbfa; --panel: #fff; --ink: #1a1a1a; --muted: #6b6b6b;
-      --line: #e4e4e1; --accent: #09b1ba; --ok: #2e7d32; --warn: #b26a00; --bad: #c62828;
+      --bg: #f6f6f4; --panel: #ffffff; --panel-2: #f0f0ee; --ink: #16181d; --muted: #545b66;
+      --line: #dcdcd7; --accent: #0b8f97; --accent-ink: #ffffff; --accent-soft: #d8f1f2;
+      --ok: #1f7a3a; --warn: #9a5b00; --bad: #b3261e; --info: #2f5fb3;
+      --radius: 10px; --radius-sm: 7px; --shadow: 0 8px 24px rgb(0 0 0 / .10);
+      --focus: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent);
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #17181a; --panel: #1f2023; --ink: #ececea; --muted: #9a9a97;
-        --line: #313337; --accent: #35c9d1; --ok: #7dc47f; --warn: #e2a44a; --bad: #ef7b7b;
+        --bg: #141518; --panel: #1d1f23; --panel-2: #24272c; --ink: #ecedea; --muted: #a2a7ad;
+        --line: #33373d; --accent: #3fd0d8; --accent-ink: #062627; --accent-soft: #163b3e;
+        --ok: #79c982; --warn: #e5b04e; --bad: #f08a83; --info: #8fb2ee;
+        --shadow: 0 8px 24px rgb(0 0 0 / .45);
       }
     }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+
     * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
     body {
       margin: 0; background: var(--bg); color: var(--ink);
       font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     }
+    a { color: var(--accent); }
+    :focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--radius-sm); }
+    .skip { position: absolute; left: -999px; top: .5rem; background: var(--panel); padding: .4rem .7rem;
+            border-radius: var(--radius-sm); z-index: 100; }
+    .skip:focus { left: .5rem; }
+
+    /* --- Header & navigation ------------------------------------------------------ */
     header {
-      display: flex; align-items: baseline; gap: 1rem; padding: 1rem 1.5rem;
-      border-bottom: 1px solid var(--line); background: var(--panel);
+      display: flex; align-items: center; gap: 1.25rem; padding: .7rem 1.5rem;
+      border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 20;
     }
-    header h1 { font-size: 1.05rem; margin: 0; letter-spacing: -0.01em; }
-    header .status { margin-left: auto; font-size: .85rem; color: var(--muted); }
-    main { max-width: 60rem; margin: 0 auto; padding: 1.5rem; }
+    .brand a { color: var(--ink); text-decoration: none; font-weight: 700; letter-spacing: -0.01em; }
+    nav { display: flex; gap: .25rem; }
+    nav a { color: var(--muted); text-decoration: none; font-weight: 500; padding: .35rem .7rem;
+            border-radius: var(--radius-sm); transition: color .15s, background .15s; }
+    nav a:hover { color: var(--ink); background: var(--panel-2); }
+    nav a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
+    .header-right { margin-left: auto; display: flex; align-items: center; gap: .75rem; }
+    .status { font-size: .85rem; color: var(--muted); display: inline-flex; gap: .5rem; align-items: center; }
+    .dot { width: .55rem; height: .55rem; border-radius: 999px; background: var(--ok); display: inline-block; }
+    .dot.off { background: var(--bad); }
+
+    main { max-width: 64rem; margin: 0 auto; padding: 1.5rem; }
     section { margin-bottom: 2.25rem; }
-    h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .06em;
-         color: var(--muted); margin: 0 0 .75rem; }
-    .card { background: var(--panel); border: 1px solid var(--line);
-            border-radius: 10px; padding: 1rem 1.15rem; margin-bottom: .75rem; }
+    .section-head { display: flex; align-items: baseline; gap: .75rem; margin: 0 0 .6rem; flex-wrap: wrap; }
+    h2 { font-size: 1rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+    .section-head .lede { color: var(--muted); font-size: .88rem; }
+    h3 { font-size: .9rem; margin: 0 0 .5rem; }
+
+    /* --- Cards, tables ------------------------------------------------------------- */
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+            padding: 1rem 1.15rem; margin-bottom: .75rem; }
+    .card.subtle { background: var(--panel-2); border-style: dashed; }
+    .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); }
-    th { font-weight: 600; font-size: .8rem; color: var(--muted); }
-    .pill { display: inline-block; padding: .1rem .55rem; border-radius: 999px;
-            font-size: .75rem; font-weight: 600; }
-    .pill.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
-    .pill.stale, .pill.starting, .pill.paused {
-      background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
-    .pill.failing { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
+    th, td { text-align: left; padding: .55rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { font-weight: 600; font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    tr.edit-row td { background: var(--panel-2); }
+    td.actions { white-space: nowrap; }
+    .error-line { max-width: 34rem; }
+
+    /* --- Pills, tags ---------------------------------------------------------------- */
+    .pill { display: inline-flex; align-items: center; gap: .3rem; padding: .1rem .55rem; border-radius: 999px;
+            font-size: .75rem; font-weight: 600; white-space: nowrap; }
+    .pill::before { content: ""; width: .45rem; height: .45rem; border-radius: 999px; background: currentColor; }
+    .pill.ok, .pill.sent { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+    .pill.stale, .pill.starting, .pill.paused, .pill.pending, .pill.cooling {
+      background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+    .pill.failing, .pill.failed { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+    .pill.sending { background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); }
+    .pill.cancelled, .pill.disabled { background: var(--panel-2); color: var(--muted); }
+    .tag { border: 1px solid var(--line); background: var(--panel-2); border-radius: 6px; padding: .02rem .45rem;
+           font-size: .72rem; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tag.brand { color: var(--ink); font-weight: 500; }
+    .tag.drop { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); border-color: transparent; }
+    .tag.score { background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); border-color: transparent; }
+    .tag.score.hot { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); font-weight: 600; }
+    .tag.score.cold { opacity: .65; }
+
+    /* --- Forms ------------------------------------------------------------------------ */
     form.inline { display: inline; }
     label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: .2rem; }
-    input, select, button {
-      font: inherit; padding: .45rem .6rem; border-radius: 7px;
+    label .help { margin-left: .2rem; }
+    input, select, textarea, button {
+      font: inherit; padding: .48rem .65rem; border-radius: var(--radius-sm);
       border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+      transition: border-color .15s, background .15s, color .15s;
     }
-    input[type=text], input[type=url], input[type=password] { width: 100%; }
-    button { cursor: pointer; background: var(--accent); color: #06282a;
-             border-color: transparent; font-weight: 600; }
-    button.quiet { background: transparent; color: var(--muted); font-weight: 500; }
-    .grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }
-    .error { border-left: 3px solid var(--bad); padding-left: .75rem; color: var(--bad); }
-    .muted { color: var(--muted); font-size: .85rem; }
+    input:hover, select:hover { border-color: color-mix(in srgb, var(--muted) 60%, var(--line)); }
+    input[type=text], input[type=url], input[type=password], input[type=number], select { width: 100%; }
+    input.short { width: 7rem; }
+    .hint { display: block; font-size: .76rem; color: var(--muted); margin-top: .25rem; line-height: 1.4; }
+    button { cursor: pointer; background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+    button:hover { filter: brightness(1.06); }
+    button.quiet { background: transparent; color: var(--muted); font-weight: 500; border-color: var(--line); }
+    button.quiet:hover { color: var(--ink); background: var(--panel-2); filter: none; }
+    button.danger { background: transparent; color: var(--bad); border-color: var(--line); font-weight: 500; }
+    button.danger:hover { background: color-mix(in srgb, var(--bad) 10%, transparent); filter: none; }
+    button.icon { display: inline-flex; align-items: center; gap: .35rem; }
+    button svg, a svg { width: 1rem; height: 1rem; }
+    .grid { display: grid; gap: .8rem; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
     .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
-    a { color: var(--accent); }
+    .muted { color: var(--muted); font-size: .85rem; }
+    .flash { border-left: 3px solid var(--info); background: var(--panel); border-radius: var(--radius-sm);
+             padding: .6rem .85rem; margin: 0 0 1rem; }
+    .flash.ok { border-left-color: var(--ok); }
+    .flash.error { border-left-color: var(--bad); color: var(--bad); }
+    .error { border-left: 3px solid var(--bad); padding-left: .75rem; color: var(--bad); }
+
+    /* --- Help: tooltips and explainers ------------------------------------------------ */
+    .help { display: inline-flex; align-items: center; justify-content: center; width: 1.05rem; height: 1.05rem;
+            border-radius: 999px; border: 1px solid var(--muted); color: var(--muted); font-size: .68rem; font-weight: 700;
+            cursor: help; position: relative; vertical-align: middle; background: transparent; padding: 0; }
+    .help:hover, .help:focus-visible { color: var(--accent); border-color: var(--accent); }
+    .help::after { content: attr(data-tip); position: absolute; left: 50%; bottom: calc(100% + .45rem); transform: translateX(-50%);
+                   width: max-content; max-width: 18rem; background: var(--ink); color: var(--bg); font-size: .76rem; font-weight: 400;
+                   line-height: 1.4; padding: .45rem .6rem; border-radius: var(--radius-sm); box-shadow: var(--shadow);
+                   opacity: 0; pointer-events: none; transition: opacity .15s; z-index: 30; white-space: normal; text-align: left; }
+    .help:hover::after, .help:focus-visible::after { opacity: 1; }
+    details.explain { border: 1px dashed var(--line); border-radius: var(--radius-sm); padding: .5rem .85rem; margin: .5rem 0 0; }
+    details.explain summary { cursor: pointer; color: var(--accent); font-size: .85rem; font-weight: 500; list-style: none; }
+    details.explain summary::before { content: "▸ "; }
+    details.explain[open] summary::before { content: "▾ "; }
+    details.explain p, details.explain ul { font-size: .85rem; color: var(--muted); margin: .5rem 0; }
+    kbd, code { font: .85em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--panel-2); padding: .05rem .3rem; border-radius: 4px; }
+    .legend { display: flex; flex-wrap: wrap; gap: .5rem 1rem; font-size: .8rem; color: var(--muted); }
+    .empty { text-align: center; padding: 1.5rem; color: var(--muted); }
+    .empty strong { color: var(--ink); display: block; margin-bottom: .25rem; }
+    .glossary { display: grid; grid-template-columns: minmax(9rem, 14rem) 1fr; gap: .45rem 1rem; margin: 0; }
+    .glossary dt { font-weight: 600; }
+    .glossary dd { margin: 0; color: var(--muted); font-size: .9rem; }
+    @media (max-width: 40rem) { .glossary { grid-template-columns: 1fr; } .glossary dd { margin-bottom: .5rem; } }
+    .history img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; vertical-align: middle; }
 
     /* --- Listing cards ----------------------------------------------------------- */
     .listing-grid { display: grid; gap: .75rem;
@@ -144,28 +231,27 @@
                          border-radius: 0; padding: .4rem .6rem; text-align: left;
                          font-weight: 400; }
     .combo-list button:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-    .pill.cooling { background: #fff3e0; color: #e65100; }
-    .tag.score { background: #ede7f6; color: #4527a0; }
-    .tag.score.hot { background: #fbe9e7; color: #bf360c; font-weight: 600; }
-    .tag.score.cold { opacity: .6; }
-    .pill.sent { background: #e8f5e9; color: #1b5e20; }
-    .pill.pending { background: #fff8e1; color: #f57f17; }
-    .pill.sending { background: #e3f2fd; color: #0d47a1; }
-    .pill.cancelled { opacity: .6; }
-    .history img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; vertical-align: middle; }
-    .tag.drop { background: #e8f5e9; color: #1b5e20; }
-    tr.edit-row td { background: rgba(0,0,0,.025); }
-    td.actions { white-space: nowrap; }
-    .error-line { max-width: 34rem; }
   </style>
 </head>
 <body>
+  <a class="skip" href="#main">Skip to content</a>
   <header>
-    <h1><a href="/" style="color:inherit;text-decoration:none">vinted-sniper</a>
-      <span class="muted" style="font-size:.7em;font-weight:normal;margin-left:.6rem">
-        <a href="/">searches</a> · <a href="/history">history</a></span></h1>
-    {% block header_extra %}{% endblock %}
+    <div class="brand"><a href="/">vinted-sniper</a></div>
+    <nav aria-label="Sections">
+      <a href="/" {% if nav == 'searches' %}aria-current="page"{% endif %}>Searches</a>
+      <a href="/history" {% if nav == 'history' %}aria-current="page"{% endif %}>History</a>
+      <a href="/help" {% if nav == 'help' %}aria-current="page"{% endif %}>Help</a>
+    </nav>
+    <div class="header-right">{% block header_extra %}{% endblock %}</div>
   </header>
-  <main>{% block content %}{% endblock %}</main>
+  <main id="main">
+    {% if request is defined and request.query_params.get('ok') %}
+      <p class="flash ok" role="status">{{ request.query_params.get('ok') }}</p>
+    {% endif %}
+    {% if request is defined and request.query_params.get('error') %}
+      <p class="flash error" role="alert">{{ request.query_params.get('error') }}</p>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
 </body>
 </html>
