@@ -436,3 +436,40 @@ async def test_a_verdict_for_an_unknown_listing_is_refused(repo: Repo) -> None:
 
 def endpoint_last_request(endpoint: FakeEndpoint) -> httpx.Request:
     return endpoint.requests[-1]
+
+
+async def test_a_hot_verdict_arriving_late_earns_a_follow_up_but_a_dull_one_does_not(
+    repo: Repo, settings: Settings
+) -> None:
+    query = await a_search(repo)
+    phone = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    await repo.record_new_items(query, [listing(1), listing(2)], [phone])
+    endpoint = FakeEndpoint()
+    dispatcher = make_dispatcher(repo, settings, endpoint)
+    assert await dispatcher.drain() == 2, "both alerts went out before any verdict"
+
+    assert await repo.store_enrichment(
+        1, EnrichmentIn(score=92, verdict="Berte."), followup_min_score=75
+    )
+    assert await repo.store_enrichment(
+        2, EnrichmentIn(score=30, verdict="Nič moc."), followup_min_score=75
+    )
+
+    batch = await repo.claim_batch(phone, 10)
+    assert [n.item.item_id for n in batch] == [1]
+    assert batch[0].is_verdict
+    assert batch[0].enrichment is not None and batch[0].enrichment.score == 92
+    assert batch[0].headline() == "Verdict is in"
+
+
+async def test_a_verdict_that_arrives_in_time_does_not_also_send_a_follow_up(
+    repo: Repo, settings: Settings
+) -> None:
+    query = await a_search(repo)
+    phone = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    await repo.record_new_items(query, [listing(1)], [phone], hold_s=90)
+
+    assert await repo.store_enrichment(1, EnrichmentIn(score=95), followup_min_score=75)
+
+    batch = await repo.claim_batch(phone, 10)
+    assert len(batch) == 1 and batch[0].kind == "new", "released, enriched, once"

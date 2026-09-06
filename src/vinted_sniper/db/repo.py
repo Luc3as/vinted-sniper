@@ -106,8 +106,14 @@ class PendingNotification:
     def is_price_drop(self) -> bool:
         return self.kind == "price_drop"
 
+    @property
+    def is_verdict(self) -> bool:
+        return self.kind == "verdict"
+
     def headline(self) -> str:
         """What kind of news this is, for the top of a message."""
+        if self.is_verdict:
+            return "Verdict is in"
         if not self.is_price_drop:
             return "New match"
         item = self.item
@@ -578,8 +584,14 @@ class Repo:
         )
         return {row["id"] for row in rows}
 
-    async def store_enrichment(self, item_id: int, verdict: EnrichmentIn) -> bool:
+    async def store_enrichment(
+        self, item_id: int, verdict: EnrichmentIn, *, followup_min_score: int | None = None
+    ) -> bool:
         """Record an outside verdict and release any held notification for the listing.
+
+        If the alert has already gone out and the verdict scores at least
+        `followup_min_score`, a short follow-up is queued for the same chat destinations —
+        a hot deal is worth a second message; a late "nothing special" is not.
 
         Returns False if the listing is unknown (pruned, or never recorded).
         """
@@ -603,11 +615,27 @@ class Repo:
             )
             if cursor.rowcount == 0:
                 return False
-            await conn.execute(
+            released = await conn.execute(
                 "UPDATE outbox SET next_attempt_at = ? "
                 "WHERE item_id = ? AND status = 'pending' AND next_attempt_at > ?",
                 (now, item_id, now),
             )
+            hot = (
+                followup_min_score is not None
+                and verdict.score is not None
+                and verdict.score >= followup_min_score
+                and verdict.matches_query is not False
+            )
+            if hot and released.rowcount == 0:
+                await conn.execute(
+                    "INSERT OR IGNORE INTO outbox (item_id, query_id, destination_id, "
+                    "next_attempt_at, created_at, kind) "
+                    "SELECT o.item_id, o.query_id, o.destination_id, ?, ?, 'verdict' "
+                    "FROM outbox o JOIN destinations d ON d.id = o.destination_id "
+                    "WHERE o.item_id = ? AND o.kind = 'new' AND o.status = 'sent' "
+                    "AND d.kind != 'webhook' AND d.active = 1",
+                    (now, now, item_id),
+                )
         return True
 
     async def current_prices(self, item_ids: list[int]) -> dict[int, Decimal | None]:

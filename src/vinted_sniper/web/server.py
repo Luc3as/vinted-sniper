@@ -154,7 +154,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
     @app.post("/api/items/{item_id}/enrichment")
     async def post_enrichment(item_id: int, verdict: EnrichmentIn, _: None = guard) -> JSONResponse:
         """What an outside agent concluded about a listing. Releases any held alert."""
-        if not await repo.store_enrichment(item_id, verdict):
+        if not await repo.store_enrichment(
+            item_id, verdict, followup_min_score=settings.enrichment_highlight_score
+        ):
             raise HTTPException(status_code=404, detail="no such listing")
         log.info(
             "enrichment.received",

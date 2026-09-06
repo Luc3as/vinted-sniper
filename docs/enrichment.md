@@ -22,7 +22,10 @@ nothing posted in time?       → the alert goes out as it always did
 ```
 
 Silence from the agent costs a delay, never an alert. If the verdict arrives after the
-alert went out, it is stored (the dashboard shows it) but not re-sent.
+alert went out, it is stored (the dashboard shows it) and, when it scores at least
+`ENRICHMENT_HIGHLIGHT_SCORE` and does not say the listing is the wrong product, a short
+"verdict is in: hot deal" follow-up goes to the same chat destinations. A late verdict
+that says "nothing special" is kept quiet: it would not earn a second message.
 
 ## Setting it up
 

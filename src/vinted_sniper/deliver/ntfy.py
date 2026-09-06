@@ -51,7 +51,7 @@ class NtfySender:
             headers = {
                 "Title": (
                     f"{notification.headline()} — {item.title}"
-                    if notification.is_price_drop
+                    if notification.is_price_drop or notification.is_verdict
                     else item.title
                 )[:200],
                 "Click": item.url,

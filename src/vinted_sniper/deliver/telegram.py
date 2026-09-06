@@ -87,7 +87,9 @@ class TelegramSender:
         for notification in individually:
             result = await self._post(
                 "sendMessage",
-                self._listing_payload(
+                self._verdict_payload(notification)
+                if notification.is_verdict
+                else self._listing_payload(
                     notification.item,
                     query_id=notification.query_id,
                     headline=notification.headline() if notification.is_price_drop else None,
@@ -195,6 +197,23 @@ class TelegramSender:
         else:
             payload["link_preview_options"] = {"is_disabled": True}
         return payload
+
+    def _verdict_payload(self, notification: PendingNotification) -> dict[str, Any]:
+        """A follow-up for a verdict that arrived after the alert: short, and only sent
+        when the deal is hot, so it earns its buzz."""
+        item = notification.item
+        payable = item.total_price if item.total_price is not None else item.price
+        lines = [f"🔥 <b>Verdict is in: hot deal</b> · {html.escape(item.title)}"]
+        if notification.enrichment is not None:
+            summary, details = notification.enrichment.lines(payable, item.currency)
+            if summary:
+                lines.append(html.escape(summary))
+            lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
+        return self._base_payload() | {
+            "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
+            "reply_markup": {"inline_keyboard": [[{"text": "Open listing", "url": item.url}]]},
+            "link_preview_options": {"is_disabled": True},
+        }
 
     def _weave_verdict(
         self, lines: list[str], item: Item, verdict: Enrichment, *, silent: bool
