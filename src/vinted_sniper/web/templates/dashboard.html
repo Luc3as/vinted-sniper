@@ -338,6 +338,7 @@
     <table>
       <tr>
         <th>Name</th><th>Type</th><th>State</th>
+        <th>Language {{ help('The language of alerts, bot replies and health notices sent here. Each destination can differ.') }}</th>
         <th>Quiet hours {{ help('A daily window when nothing is sent, e.g. 23:00-07:00. Listings found meanwhile are kept and arrive together when it ends, instead of being dropped.') }}</th>
         <th>Health notices {{ help('Also send warnings here: “Vinted is refusing us”, “a search went quiet”, the Monday summary. Turn it on for at least one destination or you will not hear about problems.') }}</th>
         <th></th>
@@ -349,6 +350,15 @@
         <td>
           {% if destination.active %}<span class="pill ok">active</span>
           {% else %}<span class="pill disabled">disabled</span>{% endif %}
+        </td>
+        <td>
+          <form method="post" action="/destinations/{{ destination.id }}/language" class="row inline" style="margin:0">
+            <select name="language" style="width:auto" aria-label="Language for {{ destination.name }}" onchange="this.form.requestSubmit()">
+              {% for code, label in languages.items() %}
+              <option value="{{ code }}" {% if destination.language == code %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </form>
         </td>
         <td>
           <form method="post" action="/destinations/{{ destination.id }}/quiet" class="row inline" style="margin:0">
@@ -405,6 +415,12 @@
         <div>
           <label for="quiet_hours">Quiet hours (optional) {{ help('e.g. 23:00-07:00 in your timezone. Alerts found meanwhile arrive as one digest when it ends.') }}</label>
           <input type="text" id="quiet_hours" name="quiet_hours" placeholder="23:00-07:00">
+        </div>
+        <div>
+          <label for="language">Language {{ help('Alerts, bot replies and health notices to this destination will be in this language.') }}</label>
+          <select id="language" name="language">
+            {% for code, label in languages.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
+          </select>
         </div>
         <div>
           <label class="row" style="margin-top:1.6rem;color:var(--ink)">

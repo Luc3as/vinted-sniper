@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from vinted_sniper import i18n
 from vinted_sniper.db.repo import PendingNotification
 from vinted_sniper.deliver.base import SendResult, require
 from vinted_sniper.deliver.ratelimit import TokenBucket
@@ -30,7 +31,9 @@ class NtfySender:
         *,
         client: httpx.AsyncClient | None = None,
         bucket: TokenBucket | None = None,
+        language: str = "en",
     ) -> None:
+        self._t = i18n.get(language)
         self._topic = require(config, "topic", self.kind)
         self._server = str(config.get("server") or DEFAULT_SERVER).rstrip("/")
         self._token = config.get("token")
@@ -50,7 +53,7 @@ class NtfySender:
             item = notification.item
             headers = {
                 "Title": (
-                    f"{notification.headline()} — {item.title}"
+                    f"{notification.headline(self._t)} — {item.title}"
                     if notification.is_price_drop or notification.is_verdict
                     else item.title
                 )[:200],
@@ -68,7 +71,7 @@ class NtfySender:
             try:
                 response = await self._client.post(
                     f"{self._server}/{self._topic}",
-                    content=item.price_line().encode(),
+                    content=item.price_line(self._t).encode(),
                     headers=headers,
                 )
             except httpx.HTTPError as exc:

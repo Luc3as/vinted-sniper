@@ -19,6 +19,7 @@ from decimal import Decimal
 from vinted_sniper.config import MAX_BACKOFF_S, Settings
 from vinted_sniper.db.repo import Query, Repo
 from vinted_sniper.engine import dedup, filters
+from vinted_sniper.i18n import Translator
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.errors import (
@@ -55,7 +56,7 @@ class Poller:
         work_available: asyncio.Event | None = None,
         rng: random.Random | None = None,
         initial_delay_s: float = 0.0,
-        announce: Callable[[str], Awaitable[None]] | None = None,
+        announce: Callable[[str | Callable[[Translator], str]], Awaitable[None]] | None = None,
     ) -> None:
         self.query = query
         self._repo = repo
@@ -114,12 +115,19 @@ class Poller:
             )
             self._log.warning("poll.blocked", error=str(exc), retry_in_s=round(delay))
             if first_on_site and self._announce is not None:
+                tld, name, minutes = self.query.tld, self.query.name, round(delay / 60)
                 with contextlib.suppress(Exception):
                     await self._announce(
-                        f"vinted.{self.query.tld} is refusing requests from this address "
-                        f"(\u201c{self.query.name}\u201d was the first to notice). Holding "
-                        f"every search on that site for about {round(delay / 60)} min. "
-                        "If this keeps happening, see the troubleshooting guide."
+                        lambda t: t(
+                            "vinted.{tld} is refusing requests from this address "
+                            "(“{name}” was the first to notice). Holding every search "
+                            "on that site for "
+                            "about {minutes} min. If this keeps happening, see the "
+                            "troubleshooting guide.",
+                            tld=tld,
+                            name=name,
+                            minutes=minutes,
+                        )
                     )
             return delay
         except RateLimitedError as exc:

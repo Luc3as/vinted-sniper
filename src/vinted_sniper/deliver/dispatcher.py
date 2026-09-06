@@ -15,12 +15,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
 
+from vinted_sniper import i18n
 from vinted_sniper.config import Settings
 from vinted_sniper.db.repo import Destination, PendingNotification, Repo
 from vinted_sniper.deliver.base import Sender, SenderConfigError
@@ -30,6 +32,7 @@ from vinted_sniper.deliver.ratelimit import Gate, TokenBucket
 from vinted_sniper.deliver.telegram import TelegramSender
 from vinted_sniper.deliver.webhook import WebhookSender
 from vinted_sniper.engine import quiet
+from vinted_sniper.i18n import Translator
 from vinted_sniper.log import get_logger
 
 log = get_logger(__name__)
@@ -233,15 +236,20 @@ class Dispatcher:
             "buyer_feedback": await self._repo.feedback_examples(notification.query_id),
         }
 
-    async def notify_status(self, message: str) -> None:
-        """Send an operational notice to whichever destinations asked for them."""
+    async def notify_status(self, message: str | Callable[[Translator], str]) -> None:
+        """Send an operational notice to whichever destinations asked for them.
+
+        Pass a callable taking a translator to have the notice rendered in each
+        destination's own language; a plain string goes out as is.
+        """
         for destination_id in await self._repo.status_destination_ids():
             destination = await self._repo.get_destination(destination_id)
             if destination is None:
                 continue
+            text = message if isinstance(message, str) else message(i18n.get(destination.language))
             with contextlib.suppress(Exception):
                 sender = await self._sender_for(destination)
-                await sender.send_status(message)
+                await sender.send_status(text)
 
     async def _sender_for(self, destination: Destination) -> Sender:
         # Keyed on the settings too: pairing a Telegram chat rewrites them, and a sender
@@ -263,7 +271,10 @@ class Dispatcher:
         match destination.kind:
             case "discord":
                 return DiscordSender(
-                    config, dashboard_url=self._settings.dashboard_url, client=self._client
+                    config,
+                    dashboard_url=self._settings.dashboard_url,
+                    client=self._client,
+                    language=destination.language,
                 )
             case "telegram":
                 token = self._settings.telegram_bot_token
@@ -278,6 +289,7 @@ class Dispatcher:
                     client=self._client,
                     highlight_score=self._settings.enrichment_highlight_score,
                     silent_below=self._settings.enrichment_silent_below,
+                    language=destination.language,
                 )
             case "webhook":
                 return WebhookSender(
@@ -287,7 +299,7 @@ class Dispatcher:
                     context=self._agent_context,
                 )
             case "ntfy":
-                return NtfySender(config, client=self._client)
+                return NtfySender(config, client=self._client, language=destination.language)
             case unknown:
                 raise SenderConfigError(f"unknown destination type {unknown!r}")
 

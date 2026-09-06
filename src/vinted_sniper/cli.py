@@ -108,6 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--status", action="store_true", help="Also send health warnings here."
     )
     destination.add_argument(
+        "--lang",
+        default="en",
+        choices=["en", "sk"],
+        help="Language of alerts, bot replies and notices sent here.",
+    )
+    destination.add_argument(
         "--quiet",
         default="",
         help="Daily window to send nothing, e.g. 23:00-07:00 (in TIMEZONE). "
@@ -331,6 +337,7 @@ async def _cmd_destination(settings: Settings, args: argparse.Namespace) -> int:
             config=config,
             notify_status=args.status,
             quiet_hours=args.quiet.strip() or None,
+            language=args.lang,
         )
     print(f"Added {args.kind} destination (id {destination_id}).")
     print("Route a search to it with: vinted-sniper watch <url> --to " + str(destination_id))

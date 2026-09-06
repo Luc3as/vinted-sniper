@@ -16,10 +16,12 @@ from typing import Any
 
 import httpx
 
+from vinted_sniper import i18n
 from vinted_sniper.db.repo import PendingNotification
 from vinted_sniper.deliver.base import SendResult, require
 from vinted_sniper.deliver.ratelimit import TokenBucket
 from vinted_sniper.enrichment import Enrichment
+from vinted_sniper.i18n import Translator
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted.models import Item
 
@@ -58,6 +60,7 @@ class TelegramSender:
         bot_token: str,
         highlight_score: int = 75,
         silent_below: int = 40,
+        language: str = "en",
         client: httpx.AsyncClient | None = None,
         bucket: TokenBucket | None = None,
     ) -> None:
@@ -71,6 +74,7 @@ class TelegramSender:
         self._bucket = bucket or TokenBucket(MESSAGES_PER_S, capacity=2)
         self._highlight_score = highlight_score
         self._silent_below = silent_below
+        self._t = i18n.get(language)
 
     @property
     def max_batch(self) -> int:
@@ -92,8 +96,11 @@ class TelegramSender:
                 else self._listing_payload(
                     notification.item,
                     query_id=notification.query_id,
-                    headline=notification.headline() if notification.is_price_drop else None,
+                    headline=(
+                        notification.headline(self._t) if notification.is_price_drop else None
+                    ),
                     enrichment=notification.enrichment,
+                    market_line=notification.market_line(self._t),
                 ),
                 [notification.outbox_id],
             )
@@ -148,7 +155,8 @@ class TelegramSender:
         enrichment: Enrichment | None = None,
         market_line: str | None = None,
     ) -> dict[str, Any]:
-        lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line())]
+        t = self._t
+        lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line(t))]
         if market_line:
             lines.append(f"📊 {html.escape(market_line)}")
         if headline:
@@ -166,14 +174,14 @@ class TelegramSender:
             seller = html.escape(item.seller_login)
             if item.seller_rating is not None:
                 seller += f" ({item.seller_rating:.0%})"
-            lines.append(f"Seller: {seller}")
+            lines.append(t("Seller: {seller}", seller=seller))
         if item.listed_at:
-            lines.append(f"Listed {item.listed_at.strftime('%H:%M UTC')}")
+            lines.append(t("Listed {time} UTC", time=item.listed_at.strftime("%H:%M")))
 
-        keyboard: list[list[dict[str, str]]] = [_link_row(item)]
+        keyboard: list[list[dict[str, str]]] = [_link_row(item, t)]
         # A second row of actions the bot handles itself: the two things people most
         # often want to do from the alert without opening the dashboard.
-        keyboard.extend(_action_rows(item, query_id, enrichment))
+        keyboard.extend(_action_rows(item, query_id, enrichment, t))
 
         payload = self._base_payload() | {
             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
@@ -196,11 +204,14 @@ class TelegramSender:
     def _verdict_payload(self, notification: PendingNotification) -> dict[str, Any]:
         """A follow-up for a verdict that arrived after the alert: short, and only sent
         when the deal is hot, so it earns its buzz."""
+        t = self._t
         item = notification.item
         payable = item.total_price if item.total_price is not None else item.price
-        lines = [f"🔥 <b>Verdict is in: hot deal</b> · {html.escape(item.title)}"]
+        lines = [
+            f"🔥 <b>{html.escape(t('Verdict is in: hot deal'))}</b> · {html.escape(item.title)}"
+        ]
         if notification.enrichment is not None:
-            summary, details = notification.enrichment.lines(payable, item.currency)
+            summary, details = notification.enrichment.lines(payable, item.currency, t)
             if summary:
                 lines.append(html.escape(summary))
             lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
@@ -208,8 +219,8 @@ class TelegramSender:
             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
             "reply_markup": {
                 "inline_keyboard": [
-                    [{"text": "Open listing", "url": item.url}],
-                    feedback_buttons(item.item_id),
+                    [{"text": t("Open listing"), "url": item.url}],
+                    feedback_buttons(item.item_id, t),
                 ]
             },
             "link_preview_options": {"is_disabled": True},
@@ -218,22 +229,29 @@ class TelegramSender:
     def _weave_verdict(
         self, lines: list[str], item: Item, verdict: Enrichment, *, silent: bool
     ) -> None:
+        t = self._t
         payable = item.total_price if item.total_price is not None else item.price
-        summary, details = verdict.lines(payable, item.currency)
+        summary, details = verdict.lines(payable, item.currency, t)
         if summary:
             hot = verdict.is_hot(self._highlight_score)
-            marker = "🔥 <b>HOT DEAL</b> · " if hot else ("💤 " if silent else "🤖 ")
+            marker = (
+                f"🔥 <b>{html.escape(t('HOT DEAL'))}</b> · "
+                if hot
+                else ("💤 " if silent else "🤖 ")
+            )
             lines.insert(0, f"{marker}{html.escape(summary)}")
         lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
 
     def _digest_payload(self, batch: list[PendingNotification]) -> dict[str, Any]:
-        lines = [f"<b>{len(batch)} more matches</b>"]
+        t = self._t
+        more = t.ngettext("{n} more matches", "{n} more matches", len(batch))
+        lines = [f"<b>{html.escape(more)}</b>"]
         for index, notification in enumerate(batch, start=1):
             item = notification.item
             marker = "📉 " if notification.is_price_drop else ""
             lines.append(
                 f'{index}. {marker}<a href="{html.escape(item.url, quote=True)}">'
-                f"{html.escape(item.title[:80])}</a> — {html.escape(item.price_line())}"
+                f"{html.escape(item.title[:80])}</a> — {html.escape(item.price_line(t))}"
             )
         return self._base_payload() | {
             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
@@ -285,37 +303,39 @@ CALLBACK_PAUSE_SEARCH = "ps"
 CALLBACK_FEEDBACK = "fb"
 
 
-def feedback_buttons(item_id: int) -> list[dict[str, str]]:
+def feedback_buttons(item_id: int, t: Translator = i18n.EN) -> list[dict[str, str]]:
     """Thumbs on a verdict. What the buyer says here is fed back to the agent as examples
     of what this particular buyer calls a deal."""
     return [
-        {"text": "👍 Good call", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:1"},
-        {"text": "👎 Not for me", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:-1"},
+        {"text": f"👍 {t('Good call')}", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:1"},
+        {"text": f"👎 {t('Not for me')}", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:-1"},
     ]
 
 
 def _action_rows(
-    item: Item, query_id: int | None, enrichment: Enrichment | None
+    item: Item, query_id: int | None, enrichment: Enrichment | None, t: Translator = i18n.EN
 ) -> list[list[dict[str, str]]]:
     rows: list[list[dict[str, str]]] = []
-    if actions := inline_actions(query_id, item.seller_login):
+    if actions := inline_actions(query_id, item.seller_login, t):
         rows.append(actions)
     if enrichment is not None:
-        rows.append(feedback_buttons(item.item_id))
+        rows.append(feedback_buttons(item.item_id, t))
     return rows
 
 
-def _link_row(item: Item) -> list[dict[str, str]]:
+def _link_row(item: Item, t: Translator = i18n.EN) -> list[dict[str, str]]:
     """Only links that resolve. Vinted's old deep links to the message screen and to
     checkout answer "page not found" since the site was rebuilt; both actions now live on
     the listing page itself, so one button covers them."""
-    row = [{"text": "Open listing", "url": item.url}]
+    row = [{"text": t("Open listing"), "url": item.url}]
     if item.seller_url:
-        row.append({"text": "Seller profile", "url": item.seller_url})
+        row.append({"text": t("Seller profile"), "url": item.seller_url})
     return row
 
 
-def inline_actions(query_id: int | None, seller_login: str | None) -> list[dict[str, str]]:
+def inline_actions(
+    query_id: int | None, seller_login: str | None, t: Translator = i18n.EN
+) -> list[dict[str, str]]:
     """Callback buttons the bot in botctl answers. Empty when there is no search to act on."""
     if query_id is None:
         return []
@@ -323,8 +343,10 @@ def inline_actions(query_id: int | None, seller_login: str | None) -> list[dict[
     if seller_login:
         data = f"{CALLBACK_BLOCK_SELLER}:{query_id}:{seller_login}"
         if len(data.encode()) <= _CALLBACK_LIMIT:
-            row.append({"text": "🚫 Skip seller", "callback_data": data})
-    row.append({"text": "⏸ Pause search", "callback_data": f"{CALLBACK_PAUSE_SEARCH}:{query_id}"})
+            row.append({"text": f"🚫 {t('Skip seller')}", "callback_data": data})
+    row.append(
+        {"text": f"⏸ {t('Pause search')}", "callback_data": f"{CALLBACK_PAUSE_SEARCH}:{query_id}"}
+    )
     return row
 
 

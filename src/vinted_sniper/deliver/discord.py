@@ -25,9 +25,11 @@ from typing import Any
 
 import httpx
 
+from vinted_sniper import i18n
 from vinted_sniper.db.repo import PendingNotification
 from vinted_sniper.deliver.base import SendResult, require
 from vinted_sniper.deliver.ratelimit import TokenBucket
+from vinted_sniper.i18n import Translator
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted.models import Item
 
@@ -68,7 +70,9 @@ class DiscordSender:
         dashboard_url: str | None = None,
         client: httpx.AsyncClient | None = None,
         bucket: TokenBucket | None = None,
+        language: str = "en",
     ) -> None:
+        self._t = i18n.get(language)
         self._url = require(config, "webhook_url", self.kind)
         self._dashboard_url = dashboard_url
         self._client = client or httpx.AsyncClient(timeout=20.0)
@@ -118,40 +122,41 @@ class DiscordSender:
         return {"username": BOT_NAME, "avatar_url": ICON_URL, "embeds": embeds}
 
     def _embed(self, notification: PendingNotification) -> dict[str, Any]:
+        t = self._t
         item = notification.item
         detected = notification.detected_at or int(time.time())
 
-        links = [f"**[View item]({item.url})**"]
+        links = [f"**[{t('View item')}]({item.url})**"]
         if self._dashboard_url:
-            links.append(f"[Dashboard]({self._dashboard_url})")
+            links.append(f"[{t('Dashboard')}]({self._dashboard_url})")
         if item.seller_url:
-            links.append(f"[Seller]({item.seller_url})")
+            links.append(f"[{t('Seller')}]({item.seller_url})")
 
         fields: list[dict[str, Any]] = []
         if item.price is not None:
-            fields.append({"name": "Price", "value": _price_value(item), "inline": True})
+            fields.append({"name": t("Price"), "value": _price_value(item, t), "inline": True})
         for name, value in (
-            ("Size", item.size),
-            ("Condition", item.condition),
-            ("Brand", item.brand),
+            (t("Size"), item.size),
+            (t("Condition"), item.condition),
+            (t("Brand"), item.brand),
         ):
             if value:
                 fields.append({"name": name, "value": value[:1024], "inline": True})
-        fields.append({"name": "Location", "value": _location(item.tld), "inline": True})
-        fields.extend(_market_field(notification))
+        fields.append({"name": t("Location"), "value": _location(item.tld), "inline": True})
+        fields.extend(_market_field(notification, t))
         if item.seller_rating is not None:
-            fields.append({"name": "Seller rating", "value": _rating(item), "inline": True})
+            fields.append({"name": t("Seller rating"), "value": _rating(item), "inline": True})
         if item.seller_login:
             fields.append(
-                {"name": "Seller", "value": f"@{item.seller_login}"[:1024], "inline": True}
+                {"name": t("Seller"), "value": f"@{item.seller_login}"[:1024], "inline": True}
             )
         # Discord renders this in the reader's own timezone, as "2 minutes ago".
-        fields.append({"name": "Detected", "value": f"<t:{detected}:R>", "inline": True})
-        if (field := _verdict_field(notification)) is not None:
+        fields.append({"name": t("Detected"), "value": f"<t:{detected}:R>", "inline": True})
+        if (field := _verdict_field(notification, t)) is not None:
             fields.append(field)
 
         embed: dict[str, Any] = {
-            "author": {"name": f"{notification.headline()} • {notification.query_name}"[:256]},
+            "author": {"name": f"{notification.headline(t)} • {notification.query_name}"[:256]},
             "title": item.title[:256],
             # Distinct per listing on purpose: Discord folds together embeds that share
             # a URL.
@@ -220,7 +225,7 @@ class DiscordSender:
             await self._client.aclose()
 
 
-def _price_value(item: Item) -> str:
+def _price_value(item: Item, t: Translator = i18n.EN) -> str:
     """The asking price in bold, with the real total under it when the two differ.
 
     The total — buyer protection included — is the number a buying decision compares, so
@@ -229,7 +234,7 @@ def _price_value(item: Item) -> str:
     currency = f" {item.currency}" if item.currency else ""
     value = f"**{item.price}{currency}**"
     if item.total_price is not None and item.total_price != item.price:
-        value += f"\n{item.total_price}{currency} total"
+        value += "\n" + t("{n} total", n=f"{item.total_price}{currency}")
     return value
 
 
@@ -240,22 +245,26 @@ def _location(tld: str) -> str:
     return f"{flag} {iso}"
 
 
-def _market_field(notification: PendingNotification) -> list[dict[str, Any]]:
-    market = notification.market_line()
-    return [{"name": "Market", "value": market[:1024], "inline": False}] if market else []
+def _market_field(
+    notification: PendingNotification, t: Translator = i18n.EN
+) -> list[dict[str, Any]]:
+    market = notification.market_line(t)
+    return [{"name": t("Market"), "value": market[:1024], "inline": False}] if market else []
 
 
-def _verdict_field(notification: PendingNotification) -> dict[str, Any] | None:
+def _verdict_field(
+    notification: PendingNotification, t: Translator = i18n.EN
+) -> dict[str, Any] | None:
     verdict = notification.enrichment
     if verdict is None:
         return None
     item = notification.item
     payable = item.total_price if item.total_price is not None else item.price
-    summary, details = verdict.lines(payable, item.currency)
+    summary, details = verdict.lines(payable, item.currency, t)
     text = "\n".join(part for part in [summary, *details] if part)
     if not text:
         return None
-    return {"name": "🤖 Verdict", "value": text[:1024], "inline": False}
+    return {"name": f"🤖 {t('Verdict')}", "value": text[:1024], "inline": False}
 
 
 def _rating(item: Item) -> str:

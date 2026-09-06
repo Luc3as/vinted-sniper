@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from vinted_sniper import i18n
+from vinted_sniper.i18n import Translator
 from vinted_sniper.vinted import urls
 
 
@@ -83,13 +85,18 @@ class Item(BaseModel):
             return None
         return urls.member_url(self.tld, self.seller_id)
 
-    def price_line(self) -> str:
+    def price_line(self, t: Translator = i18n.EN) -> str:
         """Price as a human reads it, showing the total when it differs from the ask."""
         if self.price is None:
-            return "price unknown"
+            return t("price unknown")
         currency = f" {self.currency}" if self.currency else ""
         if self.total_price is not None and self.total_price != self.price:
-            return f"{self.price}{currency} ({self.total_price}{currency} with protection)"
+            return t(
+                "{price}{currency} ({total}{currency} with protection)",
+                price=self.price,
+                total=self.total_price,
+                currency=currency,
+            )
         return f"{self.price}{currency}"
 
 

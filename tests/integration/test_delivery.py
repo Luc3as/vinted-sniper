@@ -546,3 +546,37 @@ async def test_market_context_is_withheld_until_there_is_enough_of_it(repo: Repo
     query = await a_search(repo)
     await repo.observe_market(query.id, [listing(1), listing(2)])
     assert await repo.market_context(query.id, Decimal("11.70"), None) is None
+
+
+async def test_a_destination_language_travels_with_the_pairing(repo: Repo) -> None:
+    destination_id, code = await create_pairing(repo, "Telefón")
+    await repo.set_language(destination_id, "sk")
+    await claim_pairing(repo, code, chat_id=4242, thread_id=None)
+
+    assert await repo.chat_language(4242) == "sk"
+    assert await repo.chat_language(1) is None
+    (destination,) = [d for d in await repo.list_destinations() if d.id == destination_id]
+    assert destination.language == "sk"
+
+
+async def test_status_notices_are_rendered_per_destination_language(
+    repo: Repo, settings: Settings
+) -> None:
+    en = await repo.add_destination(
+        kind="webhook", name="en", config={"url": "https://example.test/en"}, notify_status=True
+    )
+    sk = await repo.add_destination(
+        kind="webhook",
+        name="sk",
+        config={"url": "https://example.test/sk"},
+        notify_status=True,
+        language="sk",
+    )
+    endpoint = FakeEndpoint()
+    dispatcher = make_dispatcher(repo, settings, endpoint)
+
+    await dispatcher.notify_status(lambda t: t("Running."))
+
+    bodies = {json.loads(r.content)["status"] for r in endpoint.requests}
+    assert bodies == {"Running.", "Beží."}
+    assert en != sk

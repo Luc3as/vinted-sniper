@@ -50,6 +50,7 @@ Raspberry Pi, NAS or cheap VPS: see [the self-hosting guide](docs/self-hosting.m
 - **Filters on what you actually pay**, buyer protection included. Vinted's own price filter ignores it.
 - **Room for a brain**: hand each listing to your own agent (n8n + an LLM, say) for a verdict — is it the real model, what does it cost new, how good is the deal — and get it woven into the alert. See [docs/enrichment.md](docs/enrichment.md).
 - **Price drops**: a listing you already saw comes back when its price falls, at no extra requests.
+- **Alerts in your language** — English or Slovak per destination; a Slovak Telegram chat and an English Discord server can share one instance.
 - **A Monday-morning summary** to the destinations that get health notices, and `export`/`import` of everything you configured as one JSON file.
 - **Quiet hours per destination**: nothing at 03:00, a digest of the night at 07:00.
 - **Filters Vinted's search cannot express**: words the title must contain, a title regex, a floor on seller rating and review count, and sellers to skip.

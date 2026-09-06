@@ -20,6 +20,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from vinted_sniper import i18n
+from vinted_sniper.i18n import Translator
+
 
 class EnrichmentIn(BaseModel):
     """What the callback accepts. Everything optional: a partial verdict beats none."""
@@ -77,28 +80,32 @@ class Enrichment:
         """Not worth a buzz: scored below the line, or not the product searched for."""
         return (self.score is not None and self.score < threshold) or self.matches_query is False
 
-    def lines(self, payable: Decimal | None, currency: str | None) -> tuple[str, list[str]]:
+    def lines(
+        self, payable: Decimal | None, currency: str | None, t: Translator = i18n.EN
+    ) -> tuple[str, list[str]]:
         """The top line (may be empty) and the detail lines a message appends."""
         details: list[str] = []
         if self.model:
-            details.append(f"Looks like: {self.model}")
+            details.append(t("Looks like: {model}", model=self.model))
         if self.verdict:
             details.append(self.verdict)
-        return self.summary(payable, currency), details
+        return self.summary(payable, currency, t), details
 
-    def summary(self, payable: Decimal | None, currency: str | None) -> str:
+    def summary(
+        self, payable: Decimal | None, currency: str | None, t: Translator = i18n.EN
+    ) -> str:
         """The compact line that goes at the top of a message."""
         parts: list[str] = []
         if self.score is not None:
-            parts.append(f"deal {self.score}/100")
+            parts.append(t("deal {score}/100", score=self.score))
         if self.retail_price is not None:
             unit = f" {currency}" if currency else ""
-            piece = f"retail ~{self.retail_price:.0f}{unit}"
+            piece = t("retail ~{price}{currency}", price=f"{self.retail_price:.0f}", currency=unit)
             if (off := self.discount_percent(payable)) is not None:
                 piece += f" · -{off}%"
             parts.append(piece)
         if self.matches_query is False:
-            parts.append("not the model searched for")
+            parts.append(t("not the model searched for"))
         if self.risk:
-            parts.append(f"risk: {self.risk}")
+            parts.append(t("risk: {risk}", risk=self.risk))
         return " · ".join(parts)

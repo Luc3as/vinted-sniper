@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 from vinted_sniper.config import Settings
 from vinted_sniper.db.repo import Repo
+from vinted_sniper.i18n import Translator
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted.client import PER_PAGE
 from vinted_sniper.vinted.errors import BlockedError, NetworkError
@@ -63,7 +64,7 @@ class Watchdog:
         sessions: SessionManager,
         settings: Settings,
         stop: asyncio.Event,
-        announce: Callable[[str], Awaitable[None]] | None = None,
+        announce: Callable[[str | Callable[[Translator], str]], Awaitable[None]] | None = None,
     ) -> None:
         self._repo = repo
         self._sessions = sessions
@@ -169,7 +170,12 @@ class Watchdog:
 
         if self._announce is not None:
             await self._announce(
-                f"“{search.name}” has seen nothing new for {search.stale_cycles} checks "
-                f"while other vinted.{search.tld} searches keep finding listings. "
-                "Started a fresh session; if it stays quiet, see the troubleshooting guide."
+                lambda t: t(
+                    "“{name}” has seen nothing new for {cycles} checks while other vinted.{tld} "
+                    "searches keep finding listings. Started a fresh session; if it stays quiet, "
+                    "see the troubleshooting guide.",
+                    name=search.name,
+                    cycles=search.stale_cycles,
+                    tld=search.tld,
+                )
             )

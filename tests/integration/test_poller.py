@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from tests.conftest import ScriptedTransport
+from vinted_sniper import i18n
 from vinted_sniper.config import Settings
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine import health
@@ -302,8 +303,11 @@ async def test_the_first_refusal_on_a_site_is_announced_once(
     clock = FakeClock()
     announcements: list[str] = []
 
-    async def announce(message: str) -> None:
-        announcements.append(message)
+    async def announce(message: Any) -> None:
+        # The dispatcher renders per destination language; here, English and Slovak.
+        announcements.append(message(i18n.get("en")) if callable(message) else message)
+        if callable(message):
+            assert "odmieta požiadavky" in message(i18n.get("sk"))
 
     poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock, announce=announce)
 

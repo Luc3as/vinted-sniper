@@ -51,6 +51,7 @@ async def export_config(repo: Repo) -> dict[str, Any]:
                 "config": d.config,
                 "notify_status": d.notify_status,
                 "quiet_hours": d.quiet_hours,
+                "language": d.language,
             }
             for d in destinations
             if d.active
@@ -77,6 +78,7 @@ async def import_config(repo: Repo, document: dict[str, Any]) -> dict[str, int]:
             config=dict(entry.get("config") or {}),
             notify_status=bool(entry.get("notify_status", False)),
             quiet_hours=entry.get("quiet_hours"),
+            language=str(entry.get("language") or "en"),
         )
         added["destinations"] += 1
 

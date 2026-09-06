@@ -12,9 +12,12 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
+from vinted_sniper import i18n
 from vinted_sniper.db.repo import Repo
+from vinted_sniper.i18n import Translator
 from vinted_sniper.log import get_logger
 
 log = get_logger(__name__)
@@ -32,7 +35,7 @@ class WeeklyReport:
         repo: Repo,
         zone: ZoneInfo,
         stop: asyncio.Event,
-        announce: Callable[[str], Awaitable[None]],
+        announce: Callable[[str | Callable[[Translator], str]], Awaitable[None]],
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._repo = repo
@@ -56,7 +59,8 @@ class WeeklyReport:
         last = await self._repo.get_state_value("weekly_report_sent_at")
         if last and int(last) >= int(due.timestamp()):
             return False
-        await self._announce(await self.compose(int(due.timestamp()) - _LOOKBACK_S))
+        figures = await self._repo.weekly_figures(int(due.timestamp()) - _LOOKBACK_S)
+        await self._announce(lambda t: self.render(figures, t))
         await self._repo.set_state_value("weekly_report_sent_at", str(int(due.timestamp())))
         log.info("report.sent", slot=due.isoformat())
         return True
@@ -70,33 +74,61 @@ class WeeklyReport:
             slot -= timedelta(days=7)
         return slot
 
-    async def compose(self, since: int) -> str:
-        f = await self._repo.weekly_figures(since)
+    async def compose(self, since: int, t: Translator = i18n.EN) -> str:
+        return self.render(await self._repo.weekly_figures(since), t)
+
+    @staticmethod
+    def render(f: dict[str, Any], t: Translator = i18n.EN) -> str:
         if f["found"] == 0 and f["drops"] == 0:
-            return (
+            return t(
                 "Weekly: nothing new turned up on any search. Either the market is quiet "
                 "or the searches are too narrow."
             )
         lines = [
-            f"Weekly: {f['found']} new listing{'s' if f['found'] != 1 else ''} across "
-            f"{f['searches']} search{'es' if f['searches'] != 1 else ''}, "
-            f"{f['sent']} alert{'s' if f['sent'] != 1 else ''} sent, "
-            f"{f['drops']} price drop{'s' if f['drops'] != 1 else ''}."
+            t(
+                "Weekly: {found} across {searches}, {sent}, {drops}.",
+                found=t.ngettext("{n} new listing", "{n} new listings", f["found"]),
+                searches=t.ngettext("{n} search", "{n} searches", f["searches"]),
+                sent=t.ngettext("{n} alert sent", "{n} alerts sent", f["sent"]),
+                drops=t.ngettext("{n} price drop", "{n} price drops", f["drops"]),
+            )
         ]
         if f["judged"]:
-            avg = f" (avg score {f['avg_score']:.0f})" if f["avg_score"] is not None else ""
-            lines.append(f"{f['judged']} judged by the agent{avg}.")
+            avg = (
+                t(" (avg score {score})", score=f"{f['avg_score']:.0f}")
+                if f["avg_score"] is not None
+                else ""
+            )
+            lines.append(
+                t.ngettext(
+                    "{n} judged by the agent{avg}.",
+                    "{n} judged by the agent{avg}.",
+                    f["judged"],
+                    avg=avg,
+                )
+            )
         if f["hot"]:
             best = f["hot"][0]
             price = (
-                f" at {best['total_price']:.0f} {best['currency'] or ''}".rstrip()
+                t(
+                    " at {price} {currency}",
+                    price=f"{best['total_price']:.0f}",
+                    currency=best["currency"] or "",
+                ).rstrip()
                 if best["total_price"] is not None
                 else ""
             )
-            lines.append(f"Best verdict: {best['enrich_score']}/100 — {best['title'][:60]}{price}.")
+            lines.append(
+                t(
+                    "Best verdict: {score}/100 — {title}{price}.",
+                    score=best["enrich_score"],
+                    title=best["title"][:60],
+                    price=price,
+                )
+            )
         if f["busiest"]:
             top = ", ".join(f"{row['name']} ({row['n']})" for row in f["busiest"])
-            lines.append(f"Busiest: {top}.")
+            lines.append(t("Busiest: {list}.", list=top))
         if f["blocks_total"]:
-            lines.append(f"Refusals from Vinted so far: {f['blocks_total']}.")
+            lines.append(t("Refusals from Vinted so far: {n}.", n=f["blocks_total"]))
         return "\n".join(lines)

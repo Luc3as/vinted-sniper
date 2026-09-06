@@ -15,8 +15,10 @@ from typing import Any
 
 import aiosqlite
 
+from vinted_sniper import i18n
 from vinted_sniper.db.connection import Database
 from vinted_sniper.enrichment import Enrichment, EnrichmentIn
+from vinted_sniper.i18n import Translator
 from vinted_sniper.vinted.models import Item
 
 # --- Row types ---------------------------------------------------------------------
@@ -93,6 +95,8 @@ class Destination:
     failure_count: int = 0
     # "HH:MM-HH:MM" in the app's timezone, or None. See engine/quiet.py.
     quiet_hours: str | None = None
+    # Language code for everything this destination reads; see i18n.py.
+    language: str = "en"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,13 +120,16 @@ class PendingNotification:
     market_percentile: int | None = None
     market_n: int | None = None
 
-    def market_line(self) -> str | None:
+    def market_line(self, t: Translator = i18n.EN) -> str | None:
         """Plain words for the market position: "cheaper than 88% of 312 listings seen
         this month". Nobody should need to know what a percentile is."""
         if self.market_percentile is None or not self.market_n:
             return None
-        cheaper_than = 100 - self.market_percentile
-        return f"cheaper than {cheaper_than}% of {self.market_n} similar listings seen this month"
+        return t(
+            "cheaper than {pct}% of {n} similar listings seen this month",
+            pct=100 - self.market_percentile,
+            n=self.market_n,
+        )
 
     @property
     def is_price_drop(self) -> bool:
@@ -132,19 +139,25 @@ class PendingNotification:
     def is_verdict(self) -> bool:
         return self.kind == "verdict"
 
-    def headline(self) -> str:
+    def headline(self, t: Translator = i18n.EN) -> str:
         """What kind of news this is, for the top of a message."""
         if self.is_verdict:
-            return "Verdict is in"
+            return t("Verdict is in")
         if not self.is_price_drop:
-            return "New match"
+            return t("New match")
         item = self.item
         now_payable = item.total_price if item.total_price is not None else item.price
         currency = f" {item.currency}" if item.currency else ""
         if self.previous_price is not None and now_payable is not None:
             fall = round((self.previous_price - now_payable) / self.previous_price * 100)
-            return f"Price drop -{fall}%: {self.previous_price}{currency} → {now_payable}{currency}"
-        return "Price drop"
+            return t(
+                "Price drop -{fall}%: {before}{currency} → {now}{currency}",
+                fall=fall,
+                before=self.previous_price,
+                now=now_payable,
+                currency=currency,
+            )
+        return t("Price drop")
 
 
 def _json_list(raw: str | None) -> list[str] | None:
@@ -423,19 +436,34 @@ class Repo:
         config: dict[str, Any],
         notify_status: bool = False,
         quiet_hours: str | None = None,
+        language: str = "en",
     ) -> int:
         return await self._db.insert(
             "INSERT INTO destinations (kind, name, config_json, notify_status, quiet_hours, "
-            "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "language, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 kind,
                 name,
                 json.dumps(config),
                 int(notify_status),
                 quiet_hours or None,
+                i18n.normalise(language),
                 int(time.time()),
             ),
         )
+
+    async def set_language(self, destination_id: int, language: str) -> None:
+        await self._db.execute(
+            "UPDATE destinations SET language = ? WHERE id = ?",
+            (i18n.normalise(language), destination_id),
+        )
+
+    async def chat_language(self, chat_id: int) -> str | None:
+        """The language of the Telegram destination paired to a chat, if any."""
+        for destination in await self.list_destinations():
+            if destination.kind == "telegram" and destination.config.get("chat_id") == str(chat_id):
+                return destination.language
+        return None
 
     async def set_quiet_hours(self, destination_id: int, quiet_hours: str | None) -> None:
         await self._db.execute(
@@ -503,6 +531,7 @@ class Repo:
             notify_status=bool(row["notify_status"]),
             failure_count=row["failure_count"],
             quiet_hours=row["quiet_hours"],
+            language=row["language"] or "en",
         )
 
     # --- Routing -------------------------------------------------------------------

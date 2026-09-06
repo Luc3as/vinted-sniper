@@ -156,6 +156,10 @@ page, which the app fetches anyway, carries every listing's current price, so a 
 tracked for as long as it stays on that page (on a quiet search, indefinitely). Webhook
 consumers see `"event": "price_drop"` and `"previous_total_price"` on such items.
 
+A destination has a **language** (`--lang en|sk`, or the selector in the dashboard): its alerts,
+bot replies and health notices are rendered in it. A Slovak Telegram chat and an English
+Discord server can share one instance. The dashboard itself is English for now.
+
 A destination can have **quiet hours** — `--quiet 23:00-07:00` on the command line, or the
 field next to it in the dashboard — during which nothing is sent. Alerts found meanwhile are
 kept (they are exempt from `OUTBOX_EXPIRY_MINUTES`) and go out together when the window

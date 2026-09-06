@@ -440,3 +440,39 @@ async def test_telegram_headlines_a_hot_deal_and_mutes_a_dull_one() -> None:
     assert second["disable_notification"] is True
     assert "not the model searched for" in second["text"]
     assert "risk: stock photos only" in second["text"]
+
+
+async def test_a_slovak_destination_gets_a_slovak_alert() -> None:
+    recorder = Recorder(httpx.Response(200, json={"ok": True}))
+    sender = TelegramSender(
+        {"chat_id": "123"},
+        bot_token="t",
+        client=recorder.client(),
+        bucket=fast_bucket(),
+        language="sk",
+    )
+    hot = Enrichment(
+        score=91,
+        model="Nike Air Max 90",
+        retail_price=Decimal("140"),
+        retail_source="nike.com",
+        matches_query=True,
+        risk=None,
+        verdict="Berte.",
+        enriched_at=1,
+    )
+    pending = replace(notification(1), enrichment=hot, market_percentile=12, market_n=312)
+
+    await sender.send([pending])
+
+    payload = recorder.payload(0)
+    text = payload["text"]
+    assert text.startswith("🔥 <b>TOP PONUKA</b> · skóre 91/100 · v obchode ~140 EUR")
+    assert "s ochranou kupujúceho" in text
+    assert "lacnejší ako 88 % z 312 podobných inzerátov" in text
+    assert "Predajca: sneakerfan" in text
+    assert "Vyzerá to na: Nike Air Max 90" in text
+    buttons = [b["text"] for row in payload["reply_markup"]["inline_keyboard"] for b in row]
+    assert "Otvoriť inzerát" in buttons
+    assert "🚫 Preskočiť predajcu" in buttons
+    assert "👍 Trafil sa" in buttons

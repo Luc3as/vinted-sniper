@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from tests.conftest import ScriptedTransport
+from vinted_sniper import i18n
 from vinted_sniper.config import Settings
 from vinted_sniper.db.connection import Database
 from vinted_sniper.db.repo import Repo
@@ -39,8 +40,8 @@ def make_watchdog(
 ) -> tuple[Watchdog, list[str]]:
     announcements: list[str] = []
 
-    async def announce(message: str) -> None:
-        announcements.append(message)
+    async def announce(message: Any) -> None:
+        announcements.append(message(i18n.get("en")) if callable(message) else message)
 
     watchdog = Watchdog(
         repo=repo,

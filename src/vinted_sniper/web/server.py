@@ -35,7 +35,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import SecretStr
 
-from vinted_sniper import backup
+from vinted_sniper import backup, i18n
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine import filters, health, quiet
@@ -140,6 +140,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
                 "snapshot": snapshot,
                 "queries": queries,
                 "destinations": destinations,
+                "languages": i18n.LANGUAGES,
                 "first_run_newest": settings.first_run_mode == "newest",
                 "auth_enabled": token is not None,
                 "recent": _listing_views(await repo.recent_items(limit=25), now=int(time.time())),
@@ -442,6 +443,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         target: Annotated[str, Form()] = "",
         quiet_hours: Annotated[str, Form()] = "",
         notify_status: Annotated[str, Form()] = "",
+        language: Annotated[str, Form()] = "en",
         _: None = guard,
     ) -> Response:
         target = target.strip()
@@ -473,8 +475,18 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             config=config,
             notify_status=notify_status == "1",
             quiet_hours=quiet_hours or None,
+            language=language,
         )
-        return RedirectResponse("/", status_code=303)
+        return _redirect_with_notice("Destination added.")
+
+    @app.post("/destinations/{destination_id}/language")
+    async def set_destination_language(
+        destination_id: int, language: Annotated[str, Form()], _: None = guard
+    ) -> Response:
+        await repo.set_language(destination_id, language)
+        return _redirect_with_notice(
+            f"Alerts to this destination will be in {i18n.LANGUAGES[i18n.normalise(language)]}."
+        )
 
     @app.post("/destinations/{destination_id}/quiet")
     async def set_destination_quiet(
