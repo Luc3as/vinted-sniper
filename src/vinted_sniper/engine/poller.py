@@ -13,6 +13,7 @@ import contextlib
 import random
 import time
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 
 from vinted_sniper.config import MAX_BACKOFF_S, Settings
 from vinted_sniper.db.repo import Query, Repo
@@ -145,6 +146,8 @@ class Poller:
                 candidates.append(item)
 
         known = await self._repo.known_item_ids([item.item_id for item in candidates])
+        if known and not state.is_first_run:
+            await self._announce_price_drops([c for c in candidates if c.item_id in known])
         selection = dedup.select(
             candidates=candidates,
             all_items=items,
@@ -193,6 +196,34 @@ class Poller:
             self._log.info("poll.new_items", count=len(selection.to_notify), returned=len(items))
         else:
             self._log.debug("poll.nothing_new", returned=len(items))
+
+    async def _announce_price_drops(self, seen_again: list[Item]) -> None:
+        """A listing already recorded, now cheaper. No extra request: it is on the page
+        we just fetched, and the page carries its current price."""
+        threshold = self._settings.price_drop_min_percent
+        if threshold <= 0 or not seen_again:
+            return
+        previous = await self._repo.current_prices([item.item_id for item in seen_again])
+        drops: list[tuple[Item, Decimal]] = []
+        for item in seen_again:
+            before = previous.get(item.item_id)
+            now_payable = item.total_price if item.total_price is not None else item.price
+            if before is None or now_payable is None or before <= 0:
+                continue
+            fall = (before - now_payable) / before * 100
+            if fall >= threshold:
+                drops.append((item, before))
+        if not drops:
+            return
+        destination_ids = await self._repo.destination_ids_for_query(self.query.id)
+        await self._repo.record_price_drops(self.query, drops, destination_ids)
+        if destination_ids and self._work_available is not None:
+            self._work_available.set()
+        self._log.info(
+            "poll.price_drops",
+            count=len(drops),
+            items=[(item.item_id, str(before), str(item.total_price)) for item, before in drops],
+        )
 
     def _interval(self) -> float:
         base = float(self.query.poll_interval_s)

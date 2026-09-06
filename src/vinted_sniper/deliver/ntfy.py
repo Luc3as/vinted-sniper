@@ -49,9 +49,15 @@ class NtfySender:
         for notification in batch:
             item = notification.item
             headers = {
-                "Title": item.title[:200],
+                "Title": (
+                    f"{notification.headline()} — {item.title}"
+                    if notification.is_price_drop
+                    else item.title
+                )[:200],
                 "Click": item.url,
-                "Tags": "shopping_bags",
+                "Tags": (
+                    "chart_with_downwards_trend" if notification.is_price_drop else "shopping_bags"
+                ),
             }
             if item.photo_url:
                 headers["Attach"] = item.photo_url

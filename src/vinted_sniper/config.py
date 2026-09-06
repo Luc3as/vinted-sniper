@@ -106,6 +106,14 @@ class Settings(BaseSettings):
         description="Ignore listings whose photo timestamp is older than this. Stops a restart "
         "or a slow first poll from replaying yesterday's catalog.",
     )
+    price_drop_min_percent: int = Field(
+        default=10,
+        ge=0,
+        le=100,
+        description="Announce a listing again when its total price falls by at least this "
+        "much since we recorded it. Costs no extra requests: only listings still on the "
+        "search's first page are compared. 0 turns it off.",
+    )
     first_run_mode: Literal["silent", "newest"] = Field(
         default="silent",
         description="What a brand-new search does on its first check: 'silent' notifies "

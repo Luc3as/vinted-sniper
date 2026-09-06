@@ -29,6 +29,7 @@ Every variable is prefixed `VINTED_SNIPER_`. All of them are optional except whe
 | `POLL_DEFAULT_INTERVAL_S` | `60` | Seconds between checks for a newly added search. Per-search values override it. Anything under 10 is refused. |
 | `FRESHNESS_WINDOW_MIN` | `20` | Ignore listings whose photo is older than this. Stops a restart from replaying old results. |
 | `FIRST_RUN_MODE` | `silent` | What a brand-new search does first time: `silent` notifies nothing, `newest` sends exactly one listing so you can confirm delivery works. |
+| `PRICE_DROP_MIN_PERCENT` | `10` | Announce a listing again when its total price has fallen by at least this much since it was recorded. Free: only listings still on the search's first page are compared, using the page already fetched. `0` turns it off. |
 | `REQUEST_TIMEOUT_S` | `15` | How long to wait for Vinted before giving up on one request. |
 
 The 10-second floor is not caution for its own sake: Vinted's own API lags minutes behind
@@ -136,6 +137,13 @@ Where to get each kind of target:
 
 Each search can go to its own set of destinations, so a Discord channel for one thing and
 your phone for another is normal.
+
+A listing that was already announced is announced again when its price drops by
+`PRICE_DROP_MIN_PERCENT` or more — Vinted sellers cut prices often, and a jacket that was
+too dear on Monday may not be on Thursday. This costs nothing extra: the search's first
+page, which the app fetches anyway, carries every listing's current price, so a listing is
+tracked for as long as it stays on that page (on a quiet search, indefinitely). Webhook
+consumers see `"event": "price_drop"` and `"previous_total_price"` on such items.
 
 A destination can have **quiet hours** — `--quiet 23:00-07:00` on the command line, or the
 field next to it in the dashboard — during which nothing is sent. Alerts found meanwhile are

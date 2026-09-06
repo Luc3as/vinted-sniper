@@ -82,7 +82,11 @@ class TelegramSender:
         for notification in individually:
             result = await self._post(
                 "sendMessage",
-                self._listing_payload(notification.item, query_id=notification.query_id),
+                self._listing_payload(
+                    notification.item,
+                    query_id=notification.query_id,
+                    headline=notification.headline() if notification.is_price_drop else None,
+                ),
                 [notification.outbox_id],
             )
             if not result.delivered:
@@ -99,7 +103,7 @@ class TelegramSender:
         if overflow:
             result = await self._post(
                 "sendMessage",
-                self._digest_payload([n.item for n in overflow]),
+                self._digest_payload(overflow),
                 [n.outbox_id for n in overflow],
             )
             if not result.delivered:
@@ -127,8 +131,12 @@ class TelegramSender:
             payload["message_thread_id"] = self._thread_id
         return payload
 
-    def _listing_payload(self, item: Item, *, query_id: int | None = None) -> dict[str, Any]:
+    def _listing_payload(
+        self, item: Item, *, query_id: int | None = None, headline: str | None = None
+    ) -> dict[str, Any]:
         lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line())]
+        if headline:
+            lines.insert(0, f"📉 <b>{html.escape(headline)}</b>")
 
         details = " · ".join(
             html.escape(part) for part in (item.brand, item.size, item.condition) if part
@@ -170,11 +178,13 @@ class TelegramSender:
             payload["link_preview_options"] = {"is_disabled": True}
         return payload
 
-    def _digest_payload(self, items: list[Item]) -> dict[str, Any]:
-        lines = [f"<b>{len(items)} more matches</b>"]
-        for index, item in enumerate(items, start=1):
+    def _digest_payload(self, batch: list[PendingNotification]) -> dict[str, Any]:
+        lines = [f"<b>{len(batch)} more matches</b>"]
+        for index, notification in enumerate(batch, start=1):
+            item = notification.item
+            marker = "📉 " if notification.is_price_drop else ""
             lines.append(
-                f'{index}. <a href="{html.escape(item.url, quote=True)}">'
+                f'{index}. {marker}<a href="{html.escape(item.url, quote=True)}">'
                 f"{html.escape(item.title[:80])}</a> — {html.escape(item.price_line())}"
             )
         return self._base_payload() | {

@@ -147,7 +147,7 @@ class DiscordSender:
         fields.append({"name": "Detected", "value": f"<t:{detected}:R>", "inline": True})
 
         embed: dict[str, Any] = {
-            "author": {"name": f"New match • {notification.query_name}"[:256]},
+            "author": {"name": f"{notification.headline()} • {notification.query_name}"[:256]},
             "title": item.title[:256],
             # Distinct per listing on purpose: Discord folds together embeds that share
             # a URL.

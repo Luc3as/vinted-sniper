@@ -15,7 +15,6 @@ import httpx
 from vinted_sniper.db.repo import PendingNotification
 from vinted_sniper.deliver.base import SendResult, require
 from vinted_sniper.deliver.ratelimit import TokenBucket
-from vinted_sniper.vinted.models import Item
 
 PAYLOAD_VERSION = 1
 
@@ -49,7 +48,7 @@ class WebhookSender:
         payload = {
             "version": PAYLOAD_VERSION,
             "search": batch[0].query_name,
-            "items": [_item_json(n.item) for n in batch],
+            "items": [_item_json(n) for n in batch],
         }
         await self._bucket.acquire()
         try:
@@ -79,8 +78,15 @@ class WebhookSender:
             await self._client.aclose()
 
 
-def _item_json(item: Item) -> dict[str, Any]:
+def _item_json(notification: PendingNotification) -> dict[str, Any]:
+    item = notification.item
     return {
+        # Additive since version 1: "new" or "price_drop", and for a drop the total price
+        # it fell from. Consumers that ignore unknown keys see no change.
+        "event": notification.kind,
+        "previous_total_price": (
+            str(notification.previous_price) if notification.previous_price is not None else None
+        ),
         "id": item.item_id,
         "site": f"vinted.{item.tld}",
         "title": item.title,

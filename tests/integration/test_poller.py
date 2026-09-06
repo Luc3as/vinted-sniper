@@ -487,3 +487,64 @@ async def test_server_errors_are_transient(
 
     assert delay > 0
     assert (await repo.get_state(poller.query.id)).last_status == "network"
+
+
+# --- Price drops ---------------------------------------------------------------------
+
+
+async def test_a_listing_that_gets_cheaper_is_announced_again(
+    transport: ScriptedTransport,
+    repo: Repo,
+    settings: Settings,
+    db: Any,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    poller, work = await make_poller(transport, repo, settings, db=db)
+    destination_id = await repo.add_destination(
+        kind="webhook", name="t", config={"url": "https://example.test/hook"}
+    )
+    await repo.route(poller.query.id, destination_id)
+    now = int(time.time())
+
+    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="50.0")])
+    await poller.tick()  # first run: recorded, nothing announced (silent mode)
+    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="50.0")])
+    await poller.tick()  # same price: nothing
+    assert await repo.outbox_depth() == 0
+
+    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="40.0")])
+    await poller.tick()  # 20% off: news
+
+    assert await repo.outbox_depth() == 1
+    assert work.is_set()
+    batch = await repo.claim_batch(destination_id, 10)
+    assert batch[0].is_price_drop
+    assert batch[0].previous_price is not None
+    assert batch[0].item.price == Decimal("40.0")
+    assert batch[0].headline().startswith("Price drop -20%")
+    await repo.mark_sent([batch[0].outbox_id])
+
+    # The stored price moved with it, so the same drop is not reported twice, and a
+    # smaller wobble after that is beneath notice.
+    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="40.0")])
+    await poller.tick()
+    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="38.0")])
+    await poller.tick()
+    assert await repo.outbox_depth() == 0
+
+
+async def test_price_drop_tracking_can_be_switched_off(
+    transport: ScriptedTransport,
+    repo: Repo,
+    settings: Settings,
+    db: Any,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    settings = settings.model_copy(update={"price_drop_min_percent": 0})
+    poller, _ = await make_poller(transport, repo, settings, db=db)
+    now = int(time.time())
+    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="50.0")])
+    await poller.tick()
+    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="10.0")])
+    await poller.tick()
+    assert await repo.outbox_depth() == 0

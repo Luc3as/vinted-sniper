@@ -48,6 +48,7 @@ Raspberry Pi, NAS or cheap VPS: see [the self-hosting guide](docs/self-hosting.m
 ## Features
 
 - **Filters on what you actually pay**, buyer protection included. Vinted's own price filter ignores it.
+- **Price drops**: a listing you already saw comes back when its price falls, at no extra requests.
 - **Quiet hours per destination**: nothing at 03:00, a digest of the night at 07:00.
 - **Filters Vinted's search cannot express**: words the title must contain, a title regex, a floor on seller rating and review count, and sellers to skip.
 - **Tells you when it stops working.** A watchdog spots a search going silent and fixes the session itself.

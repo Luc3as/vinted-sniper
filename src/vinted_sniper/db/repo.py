@@ -93,6 +93,25 @@ class PendingNotification:
     # When the poller first saw the listing, which is the honest "found it" moment even
     # if delivery retries push the message out later.
     detected_at: int | None = None
+    # "new" or "price_drop"; for a drop, what the total price was before.
+    kind: str = "new"
+    previous_price: Decimal | None = None
+
+    @property
+    def is_price_drop(self) -> bool:
+        return self.kind == "price_drop"
+
+    def headline(self) -> str:
+        """What kind of news this is, for the top of a message."""
+        if not self.is_price_drop:
+            return "New match"
+        item = self.item
+        now_payable = item.total_price if item.total_price is not None else item.price
+        currency = f" {item.currency}" if item.currency else ""
+        if self.previous_price is not None and now_payable is not None:
+            fall = round((self.previous_price - now_payable) / self.previous_price * 100)
+            return f"Price drop -{fall}%: {self.previous_price}{currency} → {now_payable}{currency}"
+        return "Price drop"
 
 
 def _json_list(raw: str | None) -> list[str] | None:
@@ -489,6 +508,58 @@ class Repo:
                 )
         return len(items)
 
+    async def current_prices(self, item_ids: list[int]) -> dict[int, Decimal | None]:
+        """What we last recorded each listing costing, buyer protection included."""
+        if not item_ids:
+            return {}
+        placeholders = ",".join("?" * len(item_ids))
+        rows = await self._db.fetch_all(
+            f"SELECT item_id, price, total_price FROM items WHERE item_id IN ({placeholders})",
+            item_ids,
+        )
+        out: dict[int, Decimal | None] = {}
+        for row in rows:
+            payable = row["total_price"] if row["total_price"] is not None else row["price"]
+            out[row["item_id"]] = Decimal(str(payable)) if payable is not None else None
+        return out
+
+    async def record_price_drops(
+        self,
+        query: Query,
+        drops: list[tuple[Item, Decimal]],
+        destination_ids: list[int],
+    ) -> int:
+        """Update a listing's price and queue a "dropped from X" notification, atomically."""
+        if not drops:
+            return 0
+        now = int(time.time())
+        async with self._db.transaction() as conn:
+            await conn.executemany(
+                "UPDATE items SET price = ?, total_price = ?, price_changed_at = ? "
+                "WHERE item_id = ?",
+                [
+                    (
+                        float(item.price) if item.price is not None else None,
+                        float(item.total_price) if item.total_price is not None else None,
+                        now,
+                        item.item_id,
+                    )
+                    for item, _ in drops
+                ],
+            )
+            if destination_ids:
+                await conn.executemany(
+                    "INSERT OR IGNORE INTO outbox (item_id, query_id, destination_id, "
+                    "next_attempt_at, created_at, kind, previous_price) "
+                    "VALUES (?, ?, ?, ?, ?, 'price_drop', ?)",
+                    [
+                        (item.item_id, query.id, destination_id, now, now, float(previous))
+                        for item, previous in drops
+                        for destination_id in destination_ids
+                    ],
+                )
+        return len(drops)
+
     async def prune_items(self, older_than_days: int) -> int:
         cutoff = int(time.time()) - older_than_days * 86_400
         return await self._db.execute("DELETE FROM items WHERE first_seen_at < ?", (cutoff,))
@@ -522,8 +593,8 @@ class Repo:
         now = int(time.time())
         async with self._db.transaction() as conn:
             async with conn.execute(
-                "SELECT o.id, o.destination_id, o.query_id, o.attempts, q.name AS query_name, "
-                "i.* FROM outbox o "
+                "SELECT o.id, o.destination_id, o.query_id, o.attempts, o.kind, "
+                "o.previous_price, q.name AS query_name, i.* FROM outbox o "
                 "JOIN items i ON i.item_id = o.item_id "
                 "LEFT JOIN queries q ON q.id = o.query_id "
                 "WHERE o.destination_id = ? AND o.status = 'pending' AND o.next_attempt_at <= ? "
@@ -569,6 +640,10 @@ class Repo:
                     view_count=row["view_count"] or 0,
                 ),
                 detected_at=row["first_seen_at"],
+                kind=row["kind"],
+                previous_price=(
+                    Decimal(str(row["previous_price"])) if row["kind"] == "price_drop" else None
+                ),
             )
             for row in rows
         ]
