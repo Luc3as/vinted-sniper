@@ -53,3 +53,19 @@ name is a nominative reference to Vinted; the project is not affiliated with Vin
 README says so. Automated access to Vinted is against its terms of service — see
 `docs/legal.md`; running the tool is the operator's decision, publishing the code is not the
 same act.
+
+## Re-running the audit
+
+```bash
+uvx bandit -q -r src -ll                      # static analysis
+uv run --with pip-audit pip-audit             # dependency CVEs (needs network)
+uv run ruff check --select S src              # ruff's security rules
+```
+
+Known `bandit` findings, reviewed and accepted (re-check them if the code around them changes):
+
+| Finding | Where | Why it is fine |
+|---|---|---|
+| B104 bind to all interfaces | `config.py::dashboard_url` | A string *comparison* with `"0.0.0.0"` to build a display URL, not a bind. The bind address is `WEB_HOST`, loopback by default. |
+| B608 string-built SQL | `repo.py::record_failure` | The interpolated name comes from a fixed two-entry dict of column names; the values are `?` parameters. |
+| B608 string-built SQL | `repo.py::known_item_ids`, `current_prices` | Only a `?` placeholder list sized to the input is interpolated; every value is a parameter. |
