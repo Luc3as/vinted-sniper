@@ -1,7 +1,7 @@
 # Logo licence
 
 The vinted-sniper mark (a coat hanger whose hook is a target ring), the "hanger in a scope"
-icon, the wordmark and the tagline "watch · judge · pounce" are **© 2026 Lukáš Porubčan, all
+icon, the wordmark and the taglines "See it first. Know if it's worth it." and "Faster than the favourites." are **© 2026 Lukáš Porubčan, all
 rights reserved**. They are original work created for this project and are *not* covered by
 the MIT licence that applies to the code.
 

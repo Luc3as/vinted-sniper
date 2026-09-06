@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/logo/wordmark-dark.svg">
-  <img src="docs/media/logo/wordmark-light.svg" alt="vinted-sniper — watch · judge · pounce" width="640">
+  <img src="docs/media/logo/wordmark-light.svg" alt="vinted-sniper — See it first. Know if it's worth it." width="640">
 </picture>
 
 *[Slovenská verzia nižšie ↓](#slovensky)*
@@ -181,6 +181,8 @@ are **not** MIT — see [docs/media/logo/LICENSE.md](docs/media/logo/LICENSE.md)
 </picture>
 
 # vinted-sniper (slovensky)
+
+*Vidíš to prvý. A vieš, či to stojí za to.*
 </div>
 
 Vlož URL vyhľadávania z Vintedu. Appka ho každých pár minút skontroluje — anonymne, bez

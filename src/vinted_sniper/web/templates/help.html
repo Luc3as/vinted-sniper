@@ -9,7 +9,7 @@
 
 {% block content %}
 <section>
-  <div class="section-head"><h2>How it works</h2><span class="lede">Two minutes, no jargon.</span></div>
+  <div class="section-head"><h2>How it works</h2><span class="lede">See it first. Know if it’s worth it. Two minutes, no jargon.</span></div>
   <div class="card">
     <p>You give it a Vinted search — the address bar after you set your filters. Every few minutes it asks Vinted for that search’s newest listings, exactly as a browser would, without logging in. Anything new that passes your filters is sent to your <strong>destinations</strong> (Telegram, Discord, ntfy, a webhook). The first check of a new search only records what is already there, so you are not flooded.</p>
     <p>Vinted does not like being asked too often. The app paces itself (at most {{ settings_view.site_requests_per_minute }} requests a minute per country site, across all searches), and when Vinted refuses a request every search on that site backs off together — you will see <span class="pill cooling">cooling</span> in the table and get a notice if a destination has health notices on. That is deliberate, not a fault.</p>
