@@ -167,6 +167,36 @@
                  placeholder="fake, replica">
         </div>
       </div>
+      <details style="margin-top:.75rem">
+        <summary>More filters — title and seller</summary>
+        <div class="grid" style="margin-top:.5rem">
+          <div>
+            <label for="required_keywords">Title must contain (all)</label>
+            <input type="text" id="required_keywords" name="required_keywords"
+                   placeholder="torrentshell, 3l">
+          </div>
+          <div>
+            <label for="title_pattern">Title matches regex</label>
+            <input type="text" id="title_pattern" name="title_pattern"
+                   placeholder="\b(M|L)\b|size 4[0-2]">
+          </div>
+          <div>
+            <label for="min_seller_rating">Min. seller rating (%)</label>
+            <input type="text" id="min_seller_rating" name="min_seller_rating"
+                   placeholder="90" inputmode="numeric">
+          </div>
+          <div>
+            <label for="min_seller_reviews">Min. seller reviews</label>
+            <input type="text" id="min_seller_reviews" name="min_seller_reviews"
+                   placeholder="5" inputmode="numeric">
+          </div>
+          <div>
+            <label for="blocked_sellers">Skip sellers</label>
+            <input type="text" id="blocked_sellers" name="blocked_sellers"
+                   placeholder="usernames, comma-separated">
+          </div>
+        </div>
+      </details>
       {% if destinations %}
       <div style="margin-top:.75rem">
         <label>Send to</label>

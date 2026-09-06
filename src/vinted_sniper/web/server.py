@@ -36,7 +36,7 @@ from pydantic import SecretStr
 
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
 from vinted_sniper.db.repo import Repo
-from vinted_sniper.engine import health
+from vinted_sniper.engine import filters, health
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.errors import VintedError
@@ -158,6 +158,11 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         interval: Annotated[int, Form()] = 0,
         max_total_price: Annotated[str, Form()] = "",
         banned_keywords: Annotated[str, Form()] = "",
+        required_keywords: Annotated[str, Form()] = "",
+        title_pattern: Annotated[str, Form()] = "",
+        min_seller_rating: Annotated[str, Form()] = "",
+        min_seller_reviews: Annotated[str, Form()] = "",
+        blocked_sellers: Annotated[str, Form()] = "",
         destination_ids: Annotated[list[int] | None, Form()] = None,
         _: None = guard,
     ) -> Response:
@@ -171,14 +176,26 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         if await repo.find_query_by_url(normalised) is not None:
             return _redirect_with_error("that search is already being watched")
 
+        title_pattern = title_pattern.strip()
+        if title_pattern and (problem := filters.validate_pattern(title_pattern)):
+            return _redirect_with_error(f"title pattern does not compile: {problem}")
+        rating = _rating_or_none(min_seller_rating)
+        if min_seller_rating.strip() and rating is None:
+            return _redirect_with_error("minimum seller rating must be between 0 and 100")
+
         query_id = await repo.add_query(
             name=name.strip() or _name_from(params, tld),
             url=normalised,
             tld=tld,
             params=params,
             poll_interval_s=max(interval or settings.poll_default_interval_s, MIN_POLL_INTERVAL_S),
-            banned_keywords=[w.strip() for w in banned_keywords.split(",") if w.strip()],
+            banned_keywords=_csv(banned_keywords),
             max_total_price=_decimal_or_none(max_total_price),
+            required_keywords=_csv(required_keywords),
+            title_pattern=title_pattern or None,
+            min_seller_rating=rating,
+            min_seller_reviews=_int_or_none(min_seller_reviews),
+            blocked_sellers=_csv(blocked_sellers),
         )
         for destination_id in destination_ids or []:
             await repo.route(query_id, destination_id)
@@ -380,6 +397,34 @@ def _age(seconds: int) -> str:
 def _id_list(raw: str) -> str:
     """Reduce user input to a comma-separated list of numeric ids, dropping the rest."""
     return ",".join(part.strip() for part in raw.split(",") if part.strip().isdigit())
+
+
+def _csv(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _int_or_none(raw: str) -> int | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        return int(raw) or None
+    except ValueError:
+        return None
+
+
+def _rating_or_none(raw: str) -> float | None:
+    """Accepts 90, 90% or 0.9; stores a fraction, which is what the API reports."""
+    raw = raw.strip().rstrip("%")
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if value > 1.0:
+        value /= 100.0
+    return value if 0.0 <= value <= 1.0 else None
 
 
 def _decimal_or_none(raw: str) -> Decimal | None:

@@ -103,6 +103,13 @@ Options for `watch`:
 | `--every N` | Seconds between checks for this search. |
 | `--max-price N` | Skip anything above this **including buyer protection**. |
 | `--exclude a,b,c` | Skip listings whose title contains any of these words. |
+| `--require a,b` | Only keep listings whose title contains **all** of these words. Vinted's own text search also matches descriptions, which is where most of the noise comes from. |
+| `--title-regex PATTERN` | Only keep listings whose title matches this regular expression (case-insensitive). |
+| `--min-seller-rating N` | Skip sellers rated below N percent. Sellers with no rating yet are skipped too. |
+| `--min-seller-reviews N` | Skip sellers with fewer than N reviews. |
+| `--block-seller a,b` | Skip these seller usernames outright. |
+
+The same fields are under "More filters" when adding a search in the dashboard.
 | `--to 1,2` | Destination ids to notify. Defaults to all active ones. |
 
 ## Adding a search

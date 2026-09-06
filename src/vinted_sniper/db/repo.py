@@ -35,6 +35,12 @@ class Query:
     max_total_price: Decimal | None = None
     conditions: list[str] | None = None
     countries: list[str] | None = None
+    # What Vinted's search cannot express; see engine/filters.py.
+    required_keywords: list[str] = field(default_factory=list)
+    title_pattern: str | None = None
+    min_seller_rating: float | None = None
+    min_seller_reviews: int | None = None
+    blocked_sellers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,12 +118,19 @@ class Repo:
         poll_interval_s: int,
         banned_keywords: list[str] | None = None,
         max_total_price: Decimal | None = None,
+        required_keywords: list[str] | None = None,
+        title_pattern: str | None = None,
+        min_seller_rating: float | None = None,
+        min_seller_reviews: int | None = None,
+        blocked_sellers: list[str] | None = None,
     ) -> int:
         now = int(time.time())
         query_id = await self._db.insert(
             "INSERT INTO queries (name, url, tld, params_json, poll_interval_s, "
-            "banned_keywords_json, max_total_price, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "banned_keywords_json, max_total_price, required_keywords_json, title_pattern, "
+            "min_seller_rating, min_seller_reviews, blocked_sellers_json, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 name,
                 url,
@@ -126,6 +139,11 @@ class Repo:
                 poll_interval_s,
                 json.dumps(banned_keywords or []),
                 float(max_total_price) if max_total_price is not None else None,
+                json.dumps(required_keywords or []),
+                title_pattern or None,
+                min_seller_rating,
+                min_seller_reviews,
+                json.dumps(blocked_sellers or []),
                 now,
                 now,
             ),
@@ -172,6 +190,11 @@ class Repo:
             ),
             conditions=_json_list(row["conditions_json"]),
             countries=_json_list(row["countries_json"]),
+            required_keywords=_json_list(row["required_keywords_json"]) or [],
+            title_pattern=row["title_pattern"],
+            min_seller_rating=row["min_seller_rating"],
+            min_seller_reviews=row["min_seller_reviews"],
+            blocked_sellers=_json_list(row["blocked_sellers_json"]) or [],
         )
 
     # --- Search state --------------------------------------------------------------

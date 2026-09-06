@@ -13,7 +13,7 @@ from vinted_sniper import __version__, app, log
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
 from vinted_sniper.db import Database, apply_pending
 from vinted_sniper.db.repo import Repo
-from vinted_sniper.engine import health
+from vinted_sniper.engine import filters, health
 from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.errors import BlockedError, VintedError
@@ -57,6 +57,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip anything above this, buyer protection included.",
     )
     watch.add_argument("--exclude", default="", help="Comma-separated words to skip in titles.")
+    watch.add_argument(
+        "--require", default="", help="Comma-separated words that must all appear in the title."
+    )
+    watch.add_argument(
+        "--title-regex",
+        default="",
+        help="A regular expression the title must match (case-insensitive).",
+    )
+    watch.add_argument(
+        "--min-seller-rating",
+        default="",
+        help="Skip sellers rated below this, as a percentage (e.g. 90).",
+    )
+    watch.add_argument(
+        "--min-seller-reviews", type=int, default=0, help="Skip sellers with fewer reviews."
+    )
+    watch.add_argument(
+        "--block-seller", default="", help="Comma-separated seller usernames to skip."
+    )
     watch.add_argument(
         "--to",
         default="",
@@ -184,6 +203,14 @@ async def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
             print("That search is already being watched.", file=sys.stderr)
             return 1
 
+        if args.title_regex and (problem := filters.validate_pattern(args.title_regex)):
+            print(f"--title-regex does not compile: {problem}", file=sys.stderr)
+            return 1
+        min_rating = _rating_or_none(args.min_seller_rating)
+        if args.min_seller_rating and min_rating is None:
+            print("--min-seller-rating must be a number between 0 and 100", file=sys.stderr)
+            return 1
+
         interval = max(args.every or settings.poll_default_interval_s, MIN_POLL_INTERVAL_S)
         query_id = await repo.add_query(
             name=args.name.strip() or (params.get("search_text") or f"vinted.{tld}"),
@@ -191,8 +218,13 @@ async def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
             tld=tld,
             params=params,
             poll_interval_s=interval,
-            banned_keywords=[w.strip() for w in args.exclude.split(",") if w.strip()],
+            banned_keywords=_csv(args.exclude),
             max_total_price=max_price,
+            required_keywords=_csv(args.require),
+            title_pattern=args.title_regex.strip() or None,
+            min_seller_rating=min_rating,
+            min_seller_reviews=args.min_seller_reviews or None,
+            blocked_sellers=_csv(args.block_seller),
         )
 
         if args.to.strip():
@@ -207,6 +239,24 @@ async def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
     if not destination_ids:
         print("\nNo destinations yet — add one with: vinted-sniper destination discord <url>")
     return 0
+
+
+def _csv(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _rating_or_none(raw: str) -> float | None:
+    """A rating typed as a percentage (90) or a fraction (0.9), stored as a fraction."""
+    raw = raw.strip().rstrip("%")
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if value > 1.0:
+        value /= 100.0
+    return value if 0.0 <= value <= 1.0 else None
 
 
 async def _cmd_searches(settings: Settings) -> int:

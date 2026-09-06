@@ -245,3 +245,58 @@ def test_freshness_window_uses_real_clock_units() -> None:
     )
 
     assert [i.item_id for i in result.to_notify] == [1]
+
+
+# --- Title and seller filters ------------------------------------------------------
+
+
+def test_required_words_must_all_appear() -> None:
+    query = search(required_keywords=["Torrentshell", "3L"])
+    assert filters.matches(item(1, title="Patagonia Torrentshell 3L jacket"), query)
+    rejection = filters.check(item(2, title="Patagonia Torrentshell jacket"), query)
+    assert rejection is not None
+    assert rejection.reason == "missing_keyword"
+    assert "3L" in rejection.detail
+
+
+def test_required_words_ignore_case() -> None:
+    assert filters.matches(item(1, title="RAB DOWNPOUR"), search(required_keywords=["downpour"]))
+
+
+def test_the_title_pattern_is_case_insensitive_and_anchored_nowhere() -> None:
+    query = search(title_pattern=r"\b(m|l)\b")
+    assert filters.matches(item(1, title="Nike jacket size M"), query)
+    assert not filters.matches(item(2, title="Nike jacket size XL"), query)
+
+
+def test_an_invalid_pattern_matches_nothing_rather_than_crashing() -> None:
+    assert not filters.matches(item(1, title="anything"), search(title_pattern="("))
+    assert filters.validate_pattern("(") is not None
+    assert filters.validate_pattern(r"\d+") is None
+
+
+@pytest.mark.parametrize("rating", [0.85, None])
+def test_low_or_unknown_seller_ratings_are_skipped(rating: float | None) -> None:
+    rejection = filters.check(item(1, seller_rating=rating), search(min_seller_rating=0.9))
+    assert rejection is not None
+    assert rejection.reason == "seller_rating"
+
+
+def test_a_seller_on_the_rating_floor_is_kept() -> None:
+    assert filters.matches(item(1, seller_rating=0.9), search(min_seller_rating=0.9))
+
+
+def test_sellers_with_too_few_reviews_are_skipped() -> None:
+    query = search(min_seller_reviews=5)
+    assert filters.matches(item(1, seller_feedback_count=5), query)
+    assert not filters.matches(item(2, seller_feedback_count=4), query)
+    assert not filters.matches(item(3, seller_feedback_count=None), query)
+
+
+def test_blocked_sellers_are_skipped_regardless_of_case() -> None:
+    query = search(blocked_sellers=["Scammer99"])
+    rejection = filters.check(item(1, seller_login="scammer99"), query)
+    assert rejection is not None
+    assert rejection.reason == "blocked_seller"
+    assert filters.matches(item(2, seller_login="honest_hans"), query)
+    assert filters.matches(item(3, seller_login=None), query)
