@@ -15,6 +15,7 @@ from typing import Any
 import aiosqlite
 
 from vinted_sniper.db.connection import Database
+from vinted_sniper.enrichment import Enrichment, EnrichmentIn
 from vinted_sniper.vinted.models import Item
 
 # --- Row types ---------------------------------------------------------------------
@@ -99,6 +100,7 @@ class PendingNotification:
     # "new" or "price_drop"; for a drop, what the total price was before.
     kind: str = "new"
     previous_price: Decimal | None = None
+    enrichment: Enrichment | None = None
 
     @property
     def is_price_drop(self) -> bool:
@@ -492,8 +494,14 @@ class Repo:
         *,
         notify: list[Item] | None = None,
         keep_raw: bool = False,
+        hold_s: int = 0,
+        never_hold: set[int] | None = None,
     ) -> int:
         """Store listings and queue their notifications in one transaction.
+
+        `hold_s` delays delivery to every destination except those in `never_hold`,
+        which is how the enrichment loop gets a head start: the webhook fires now, the
+        chat message waits for its verdict (or for the hold to run out).
 
         Doing both at once is what makes a crash safe: either a listing is recorded and its
         notifications are queued, or neither happened and the next check finds it again.
@@ -546,16 +554,61 @@ class Repo:
             )
 
             if to_announce and destination_ids:
+                exempt = never_hold or set()
                 await conn.executemany(
                     "INSERT OR IGNORE INTO outbox (item_id, query_id, destination_id, "
                     "next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?)",
                     [
-                        (item.item_id, query.id, destination_id, now, now)
+                        (
+                            item.item_id,
+                            query.id,
+                            destination_id,
+                            now if destination_id in exempt else now + hold_s,
+                            now,
+                        )
                         for item in to_announce
                         for destination_id in destination_ids
                     ],
                 )
         return len(items)
+
+    async def destination_ids_of_kind(self, kind: str) -> set[int]:
+        rows = await self._db.fetch_all(
+            "SELECT id FROM destinations WHERE kind = ? AND active = 1", (kind,)
+        )
+        return {row["id"] for row in rows}
+
+    async def store_enrichment(self, item_id: int, verdict: EnrichmentIn) -> bool:
+        """Record an outside verdict and release any held notification for the listing.
+
+        Returns False if the listing is unknown (pruned, or never recorded).
+        """
+        now = int(time.time())
+        async with self._db.transaction() as conn:
+            cursor = await conn.execute(
+                "UPDATE items SET enrich_score = ?, enrich_model = ?, enrich_retail_price = ?, "
+                "enrich_retail_source = ?, enrich_matches_query = ?, enrich_risk = ?, "
+                "enrich_verdict = ?, enriched_at = ? WHERE item_id = ?",
+                (
+                    verdict.score,
+                    verdict.model,
+                    float(verdict.retail_price) if verdict.retail_price is not None else None,
+                    verdict.retail_source,
+                    None if verdict.matches_query is None else int(verdict.matches_query),
+                    verdict.risk,
+                    verdict.verdict,
+                    now,
+                    item_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return False
+            await conn.execute(
+                "UPDATE outbox SET next_attempt_at = ? "
+                "WHERE item_id = ? AND status = 'pending' AND next_attempt_at > ?",
+                (now, item_id, now),
+            )
+        return True
 
     async def current_prices(self, item_ids: list[int]) -> dict[int, Decimal | None]:
         """What we last recorded each listing costing, buyer protection included."""
@@ -693,6 +746,7 @@ class Repo:
                 previous_price=(
                     Decimal(str(row["previous_price"])) if row["kind"] == "price_drop" else None
                 ),
+                enrichment=Enrichment.from_row(row),
             )
             for row in rows
         ]

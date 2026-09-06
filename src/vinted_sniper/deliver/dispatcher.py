@@ -260,10 +260,16 @@ class Dispatcher:
                         "is not set"
                     )
                 return TelegramSender(
-                    config, bot_token=token.get_secret_value(), client=self._client
+                    config,
+                    bot_token=token.get_secret_value(),
+                    client=self._client,
+                    highlight_score=self._settings.enrichment_highlight_score,
+                    silent_below=self._settings.enrichment_silent_below,
                 )
             case "webhook":
-                return WebhookSender(config, client=self._client)
+                return WebhookSender(
+                    config, client=self._client, callback_base=self._settings.dashboard_url
+                )
             case "ntfy":
                 return NtfySender(config, client=self._client)
             case unknown:

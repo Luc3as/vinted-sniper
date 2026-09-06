@@ -29,7 +29,7 @@ from typing import Annotated, Any
 from xml.sax.saxutils import escape as xml_escape
 
 import uvicorn
-from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request, Response
+from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import SecretStr
@@ -37,6 +37,7 @@ from pydantic import SecretStr
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine import filters, health, quiet
+from vinted_sniper.enrichment import EnrichmentIn
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.errors import VintedError
@@ -63,8 +64,12 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
 
     async def require_login(
         session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+        authorization: Annotated[str | None, Header()] = None,
     ) -> None:
-        if not _authorised(session, token):
+        # A machine calling the API sends the same token as a bearer; a browser has
+        # the cookie the login form set. Either will do.
+        bearer = authorization.removeprefix("Bearer ").strip() if authorization else None
+        if not (_authorised(session, token) or (bearer and _authorised(bearer, token))):
             raise HTTPException(status_code=401, detail="not signed in")
 
     guard = Depends(require_login)
@@ -145,6 +150,19 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
                 ),
             },
         )
+
+    @app.post("/api/items/{item_id}/enrichment")
+    async def post_enrichment(item_id: int, verdict: EnrichmentIn, _: None = guard) -> JSONResponse:
+        """What an outside agent concluded about a listing. Releases any held alert."""
+        if not await repo.store_enrichment(item_id, verdict):
+            raise HTTPException(status_code=404, detail="no such listing")
+        log.info(
+            "enrichment.received",
+            item_id=item_id,
+            score=verdict.score,
+            matches_query=verdict.matches_query,
+        )
+        return JSONResponse({"ok": True})
 
     @app.get("/api/health")
     async def api_health(_: None = guard) -> JSONResponse:
@@ -449,6 +467,8 @@ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
                 "seller_feedback_count": row["seller_feedback_count"],
                 "favourite_count": row["favourite_count"] or 0,
                 "price_dropped": bool(row["price_changed_at"]),
+                "deal_score": row["enrich_score"] if row["enriched_at"] else None,
+                "verdict": row["enrich_verdict"] if row["enriched_at"] else None,
                 "query_name": row["query_name"],
                 "age": _age(now - row["first_seen_at"]),
             }

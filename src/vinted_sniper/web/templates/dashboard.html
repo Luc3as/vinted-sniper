@@ -411,6 +411,10 @@
           <strong>{{ row.price or '—' }}</strong>
           {% if row.total_price %}<span class="muted">{{ row.total_price }} total</span>{% endif %}
           {% if row.price_dropped %}<span class="tag drop">📉 dropped</span>{% endif %}
+          {% if row.deal_score is not none %}
+          <span class="tag score {{ 'hot' if row.deal_score >= 75 else ('cold' if row.deal_score < 40 else '') }}"
+                title="{{ row.verdict or '' }}">🤖 {{ row.deal_score }}</span>
+          {% endif %}
         </div>
         {% if row.brand or row.size or row.condition %}
         <div class="tags">

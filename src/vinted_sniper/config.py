@@ -131,6 +131,30 @@ class Settings(BaseSettings):
         description="What to do about a stale search: log a warning, or also force a new session.",
     )
 
+    # --- Enrichment ----------------------------------------------------------------
+    enrichment_wait_s: int = Field(
+        default=0,
+        ge=0,
+        le=600,
+        description="Hold a listing's chat notifications this long so an outside agent "
+        "(fed by a webhook destination) can post a verdict to /api/items/{id}/enrichment "
+        "first. 0 turns the loop off. Webhook destinations are never held.",
+    )
+    enrichment_highlight_score: int = Field(
+        default=75,
+        ge=0,
+        le=100,
+        description="A deal score at or above this is headlined as a hot deal.",
+    )
+    enrichment_silent_below: int = Field(
+        default=40,
+        ge=0,
+        le=100,
+        description="A deal score below this, or a verdict that the listing is not the "
+        "product searched for, is delivered without a notification sound where the "
+        "platform allows it (Telegram).",
+    )
+
     # --- Delivery ------------------------------------------------------------------
     outbox_expiry_minutes: int = Field(
         default=60,

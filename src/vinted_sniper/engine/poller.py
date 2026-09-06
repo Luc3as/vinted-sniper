@@ -166,12 +166,15 @@ class Poller:
 
         destination_ids = await self._repo.destination_ids_for_query(self.query.id)
         if selection.to_record:
+            hold_s = self._settings.enrichment_wait_s
             await self._repo.record_new_items(
                 self.query,
                 selection.to_record,
                 destination_ids,
                 notify=selection.to_notify,
                 keep_raw=self._settings.keep_raw_json,
+                hold_s=hold_s,
+                never_hold=await self._repo.destination_ids_of_kind("webhook") if hold_s else None,
             )
             if selection.to_notify and self._work_available is not None:
                 self._work_available.set()

@@ -30,9 +30,11 @@ class WebhookSender:
         *,
         client: httpx.AsyncClient | None = None,
         bucket: TokenBucket | None = None,
+        callback_base: str | None = None,
     ) -> None:
         self._url = require(config, "url", self.kind)
         self._headers = config.get("headers") or {}
+        self._callback_base = callback_base.rstrip("/") if callback_base else None
         self._client = client or httpx.AsyncClient(timeout=20.0)
         self._owns_client = client is None
         self._bucket = bucket or TokenBucket(2.0, capacity=4)
@@ -48,7 +50,8 @@ class WebhookSender:
         payload = {
             "version": PAYLOAD_VERSION,
             "search": batch[0].query_name,
-            "items": [_item_json(n) for n in batch],
+            "search_id": batch[0].query_id,
+            "items": [_item_json(n, self._callback_base) for n in batch],
         }
         await self._bucket.acquire()
         try:
@@ -78,9 +81,14 @@ class WebhookSender:
             await self._client.aclose()
 
 
-def _item_json(notification: PendingNotification) -> dict[str, Any]:
+def _item_json(notification: PendingNotification, callback_base: str | None) -> dict[str, Any]:
     item = notification.item
     return {
+        # Additive: where an agent may post what it concluded about this listing (see
+        # docs/enrichment.md). Absent when the dashboard is off.
+        "enrichment_url": (
+            f"{callback_base}/api/items/{item.item_id}/enrichment" if callback_base else None
+        ),
         # Additive since version 1: "new" or "price_drop", and for a drop the total price
         # it fell from. Consumers that ignore unknown keys see no change.
         "event": notification.kind,
@@ -98,8 +106,10 @@ def _item_json(notification: PendingNotification) -> dict[str, Any]:
         "total_price": str(item.total_price) if item.total_price is not None else None,
         "currency": item.currency,
         "photo_url": item.photo_url,
+        "photo_urls": list(item.photo_urls),
         "listed_at": item.listed_at.isoformat() if item.listed_at else None,
         "seller": item.seller_login,
         "seller_rating": item.seller_rating,
+        "seller_reviews": item.seller_feedback_count,
         "links": {"message_seller": item.message_url, "buy": item.buy_url},
     }

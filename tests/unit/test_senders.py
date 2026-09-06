@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
@@ -13,6 +14,7 @@ from vinted_sniper.db.repo import PendingNotification
 from vinted_sniper.deliver.discord import DiscordSender
 from vinted_sniper.deliver.ratelimit import Gate, TokenBucket
 from vinted_sniper.deliver.telegram import TelegramSender, inline_actions
+from vinted_sniper.enrichment import Enrichment
 from vinted_sniper.vinted.models import Item
 
 
@@ -395,3 +397,40 @@ def test_a_closed_gate_reopens_on_its_own() -> None:
 
     clock["now"] += 5.1
     assert gate.wait_s == 0.0
+
+
+async def test_telegram_headlines_a_hot_deal_and_mutes_a_dull_one() -> None:
+    recorder = Recorder(*[httpx.Response(200, json={"ok": True})] * 2)
+    sender = TelegramSender(
+        {"chat_id": "123"}, bot_token="t", client=recorder.client(), bucket=fast_bucket()
+    )
+    hot = Enrichment(
+        score=91,
+        model="Nike Air Max 90",
+        retail_price=Decimal("140"),
+        retail_source="nike.com",
+        matches_query=True,
+        risk=None,
+        verdict="Real pair, great price.",
+        enriched_at=1,
+    )
+    dull = Enrichment(
+        score=12,
+        model=None,
+        retail_price=None,
+        retail_source=None,
+        matches_query=False,
+        risk="stock photos only",
+        verdict=None,
+        enriched_at=1,
+    )
+    await sender.send([replace(notification(1), enrichment=hot)])
+    await sender.send([replace(notification(2), enrichment=dull)])
+
+    first, second = recorder.payload(0), recorder.payload(1)
+    assert first["text"].startswith("🔥 <b>HOT DEAL</b> · deal 91/100 · retail ~140 EUR · -88%")
+    assert "Looks like: Nike Air Max 90" in first["text"]
+    assert "disable_notification" not in first
+    assert second["disable_notification"] is True
+    assert "not the model searched for" in second["text"]
+    assert "risk: stock photos only" in second["text"]

@@ -19,6 +19,7 @@ import httpx
 from vinted_sniper.db.repo import PendingNotification
 from vinted_sniper.deliver.base import SendResult, require
 from vinted_sniper.deliver.ratelimit import TokenBucket
+from vinted_sniper.enrichment import Enrichment
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted.models import Item
 
@@ -55,6 +56,8 @@ class TelegramSender:
         config: dict[str, Any],
         *,
         bot_token: str,
+        highlight_score: int = 75,
+        silent_below: int = 40,
         client: httpx.AsyncClient | None = None,
         bucket: TokenBucket | None = None,
     ) -> None:
@@ -66,6 +69,8 @@ class TelegramSender:
         self._client = client or httpx.AsyncClient(timeout=20.0)
         self._owns_client = client is None
         self._bucket = bucket or TokenBucket(MESSAGES_PER_S, capacity=2)
+        self._highlight_score = highlight_score
+        self._silent_below = silent_below
 
     @property
     def max_batch(self) -> int:
@@ -86,6 +91,7 @@ class TelegramSender:
                     notification.item,
                     query_id=notification.query_id,
                     headline=notification.headline() if notification.is_price_drop else None,
+                    enrichment=notification.enrichment,
                 ),
                 [notification.outbox_id],
             )
@@ -132,11 +138,19 @@ class TelegramSender:
         return payload
 
     def _listing_payload(
-        self, item: Item, *, query_id: int | None = None, headline: str | None = None
+        self,
+        item: Item,
+        *,
+        query_id: int | None = None,
+        headline: str | None = None,
+        enrichment: Enrichment | None = None,
     ) -> dict[str, Any]:
         lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line())]
         if headline:
             lines.insert(0, f"📉 <b>{html.escape(headline)}</b>")
+        silent = enrichment is not None and enrichment.is_dull(self._silent_below)
+        if enrichment is not None:
+            self._weave_verdict(lines, item, enrichment, silent=silent)
 
         details = " · ".join(
             html.escape(part) for part in (item.brand, item.size, item.condition) if part
@@ -168,6 +182,10 @@ class TelegramSender:
             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
             "reply_markup": {"inline_keyboard": keyboard},
         }
+        if silent:
+            # Still delivered, still in the chat, just no buzz for something the outside
+            # brain rated as not worth one.
+            payload["disable_notification"] = True
         if item.photo_url:
             payload["link_preview_options"] = {
                 "url": item.photo_url,
@@ -177,6 +195,17 @@ class TelegramSender:
         else:
             payload["link_preview_options"] = {"is_disabled": True}
         return payload
+
+    def _weave_verdict(
+        self, lines: list[str], item: Item, verdict: Enrichment, *, silent: bool
+    ) -> None:
+        payable = item.total_price if item.total_price is not None else item.price
+        summary, details = verdict.lines(payable, item.currency)
+        if summary:
+            hot = verdict.is_hot(self._highlight_score)
+            marker = "🔥 <b>HOT DEAL</b> · " if hot else ("💤 " if silent else "🤖 ")
+            lines.insert(0, f"{marker}{html.escape(summary)}")
+        lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
 
     def _digest_payload(self, batch: list[PendingNotification]) -> dict[str, Any]:
         lines = [f"<b>{len(batch)} more matches</b>"]

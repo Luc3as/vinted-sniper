@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime
 from decimal import Decimal
@@ -15,6 +16,7 @@ from vinted_sniper.botctl.telegram_bot import _chat_is_paired, claim_pairing, cr
 from vinted_sniper.config import Settings
 from vinted_sniper.db.repo import Query, Repo
 from vinted_sniper.deliver.dispatcher import MAX_ATTEMPTS, Dispatcher
+from vinted_sniper.enrichment import EnrichmentIn
 from vinted_sniper.vinted.models import Item
 
 
@@ -47,10 +49,12 @@ async def a_search(repo: Repo) -> Query:
 class FakeEndpoint:
     def __init__(self, *responses: httpx.Response) -> None:
         self.calls = 0
+        self.requests: list[httpx.Request] = []
         self._responses = list(responses)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.calls += 1
+        self.requests.append(request)
         if self._responses:
             return self._responses.pop(0)
         return httpx.Response(200, json={"ok": True})
@@ -384,3 +388,51 @@ async def test_a_destination_in_its_quiet_hours_is_left_alone_and_nothing_expire
     assert sent == 1, "the held alert goes out when the window ends, not into the bin"
     assert endpoint.calls == 1
     assert await repo.outbox_depth() == 0
+
+
+# --- Enrichment loop -----------------------------------------------------------------
+
+
+async def test_chat_alerts_wait_for_a_verdict_while_the_webhook_fires_at_once(
+    repo: Repo, settings: Settings
+) -> None:
+    settings = settings.model_copy(update={"enrichment_wait_s": 90})
+    query = await a_search(repo)
+    brain = await repo.add_destination(
+        kind="webhook", name="n8n", config={"url": "https://example.test/n8n"}
+    )
+    phone = await repo.add_destination(
+        kind="webhook", name="phone", config={"url": "https://example.test/phone"}
+    )
+    # A plain webhook is never held; to stand in for a chat destination, hold "phone"
+    # by name rather than by kind.
+    await repo.record_new_items(
+        query, [listing(1)], [brain, phone], hold_s=settings.enrichment_wait_s, never_hold={brain}
+    )
+
+    endpoint = FakeEndpoint()
+    dispatcher = make_dispatcher(repo, settings, endpoint)
+    assert await dispatcher.drain() == 1, "only the brain's copy is due now"
+    assert endpoint.calls == 1
+    body = json.loads(endpoint_last_request(endpoint).content)
+    assert body["items"][0]["enrichment_url"].endswith("/api/items/1/enrichment")
+    assert "photo_urls" in body["items"][0]
+
+    # The verdict arrives: the held copy is released immediately, carrying it.
+    assert await repo.store_enrichment(
+        1, EnrichmentIn(score=88, model="Nike Air Max 90", retail_price=Decimal("140"))
+    )
+    assert await dispatcher.drain() == 1
+    sent = json.loads(endpoint_last_request(endpoint).content)
+    assert sent["items"][0]["id"] == 1
+
+    batch_view = await repo.claim_batch(phone, 10)
+    assert batch_view == [], "nothing left"
+
+
+async def test_a_verdict_for_an_unknown_listing_is_refused(repo: Repo) -> None:
+    assert not await repo.store_enrichment(424242, EnrichmentIn(score=10))
+
+
+def endpoint_last_request(endpoint: FakeEndpoint) -> httpx.Request:
+    return endpoint.requests[-1]

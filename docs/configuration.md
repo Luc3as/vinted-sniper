@@ -53,6 +53,9 @@ was found, so you can see the real delay yourself.
 |---|---|---|
 | `WATCHDOG_STALE_CYCLES` | `10` | Checks with no new listing before a search is treated as stuck — but only if other searches on the same site are still finding things. |
 | `WATCHDOG_ACTION` | `rotate` | `warn` logs it; `rotate` also starts a fresh session. |
+| `ENRICHMENT_WAIT_S` | `0` | Hold chat notifications this many seconds so an outside agent can post a verdict to `/api/items/{id}/enrichment` first. Webhook destinations fire at once regardless. `0` turns the loop off. See [enrichment.md](enrichment.md). |
+| `ENRICHMENT_HIGHLIGHT_SCORE` | `75` | Deal scores at or above this are headlined as a hot deal. |
+| `ENRICHMENT_SILENT_BELOW` | `40` | Deal scores below this, or a verdict that the listing is not what was searched for, are delivered without a notification sound (Telegram). |
 | `OUTBOX_EXPIRY_MINUTES` | `60` | Discard notifications that could not be delivered within this window. |
 
 ### Telegram

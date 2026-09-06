@@ -130,12 +130,13 @@ class DiscordSender:
         fields: list[dict[str, Any]] = []
         if item.price is not None:
             fields.append({"name": "Price", "value": _price_value(item), "inline": True})
-        if item.size:
-            fields.append({"name": "Size", "value": item.size[:1024], "inline": True})
-        if item.condition:
-            fields.append({"name": "Condition", "value": item.condition[:1024], "inline": True})
-        if item.brand:
-            fields.append({"name": "Brand", "value": item.brand[:1024], "inline": True})
+        for name, value in (
+            ("Size", item.size),
+            ("Condition", item.condition),
+            ("Brand", item.brand),
+        ):
+            if value:
+                fields.append({"name": name, "value": value[:1024], "inline": True})
         fields.append({"name": "Location", "value": _location(item.tld), "inline": True})
         if item.seller_rating is not None:
             fields.append({"name": "Seller rating", "value": _rating(item), "inline": True})
@@ -145,6 +146,8 @@ class DiscordSender:
             )
         # Discord renders this in the reader's own timezone, as "2 minutes ago".
         fields.append({"name": "Detected", "value": f"<t:{detected}:R>", "inline": True})
+        if (field := _verdict_field(notification)) is not None:
+            fields.append(field)
 
         embed: dict[str, Any] = {
             "author": {"name": f"{notification.headline()} • {notification.query_name}"[:256]},
@@ -234,6 +237,19 @@ def _location(tld: str) -> str:
     iso = _ISO_BY_TLD.get(tld, tld.upper())
     flag = "".join(chr(0x1F1E6 + ord(letter) - ord("A")) for letter in iso)
     return f"{flag} {iso}"
+
+
+def _verdict_field(notification: PendingNotification) -> dict[str, Any] | None:
+    verdict = notification.enrichment
+    if verdict is None:
+        return None
+    item = notification.item
+    payable = item.total_price if item.total_price is not None else item.price
+    summary, details = verdict.lines(payable, item.currency)
+    text = "\n".join(part for part in [summary, *details] if part)
+    if not text:
+        return None
+    return {"name": "🤖 Verdict", "value": text[:1024], "inline": False}
 
 
 def _rating(item: Item) -> str:
