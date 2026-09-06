@@ -76,6 +76,8 @@ class Destination:
     active: bool = True
     notify_status: bool = False
     failure_count: int = 0
+    # "HH:MM-HH:MM" in the app's timezone, or None. See engine/quiet.py.
+    quiet_hours: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,11 +292,31 @@ class Repo:
         name: str,
         config: dict[str, Any],
         notify_status: bool = False,
+        quiet_hours: str | None = None,
     ) -> int:
         return await self._db.insert(
-            "INSERT INTO destinations (kind, name, config_json, notify_status, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (kind, name, json.dumps(config), int(notify_status), int(time.time())),
+            "INSERT INTO destinations (kind, name, config_json, notify_status, quiet_hours, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                kind,
+                name,
+                json.dumps(config),
+                int(notify_status),
+                quiet_hours or None,
+                int(time.time()),
+            ),
+        )
+
+    async def set_quiet_hours(self, destination_id: int, quiet_hours: str | None) -> None:
+        await self._db.execute(
+            "UPDATE destinations SET quiet_hours = ? WHERE id = ?",
+            (quiet_hours or None, destination_id),
+        )
+
+    async def set_notify_status(self, destination_id: int, enabled: bool) -> None:
+        await self._db.execute(
+            "UPDATE destinations SET notify_status = ? WHERE id = ?",
+            (int(enabled), destination_id),
         )
 
     async def list_destinations(self, *, active_only: bool = False) -> list[Destination]:
@@ -350,6 +372,7 @@ class Repo:
             active=bool(row["active"]),
             notify_status=bool(row["notify_status"]),
             failure_count=row["failure_count"],
+            quiet_hours=row["quiet_hours"],
         )
 
     # --- Routing -------------------------------------------------------------------
@@ -597,18 +620,37 @@ class Repo:
             "UPDATE outbox SET status = 'pending', lease_expires_at = NULL WHERE status = 'sending'"
         )
 
-    async def expire_stale_notifications(self, older_than_minutes: int) -> int:
+    async def restart_delivery_clock(self, destination_id: int) -> int:
+        """Treat a destination's pending notifications as if found just now.
+
+        Used when its quiet hours end: they were held on purpose, and the expiry window
+        should count from the moment they may be sent, not from the middle of the night.
+        """
+        return await self._db.execute(
+            "UPDATE outbox SET created_at = ? WHERE destination_id = ? AND status = 'pending'",
+            (int(time.time()), destination_id),
+        )
+
+    async def expire_stale_notifications(
+        self, older_than_minutes: int, *, held: list[int] | None = None
+    ) -> int:
         """Drop notifications too old to be worth sending.
 
         An alert about a listing from two hours ago is not news, and quietly flushing them
         keeps a destination that was offline from dumping its whole backlog on return.
+        Destinations in `held` (in their quiet hours) are exempt: theirs are being kept
+        on purpose, to go out as a digest when the window ends.
         """
         cutoff = int(time.time()) - older_than_minutes * 60
-        return await self._db.execute(
+        sql = (
             "UPDATE outbox SET status = 'cancelled', last_error = 'expired before delivery' "
-            "WHERE status = 'pending' AND created_at < ?",
-            (cutoff,),
+            "WHERE status = 'pending' AND created_at < ?"
         )
+        params: list[Any] = [cutoff]
+        if held:
+            sql += f" AND destination_id NOT IN ({','.join('?' * len(held))})"
+            params.extend(held)
+        return await self._db.execute(sql, tuple(params))
 
     async def outbox_depth(self) -> int:
         value = await self._db.fetch_value(

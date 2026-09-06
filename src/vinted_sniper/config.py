@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Not configurable. Polling faster than this earns 403s without finding items any sooner,
@@ -133,6 +134,20 @@ class Settings(BaseSettings):
         default=None,
         description="Enables Telegram delivery and the /start binding bot when set.",
     )
+    timezone: str = Field(
+        default="UTC",
+        description="IANA timezone (e.g. Europe/Bratislava) that a destination's quiet hours "
+        "are read in.",
+    )
+
+    @field_validator("timezone")
+    @classmethod
+    def _timezone_must_exist(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"unknown timezone {value!r}") from exc
+        return value
 
     # --- Development ---------------------------------------------------------------
     fetch_mode: Literal["live", "mock"] = Field(

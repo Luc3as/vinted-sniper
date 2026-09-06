@@ -13,7 +13,7 @@ from vinted_sniper import __version__, app, log
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
 from vinted_sniper.db import Database, apply_pending
 from vinted_sniper.db.repo import Repo
-from vinted_sniper.engine import filters, health
+from vinted_sniper.engine import filters, health, quiet
 from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.errors import BlockedError, VintedError
@@ -95,6 +95,12 @@ def build_parser() -> argparse.ArgumentParser:
     destination.add_argument("--name", default="", help="What to call it.")
     destination.add_argument(
         "--status", action="store_true", help="Also send health warnings here."
+    )
+    destination.add_argument(
+        "--quiet",
+        default="",
+        help="Daily window to send nothing, e.g. 23:00-07:00 (in TIMEZONE). "
+        "Alerts found meanwhile arrive as a digest when it ends.",
     )
 
     sub.add_parser("destinations", help="List destinations.")
@@ -301,6 +307,10 @@ async def _cmd_destination(settings: Settings, args: argparse.Namespace) -> int:
         case _:
             config = {"topic": args.target}
 
+    if args.quiet and (problem := quiet.validate(args.quiet)):
+        print(f"--quiet: {problem}", file=sys.stderr)
+        return 1
+
     async with Database(settings.db_path) as db:
         await apply_pending(db)
         destination_id = await Repo(db).add_destination(
@@ -308,6 +318,7 @@ async def _cmd_destination(settings: Settings, args: argparse.Namespace) -> int:
             name=args.name.strip() or args.kind,
             config=config,
             notify_status=args.status,
+            quiet_hours=args.quiet.strip() or None,
         )
     print(f"Added {args.kind} destination (id {destination_id}).")
     print("Route a search to it with: vinted-sniper watch <url> --to " + str(destination_id))

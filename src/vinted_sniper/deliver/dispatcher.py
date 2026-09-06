@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -27,6 +29,7 @@ from vinted_sniper.deliver.ntfy import NtfySender
 from vinted_sniper.deliver.ratelimit import Gate, TokenBucket
 from vinted_sniper.deliver.telegram import TelegramSender
 from vinted_sniper.deliver.webhook import WebhookSender
+from vinted_sniper.engine import quiet
 from vinted_sniper.log import get_logger
 
 log = get_logger(__name__)
@@ -71,6 +74,8 @@ class Dispatcher:
         self._signatures: dict[int, str] = {}
         self._discord_gate = Gate()
         self._telegram_budget = TokenBucket(TELEGRAM_GLOBAL_PER_S, capacity=TELEGRAM_GLOBAL_PER_S)
+        self._zone = ZoneInfo(settings.timezone)
+        self._quiet_now: set[int] = set()
 
     async def run(self, idle_interval_s: float = 2.0) -> None:
         """Deliver whatever is queued, then wait to be told there is more."""
@@ -90,9 +95,31 @@ class Dispatcher:
 
         await self.aclose()
 
+    def _local_now(self) -> datetime:
+        return datetime.now(self._zone)
+
+    async def _quiet_destinations(self) -> list[int]:
+        """Destinations inside their quiet hours right now. Logged on the way in and out."""
+        now = self._local_now()
+        quiet_now = {
+            d.id
+            for d in await self._repo.list_destinations(active_only=True)
+            if quiet.is_quiet(d.quiet_hours, now)
+        }
+        for destination_id in quiet_now - self._quiet_now:
+            log.info("destination.quiet_hours_started", destination_id=destination_id)
+        for destination_id in self._quiet_now - quiet_now:
+            held = await self._repo.restart_delivery_clock(destination_id)
+            log.info("destination.quiet_hours_ended", destination_id=destination_id, held=held)
+        self._quiet_now = quiet_now
+        return sorted(quiet_now)
+
     async def drain(self) -> int:
         """Send everything currently due. Returns how many notifications went out."""
-        expired = await self._repo.expire_stale_notifications(self._settings.outbox_expiry_minutes)
+        held = await self._quiet_destinations()
+        expired = await self._repo.expire_stale_notifications(
+            self._settings.outbox_expiry_minutes, held=held
+        )
         if expired:
             log.info("outbox.expired", count=expired, reason="older than the delivery window")
 
@@ -126,6 +153,11 @@ class Dispatcher:
             # Created but nobody has tapped the link yet. Waiting is not a misconfiguration,
             # so this must not switch the destination off; notifications queue until it is
             # claimed, or expire on their own.
+            return 0
+
+        if destination_id in self._quiet_now:
+            # Asleep. Whatever is queued waits, exempt from expiry, and goes out together
+            # when the window ends — the senders fold a large batch into a digest.
             return 0
 
         try:

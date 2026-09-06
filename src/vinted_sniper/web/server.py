@@ -36,7 +36,7 @@ from pydantic import SecretStr
 
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
 from vinted_sniper.db.repo import Repo
-from vinted_sniper.engine import filters, health
+from vinted_sniper.engine import filters, health, quiet
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.errors import VintedError
@@ -270,9 +270,14 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         kind: Annotated[str, Form()],
         name: Annotated[str, Form()] = "",
         target: Annotated[str, Form()] = "",
+        quiet_hours: Annotated[str, Form()] = "",
+        notify_status: Annotated[str, Form()] = "",
         _: None = guard,
     ) -> Response:
         target = target.strip()
+        quiet_hours = quiet_hours.strip()
+        if quiet_hours and (problem := quiet.validate(quiet_hours)):
+            return _redirect_with_error(problem)
         config: dict[str, Any]
         match kind:
             case "discord":
@@ -292,7 +297,30 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             case _:
                 return _redirect_with_error(f"unknown destination type {kind!r}")
 
-        await repo.add_destination(kind=kind, name=name.strip() or kind, config=config)
+        await repo.add_destination(
+            kind=kind,
+            name=name.strip() or kind,
+            config=config,
+            notify_status=notify_status == "1",
+            quiet_hours=quiet_hours or None,
+        )
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/destinations/{destination_id}/quiet")
+    async def set_destination_quiet(
+        destination_id: int, quiet_hours: Annotated[str, Form()] = "", _: None = guard
+    ) -> Response:
+        quiet_hours = quiet_hours.strip()
+        if quiet_hours and (problem := quiet.validate(quiet_hours)):
+            return _redirect_with_error(problem)
+        await repo.set_quiet_hours(destination_id, quiet_hours or None)
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/destinations/{destination_id}/status")
+    async def set_destination_status(
+        destination_id: int, enabled: Annotated[str, Form()], _: None = guard
+    ) -> Response:
+        await repo.set_notify_status(destination_id, enabled == "1")
         return RedirectResponse("/", status_code=303)
 
     @app.post("/destinations/{destination_id}/delete")

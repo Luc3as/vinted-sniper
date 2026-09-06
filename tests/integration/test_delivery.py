@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -345,3 +346,41 @@ async def test_buttons_are_only_honoured_from_a_paired_chat(repo: Repo) -> None:
     await claim_pairing(repo, code, chat_id=4242, thread_id=None)
     assert await _chat_is_paired(repo, 4242)
     assert not await _chat_is_paired(repo, 1)
+
+
+# --- Quiet hours ---------------------------------------------------------------------
+
+
+async def test_a_destination_in_its_quiet_hours_is_left_alone_and_nothing_expires(
+    repo: Repo, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    query = await a_search(repo)
+    sleeping = await repo.add_destination(
+        kind="webhook",
+        name="phone",
+        config={"url": "https://example.test/phone"},
+        quiet_hours="23:00-07:00",
+    )
+    awake = await repo.add_destination(
+        kind="webhook", name="desk", config={"url": "https://example.test/desk"}
+    )
+    await repo.record_new_items(query, [listing(1)], [sleeping, awake])
+    await _age_outbox(repo, minutes=settings.outbox_expiry_minutes + 10)
+
+    endpoint = FakeEndpoint()
+    dispatcher = make_dispatcher(repo, settings, endpoint)
+
+    night = datetime(2026, 9, 6, 3, 0, tzinfo=dispatcher._zone)
+    monkeypatch.setattr(dispatcher, "_local_now", lambda: night)
+    sent = await dispatcher.drain()
+
+    assert sent == 0, "the desk's copy was stale and dropped; the phone's is held"
+    assert await repo.outbox_depth() == 1, "the phone keeps its alert through the night"
+
+    morning = datetime(2026, 9, 6, 7, 30, tzinfo=dispatcher._zone)
+    monkeypatch.setattr(dispatcher, "_local_now", lambda: morning)
+    sent = await dispatcher.drain()
+
+    assert sent == 1, "the held alert goes out when the window ends, not into the bin"
+    assert endpoint.calls == 1
+    assert await repo.outbox_depth() == 0

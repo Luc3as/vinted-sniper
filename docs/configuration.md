@@ -58,6 +58,7 @@ was found, so you can see the real delay yourself.
 
 | Variable | Default | What it does |
 |---|---|---|
+| `TIMEZONE` | `UTC` | IANA timezone (e.g. `Europe/Bratislava`) that a destination's quiet hours are read in. |
 | `TELEGRAM_BOT_TOKEN` | unset | From [@BotFather](https://t.me/BotFather). Enables Telegram delivery and the pairing bot. |
 
 ### Dashboard
@@ -135,6 +136,12 @@ Where to get each kind of target:
 
 Each search can go to its own set of destinations, so a Discord channel for one thing and
 your phone for another is normal.
+
+A destination can have **quiet hours** — `--quiet 23:00-07:00` on the command line, or the
+field next to it in the dashboard — during which nothing is sent. Alerts found meanwhile are
+kept (they are exempt from `OUTBOX_EXPIRY_MINUTES`) and go out together when the window
+ends; Discord and Telegram fold a large batch into one digest message. Times are read in
+`TIMEZONE`.
 
 What is stored per destination — the dashboard and `vinted-sniper destination` fill these in
 for you:
