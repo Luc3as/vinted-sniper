@@ -132,7 +132,7 @@ services:
       - VINTED_SNIPER_ENRICHMENT_WAIT_S=90
       - VINTED_SNIPER_WEB_PUBLIC_URL=http://<host-ip>:8000
     volumes:
-      - /opt/AI_PROJECTS/vinted-sniper-data:/data
+      - /opt/AI_projects/vinted-sniper-data:/data
     ports: ["8000:8000"]
     read_only: true
     tmpfs: [/tmp]
