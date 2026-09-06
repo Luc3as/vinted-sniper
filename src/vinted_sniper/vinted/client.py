@@ -23,6 +23,7 @@ from vinted_sniper.vinted.errors import (
     RateLimitedError,
 )
 from vinted_sniper.vinted.models import Item, ParseError, parse_item
+from vinted_sniper.vinted.pacing import RequestBudget
 from vinted_sniper.vinted.session import SessionManager
 from vinted_sniper.vinted.transport import Response, Transport, TransportError
 
@@ -50,11 +51,13 @@ class VintedClient:
         *,
         keep_raw: bool = False,
         rng: random.Random | None = None,
+        budget: RequestBudget | None = None,
     ) -> None:
         self._transport = transport
         self._sessions = sessions
         self._keep_raw = keep_raw
         self._rng = rng or random.Random()
+        self._budget = budget
 
     async def search(self, tld: str, params: dict[str, str]) -> list[Item]:
         """Return the current first page of a search, newest first.
@@ -67,6 +70,11 @@ class VintedClient:
         query = dict(params)
         query["per_page"] = str(PER_PAGE)
         query["time"] = str(int(time.time()) - self._rng.randint(*_TIME_SKEW_RANGE_S))
+
+        if self._budget is not None:
+            waited = await self._budget.acquire(tld)
+            if waited > 1.0:
+                log.debug("catalog.paced", tld=tld, waited_s=round(waited, 1))
 
         try:
             response = await transport.get(

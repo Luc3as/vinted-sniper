@@ -13,11 +13,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=README.md,target=README.md \
-    uv sync --locked --no-install-project --no-dev --extra web
+    uv sync --locked --no-install-project --no-dev --extra web --extra impersonate
 
 COPY . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-editable --no-dev --extra web
+    uv sync --locked --no-editable --no-dev --extra web --extra impersonate
 
 
 # Runtime stage: the virtualenv and the code, nothing else.

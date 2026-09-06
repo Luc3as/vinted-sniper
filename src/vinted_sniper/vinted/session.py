@@ -12,6 +12,7 @@ been alive more than how fast it is used.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from vinted_sniper.log import get_logger
 from vinted_sniper.vinted import headers as hdr
 from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.errors import BlockedError, NetworkError
+from vinted_sniper.vinted.pacing import RequestBudget, SiteCooldown
 from vinted_sniper.vinted.proxies import QUARANTINE_BLOCKED_S, QUARANTINE_NETWORK_S, ProxyRotation
 from vinted_sniper.vinted.transport import Transport, TransportError, TransportPool
 
@@ -63,6 +65,8 @@ class SessionManager:
         *,
         rotate_after_minutes: int = 60,
         proxies: ProxyRotation | None = None,
+        budget: RequestBudget | None = None,
+        cooldown: SiteCooldown | None = None,
     ) -> None:
         self._db = db
         self._pool: TransportPool | None = None
@@ -73,7 +77,14 @@ class SessionManager:
             self._transport = transport
         self._rotate_after_s = rotate_after_minutes * 60
         self._proxies = proxies or ProxyRotation()
+        self._budget = budget
+        self.cooldown = cooldown or SiteCooldown()
         self._cache: dict[str, Session] = {}
+        # One bootstrap per site at a time. Without this, every search that starts on an
+        # empty cache loads the homepage itself — a burst of different browser personas
+        # from one address inside a second, which is the most bot-shaped thing this app
+        # could possibly do.
+        self._locks: dict[str, asyncio.Lock] = {}
 
     def transport_for(self, session: Session) -> Transport:
         """The client that reaches Vinted the same way this session was created."""
@@ -85,6 +96,11 @@ class SessionManager:
 
     async def get(self, tld: str) -> Session:
         """Return a usable session for a site, creating or replacing it as needed."""
+        lock = self._locks.setdefault(tld, asyncio.Lock())
+        async with lock:
+            return await self._get_locked(tld)
+
+    async def _get_locked(self, tld: str) -> Session:
         session = self._cache.get(tld) or await self._load(tld)
 
         if session is not None and session.age_s() >= self._rotate_after_s:
@@ -102,16 +118,30 @@ class SessionManager:
         self._cache.pop(tld, None)
         await self._db.execute("DELETE FROM sessions WHERE tld = ?", (tld,))
 
-    async def rotate(self, tld: str, *, blocked: bool = False) -> Session:
-        """Replace a session outright, with a different browser persona.
+    async def discard_blocked(self, tld: str) -> None:
+        """Drop a refused session without asking for another one yet.
 
-        When the old one was refused rather than merely old, its route is set aside too:
-        a new cookie down the same blocked path buys nothing.
+        The route it came through is set aside too: a new cookie down the same blocked
+        path buys nothing. The replacement is deliberately *not* fetched here — the caller
+        is about to back off, and the next check will bootstrap when it is time. Asking
+        again immediately after a refusal is the one move guaranteed to make it longer.
         """
         previous = self._cache.get(tld)
         await self.invalidate(tld)
-        if blocked and previous is not None:
+        if previous is not None:
             self._proxies.bench(previous.proxy, QUARANTINE_BLOCKED_S, "refused by Vinted")
+
+    async def rotate(self, tld: str, *, blocked: bool = False) -> Session:
+        """Replace a session outright, with a different browser persona.
+
+        When the old one was refused rather than merely old, its route is set aside too.
+        Note that this bootstraps straight away and can therefore raise `BlockedError`;
+        callers reacting to a refusal want `discard_blocked` instead.
+        """
+        if blocked:
+            await self.discard_blocked(tld)
+        else:
+            await self.invalidate(tld)
         return await self.get(tld)
 
     async def bootstrap(self, tld: str) -> Session:
@@ -122,6 +152,9 @@ class SessionManager:
         transport = self._pool.get(proxy) if self._pool is not None else self._transport
         if transport is None:  # pragma: no cover - one of the two is always set
             raise RuntimeError("SessionManager was built without a transport")
+
+        if self._budget is not None:
+            await self._budget.acquire(tld)
 
         try:
             response = await transport.get(

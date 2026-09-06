@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from vinted_sniper.config import Settings
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.log import get_logger
+from vinted_sniper.vinted.errors import BlockedError, NetworkError
 from vinted_sniper.vinted.session import SessionManager
 
 log = get_logger(__name__)
@@ -123,8 +124,16 @@ class Watchdog:
         )
 
         if self._settings.watchdog_action == "rotate":
-            await self._sessions.rotate(search.tld)
-            log.info("watchdog.session_rotated", tld=search.tld)
+            if self._sessions.cooldown.is_closed(search.tld):
+                # The site is already holding us off; a fresh handshake now would only
+                # add to the score that caused it.
+                log.info("watchdog.rotation_skipped", tld=search.tld, reason="site cooling down")
+            else:
+                try:
+                    await self._sessions.rotate(search.tld)
+                    log.info("watchdog.session_rotated", tld=search.tld)
+                except (BlockedError, NetworkError) as exc:
+                    log.warning("watchdog.rotation_failed", tld=search.tld, error=str(exc))
 
         if self._announce is not None:
             await self._announce(

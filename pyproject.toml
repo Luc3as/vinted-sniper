@@ -93,6 +93,7 @@ ignore = [
 # One send attempt has several distinct outcomes — delivered, paused, gone, retry, gave
 # up — and each needs its own early exit. Splitting them would hide the flow, not clarify it.
 "src/vinted_sniper/deliver/dispatcher.py" = ["C901", "PLR0911"]
+"src/vinted_sniper/engine/poller.py" = ["PLR0911"]  # one return per error type is the point
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10

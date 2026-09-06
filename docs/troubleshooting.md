@@ -70,8 +70,11 @@ open an issue with your logs.
 Options, cheapest first:
 
 1. **Wait.** These are usually temporary. The app backs off on its own.
-2. **Slow down.** Raise `VINTED_SNIPER_POLL_DEFAULT_INTERVAL_S` to 120 or 300. Ten searches
-   at once from one address is a lot more traffic than one search.
+2. **Slow down.** Raise `VINTED_SNIPER_POLL_DEFAULT_INTERVAL_S` to 120 or 300, or lower
+   `VINTED_SNIPER_SITE_REQUESTS_PER_MINUTE`, which caps the address as a whole. Ten searches
+   at once from one address is a lot more traffic than one search. When one search is
+   refused, the others on that site hold back automatically (`poll.cooling_down` in the
+   logs) — that is deliberate, not a second problem.
 3. **Move it home.** Residential connections are challenged far less than datacenter ones. A
    Raspberry Pi is enough.
 4. **Turn on TLS impersonation.** Set `VINTED_SNIPER_HTTP_IMPERSONATE=true`. This makes

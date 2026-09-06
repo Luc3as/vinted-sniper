@@ -20,6 +20,7 @@ from vinted_sniper.config import Settings
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine.poller import Poller
 from vinted_sniper.vinted.client import VintedClient
+from vinted_sniper.vinted.pacing import SiteCooldown
 from vinted_sniper.vinted.proxies import ProxyRotation
 from vinted_sniper.vinted.session import SessionManager
 from vinted_sniper.vinted.transport import Response, TransportPool
@@ -32,6 +33,8 @@ async def make_poller(
     *,
     db: Any,
     max_total_price: str | None = None,
+    clock: FakeClock | None = None,
+    announce: Any = None,
 ) -> tuple[Poller, asyncio.Event]:
     query_id = await repo.add_query(
         name="test search",
@@ -43,7 +46,20 @@ async def make_poller(
     )
     query = await repo.get_query(query_id)
     assert query is not None
-    return poller_for(query, transport, repo, settings, db=db)
+    return poller_for(query, transport, repo, settings, db=db, clock=clock, announce=announce)
+
+
+class FakeClock:
+    """A monotonic clock the test moves by hand, for the site-wide cooldown."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 def poller_for(
@@ -53,9 +69,12 @@ def poller_for(
     settings: Settings,
     *,
     db: Any,
+    clock: FakeClock | None = None,
+    announce: Any = None,
 ) -> tuple[Poller, asyncio.Event]:
     """Build a poller over an existing search, as a restarted process would."""
-    sessions = SessionManager(db, transport)
+    cooldown = SiteCooldown(clock=clock) if clock is not None else None
+    sessions = SessionManager(db, transport, cooldown=cooldown)
     client = VintedClient(transport, sessions)
     work = asyncio.Event()
     poller = Poller(
@@ -66,6 +85,7 @@ def poller_for(
         settings=settings,
         stop=asyncio.Event(),
         work_available=work,
+        announce=announce,
     )
     return poller, work
 
@@ -167,7 +187,9 @@ async def test_only_listings_newer_than_the_last_check_are_announced(
 async def test_a_blocked_request_backs_off_and_replaces_the_session(
     transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
 ) -> None:
-    poller, _ = await make_poller(transport, repo, settings, db=db)
+    clock = FakeClock()
+    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock)
+    await poller.tick()  # a first, successful check establishes a session
     transport.queue_status(403, "Forbidden")
     homepage_visits_before = sum(1 for r in transport.requests if "/api/v2/" not in r["url"])
 
@@ -178,15 +200,121 @@ async def test_a_blocked_request_backs_off_and_replaces_the_session(
     assert state.count_403 == 1
     assert delay > settings.poll_default_interval_s, "a block must slow us down, not speed us up"
 
-    homepage_visits_after = sum(1 for r in transport.requests if "/api/v2/" not in r["url"])
-    assert homepage_visits_after > homepage_visits_before, (
-        "being refused should start a fresh session rather than reuse the refused one"
+    homepage_visits_now = sum(1 for r in transport.requests if "/api/v2/" not in r["url"])
+    assert homepage_visits_now == homepage_visits_before, (
+        "being refused must not trigger another handshake on the spot; that is the one "
+        "request guaranteed to make the block longer"
     )
 
-    # And the search keeps running rather than dying.
+    # Once the backoff has passed, the search comes back with a fresh session and keeps
+    # running rather than dying.
+    clock.advance(delay + 1)
     transport.queue_catalog([])
     assert await poller.tick() > 0
     assert (await repo.get_state(poller.query.id)).last_status == "ok"
+    homepage_visits_after = sum(1 for r in transport.requests if "/api/v2/" not in r["url"])
+    assert homepage_visits_after > homepage_visits_before, (
+        "the next check should start a fresh session rather than reuse the refused one"
+    )
+
+
+async def test_a_refusal_during_the_handshake_itself_is_a_backoff_not_a_crash(
+    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
+) -> None:
+    """The homepage answering without a session cookie is the DataDome challenge page.
+
+    That used to escape the poller as an unhandled exception, kill its task, and have the
+    supervisor restart it fifteen seconds later — every search on the site hitting the
+    homepage four times a minute until the address was blocked outright.
+    """
+    clock = FakeClock()
+    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock)
+    transport.queue_root(
+        Response(status_code=200, text="<html>challenge</html>", headers={}, cookies={})
+    )
+
+    delay = await poller.tick()  # must not raise
+
+    state = await repo.get_state(poller.query.id)
+    assert state.last_status == "http_403"
+    assert delay > settings.poll_default_interval_s
+
+    # A second refusal at the handshake, still no crash, and a longer wait.
+    clock.advance(delay + 1)
+    transport.queue_root(
+        Response(status_code=200, text="<html>challenge</html>", headers={}, cookies={})
+    )
+    assert await poller.tick() > delay
+
+
+async def test_one_refusal_holds_every_search_on_that_site(
+    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
+) -> None:
+    clock = FakeClock()
+    sessions = SessionManager(db, transport, cooldown=SiteCooldown(clock=clock))
+    client = VintedClient(transport, sessions)
+
+    async def add(name: str) -> Poller:
+        query_id = await repo.add_query(
+            name=name,
+            url=f"https://www.vinted.fr/catalog?search_text={name}",
+            tld="fr",
+            params={"search_text": name},
+            poll_interval_s=60,
+        )
+        query = await repo.get_query(query_id)
+        assert query is not None
+        return Poller(
+            query,
+            repo=repo,
+            client=client,
+            sessions=sessions,
+            settings=settings,
+            stop=asyncio.Event(),
+        )
+
+    first, second = await add("first"), await add("second")
+
+    transport.queue_status(403, "Forbidden")
+    hold = await first.tick()
+    requests_before = len(transport.requests)
+
+    wait = await second.tick()
+
+    assert len(transport.requests) == requests_before, (
+        "the second search must not go and discover the block for itself"
+    )
+    assert wait >= hold * 0.9
+    assert (await repo.get_state(second.query.id)).last_status is None, (
+        "waiting out someone else's backoff is not a failure of this search"
+    )
+
+    clock.advance(hold + 10)
+    transport.queue_catalog([])
+    assert await second.tick() > 0
+    assert (await repo.get_state(second.query.id)).last_status == "ok"
+
+
+async def test_the_first_refusal_on_a_site_is_announced_once(
+    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
+) -> None:
+    clock = FakeClock()
+    announcements: list[str] = []
+
+    async def announce(message: str) -> None:
+        announcements.append(message)
+
+    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock, announce=announce)
+
+    transport.queue_status(403, "Forbidden")
+    delay = await poller.tick()
+    assert len(announcements) == 1
+    assert "vinted.fr" in announcements[0]
+
+    # Still inside the hold: a second refusal from the same site is not news.
+    clock.advance(delay / 2)
+    assert await poller.tick() > 0
+    assert len(announcements) == 1
 
 
 async def test_a_blocked_proxy_is_set_aside_and_the_next_one_is_used(
@@ -225,12 +353,14 @@ async def test_a_blocked_proxy_is_set_aside_and_the_next_one_is_used(
 async def test_backoff_grows_with_repeated_blocks(
     transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
 ) -> None:
-    poller, _ = await make_poller(transport, repo, settings, db=db)
+    clock = FakeClock()
+    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock)
 
     delays = []
     for _ in range(3):
         transport.queue_status(403, "Forbidden")
         delays.append(await poller.tick())
+        clock.advance(delays[-1] + 1)
 
     assert delays[0] < delays[1] < delays[2]
 

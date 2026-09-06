@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import random
 import time
+from collections.abc import Awaitable, Callable
 
 from vinted_sniper.config import MAX_BACKOFF_S, Settings
 from vinted_sniper.db.repo import Query, Repo
@@ -48,6 +49,8 @@ class Poller:
         stop: asyncio.Event,
         work_available: asyncio.Event | None = None,
         rng: random.Random | None = None,
+        initial_delay_s: float = 0.0,
+        announce: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.query = query
         self._repo = repo
@@ -57,17 +60,29 @@ class Poller:
         self._stop = stop
         self._work_available = work_available
         self._rng = rng or random.Random()
+        self._initial_delay_s = initial_delay_s
+        self._announce = announce
         self._consecutive_errors = 0
         self._log = log.bind(query_id=query.id, query=query.name, tld=query.tld)
 
     async def run(self) -> None:
         """Check on a schedule until the stop event is set."""
+        if self._initial_delay_s > 0:
+            await self._wait(self._initial_delay_s)
         while not self._stop.is_set():
             delay = await self.tick()
             await self._wait(delay)
 
     async def tick(self) -> float:
         """Run one check. Returns how long to wait before the next one."""
+        # Someone else on this site was refused recently. Their backoff is ours too: the
+        # address is what is being scored, and finding the block out for ourselves only
+        # adds to it.
+        holding = self._sessions.cooldown.wait_s(self.query.tld)
+        if holding > 0:
+            self._log.info("poll.cooling_down", retry_in_s=round(holding))
+            return holding + self._rng.uniform(0, 5.0)
+
         try:
             await self._check()
         except AuthExpiredError as exc:
@@ -77,13 +92,25 @@ class Poller:
             await self._sessions.invalidate(self.query.tld)
             return min(5.0, float(self.query.poll_interval_s))
         except BlockedError as exc:
-            # Vinted is refusing this client. A fresh cookie will not change that, so back
-            # off hard and come back with a different session.
+            # Vinted is refusing this client. A fresh cookie will not change that, so drop
+            # the session, back off hard, and hold every other search on this site with
+            # us. The replacement session is fetched by the next check, not now — asking
+            # again the same second is how a short challenge becomes a long block.
             self._consecutive_errors += 1
             await self._repo.record_failure(self.query.id, "http_403", str(exc))
-            await self._sessions.rotate(self.query.tld, blocked=True)
+            await self._sessions.discard_blocked(self.query.tld)
             delay = self._backoff()
+            first_on_site = not self._sessions.cooldown.is_closed(self.query.tld)
+            self._sessions.cooldown.close(self.query.tld, delay)
             self._log.warning("poll.blocked", error=str(exc), retry_in_s=round(delay))
+            if first_on_site and self._announce is not None:
+                with contextlib.suppress(Exception):
+                    await self._announce(
+                        f"vinted.{self.query.tld} is refusing requests from this address "
+                        f"(\u201c{self.query.name}\u201d was the first to notice). Holding "
+                        f"every search on that site for about {round(delay / 60)} min. "
+                        "If this keeps happening, see the troubleshooting guide."
+                    )
             return delay
         except RateLimitedError as exc:
             self._consecutive_errors += 1

@@ -78,6 +78,19 @@ class Settings(BaseSettings):
         "Blocks correlate with session age more than with request rate.",
     )
     request_timeout_s: float = Field(default=15.0, gt=0)
+    site_requests_per_minute: int = Field(
+        default=12,
+        ge=1,
+        description="Upper bound on requests to any one country site from this address, "
+        "counted across every search and including homepage loads. The address is what "
+        "gets scored, so the total matters more than any single search's interval.",
+    )
+    startup_stagger_s: float = Field(
+        default=20.0,
+        ge=0,
+        description="Seconds between the first checks of successive searches at startup, "
+        "so ten searches do not all introduce themselves in the same second.",
+    )
 
     # --- Polling -------------------------------------------------------------------
     poll_default_interval_s: int = Field(

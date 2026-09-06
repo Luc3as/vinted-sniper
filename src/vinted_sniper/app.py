@@ -26,6 +26,7 @@ from vinted_sniper.engine.poller import Poller
 from vinted_sniper.engine.watchdog import Watchdog
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted.client import VintedClient
+from vinted_sniper.vinted.pacing import RequestBudget
 from vinted_sniper.vinted.proxies import ProxyRotation
 from vinted_sniper.vinted.session import SessionManager
 from vinted_sniper.vinted.taxonomy import Taxonomy
@@ -76,13 +77,17 @@ class Application:
 
             pool = TransportPool(build)
             try:
+                budget = RequestBudget(settings.site_requests_per_minute)
                 sessions = SessionManager(
                     db,
                     pool,
                     rotate_after_minutes=settings.session_rotate_minutes,
                     proxies=proxies,
+                    budget=budget,
                 )
-                client = VintedClient(None, sessions, keep_raw=settings.keep_raw_json)
+                client = VintedClient(
+                    None, sessions, keep_raw=settings.keep_raw_json, budget=budget
+                )
                 dispatcher = Dispatcher(
                     repo=repo,
                     settings=settings,
@@ -113,7 +118,8 @@ class Application:
                         tg.create_task(heartbeat.run(), name="heartbeat")
                         tg.create_task(self._housekeeping(repo), name="housekeeping")
                         tg.create_task(
-                            self._supervise(tg, repo, client, sessions), name="supervisor"
+                            self._supervise(tg, repo, client, sessions, dispatcher),
+                            name="supervisor",
                         )
 
                         if settings.telegram_bot_token is not None:
@@ -138,11 +144,12 @@ class Application:
         repo: Repo,
         client: VintedClient,
         sessions: SessionManager,
+        dispatcher: Dispatcher | None = None,
     ) -> None:
         """Keep one running task per active search."""
         while not self._stop.is_set():
             try:
-                await self._reconcile(tg, repo, client, sessions)
+                await self._reconcile(tg, repo, client, sessions, dispatcher)
             except Exception as exc:
                 log.exception("supervisor.failed", error=str(exc))
 
@@ -158,6 +165,7 @@ class Application:
         repo: Repo,
         client: VintedClient,
         sessions: SessionManager,
+        dispatcher: Dispatcher | None = None,
     ) -> None:
         queries = {query.id: query for query in await repo.list_queries(include_paused=False)}
 
@@ -174,6 +182,9 @@ class Application:
                 if query is None:
                     log.info("poller.stopped", query_id=query_id)
 
+        # Searches starting in the same pass are spread out, so a restart with ten of them
+        # does not open with ten catalog requests in the same second.
+        started_this_pass = 0
         for query_id, query in queries.items():
             if query_id in self._poller_tasks:
                 continue
@@ -185,7 +196,10 @@ class Application:
                 settings=self._settings,
                 stop=self._stop,
                 work_available=self._work_available,
+                initial_delay_s=started_this_pass * self._settings.startup_stagger_s,
+                announce=dispatcher.notify_status if dispatcher is not None else None,
             )
+            started_this_pass += 1
             self._poller_tasks[query_id] = tg.create_task(
                 self._guard(poller), name=f"poll:{query_id}"
             )

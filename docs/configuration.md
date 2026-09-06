@@ -40,6 +40,8 @@ was found, so you can see the real delay yourself.
 
 | Variable | Default | What it does |
 |---|---|---|
+| `SITE_REQUESTS_PER_MINUTE` | `12` | Ceiling on requests to any one country site from this address, counted across every search and including homepage loads. When one search is refused, every search on that site waits out the same backoff — the address is what gets scored, not the search. |
+| `STARTUP_STAGGER_S` | `20` | Seconds between the first checks of successive searches at startup, so a restart with ten searches does not open with ten requests in one second. |
 | `SESSION_ROTATE_MINUTES` | `60` | Start a fresh anonymous session after this long. Blocks track session age more than request rate. |
 | `HTTP_IMPERSONATE` | `false` | Make requests present a real browser's TLS fingerprint. Needs the `impersonate` extra. Only worth turning on if you are being blocked while the same search loads fine in a browser. |
 | `PROXY_FILE` | unset | Path to a text file of proxy URLs, one per line (blank lines and `#` comments ignored). Used in turn; one that gets refused sits out for ten minutes. If all of them are sitting out, requests go direct rather than not at all. Rarely needed. |
