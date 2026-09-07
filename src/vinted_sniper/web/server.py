@@ -33,7 +33,7 @@ import uvicorn
 from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import SecretStr
+from pydantic import BaseModel, Field, SecretStr
 
 from vinted_sniper import backup, i18n
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
@@ -41,6 +41,9 @@ from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine import filters, health, quiet
 from vinted_sniper.enrichment import EnrichmentIn
 from vinted_sniper.log import get_logger
+from vinted_sniper.magic.client import MapperClient
+from vinted_sniper.magic.errors import MappingError
+from vinted_sniper.magic.validate import validate
 from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.errors import VintedError
 from vinted_sniper.vinted.taxonomy import FACET_CODES, Taxonomy
@@ -65,7 +68,24 @@ def _authorised(supplied: str | None, expected: SecretStr | None) -> bool:
     return secrets.compare_digest(supplied, expected.get_secret_value())
 
 
-def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None) -> FastAPI:
+class MagicSearchIn(BaseModel):
+    """One sentence to map, and which country site to map it against.
+
+    The length cap is a cost guard as much as a validation rule: every mapping is a
+    language-model call somebody pays for, and nothing a person types into a search box is
+    five hundred characters long.
+    """
+
+    text: str = Field(min_length=1, max_length=500)
+    tld: str = Field(min_length=2, max_length=8)
+
+
+def create_app(
+    settings: Settings,
+    repo: Repo,
+    taxonomy: Taxonomy | None = None,
+    mapper: MapperClient | None = None,
+) -> FastAPI:
     token = settings.web_auth_token  # None means no password: the dashboard just opens
 
     app = FastAPI(title="vinted-sniper", docs_url=None, redoc_url=None)
@@ -508,6 +528,60 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             return JSONResponse({"error": str(exc)}, status_code=502)
         return JSONResponse({"options": options})
 
+    # --- Magic Search --------------------------------------------------------------
+    # A sentence in, a params dict out. Two steps, and both can refuse: the n8n flow can
+    # be down or answer with a shape this app cannot use, and the ids it does answer with
+    # can be invented. Neither is a server fault, so both come back as 422 with the reason
+    # in words — an id that was never checked would become a search that quietly finds
+    # nothing, which is the one outcome this endpoint exists to prevent.
+
+    @app.post("/api/magic-search/map")
+    async def magic_search_map(body: MagicSearchIn, _: None = guard) -> JSONResponse:
+        if mapper is None:
+            raise HTTPException(status_code=503, detail="Magic Search is not set up")
+        if taxonomy is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Magic Search is not set up: its ids could not be checked",
+            )
+        tld = _known_tld(body.tld)
+
+        started = time.monotonic()
+        try:
+            mapped = await mapper.map_query(body.text, tld)
+            await validate(mapped, tld=tld, taxonomy=taxonomy)
+        except MappingError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=422)
+        except VintedError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=502)
+
+        log.info(
+            "magic.mapped",
+            tld=tld,
+            catalog=mapped.catalog.id if mapped.catalog else None,
+            brand=mapped.brand.id if mapped.brand else None,
+            sizes=len(mapped.sizes),
+            elapsed_ms=round((time.monotonic() - started) * 1000),
+        )
+        # `labels` carries the names the model returned so a confirmation screen can say
+        # "Jackets & Coats / Patagonia / M" instead of three integers, and `watch_hints`
+        # travels beside the params rather than inside them: they are title rules for a
+        # later standing watch, never search filters (R003).
+        return JSONResponse(
+            {
+                "params": mapped.to_params(),
+                "tld": tld,
+                "keywords": mapped.keywords,
+                "visual_signature": mapped.visual_signature,
+                "watch_hints": mapped.watch_hints.model_dump(),
+                "labels": {
+                    "catalog": mapped.catalog.name if mapped.catalog else None,
+                    "brand": mapped.brand.name if mapped.brand else None,
+                    "sizes": [size.name for size in mapped.sizes],
+                },
+            }
+        )
+
     # --- Destinations --------------------------------------------------------------
 
     @app.post("/destinations")
@@ -851,11 +925,12 @@ async def serve(
     repo: Repo,
     stop: asyncio.Event,
     taxonomy: Taxonomy | None = None,
+    mapper: MapperClient | None = None,
 ) -> None:
     """Run the web UI until the app shuts down."""
 
     config = uvicorn.Config(
-        create_app(settings, repo, taxonomy),
+        create_app(settings, repo, taxonomy, mapper),
         host=settings.web_host,
         port=settings.web_port,
         log_config=None,

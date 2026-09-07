@@ -6,12 +6,14 @@ it holds webhook URLs and chat ids — so "is it locked" is a correctness questi
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -20,6 +22,7 @@ from tests.conftest import ScriptedTransport
 from vinted_sniper.config import Settings
 from vinted_sniper.db import Database
 from vinted_sniper.db.repo import Repo
+from vinted_sniper.magic.client import MapperClient
 from vinted_sniper.vinted.models import parse_item
 from vinted_sniper.vinted.session import SessionManager
 from vinted_sniper.vinted.taxonomy import Taxonomy
@@ -895,3 +898,216 @@ async def test_deleting_a_destination_unroutes_it(signed_in: TestClient, repo: R
 
     assert await repo.destination_ids_for_query(query.id) == []
     assert await repo.list_destinations() == []
+
+
+# --- Magic Search ---------------------------------------------------------------------
+# The endpoint sits between two things that can lie: an n8n flow that may be down, and a
+# language model that will happily invent a category id. Both have to arrive as a readable
+# 422, and the params that do come out have to be a search — never the title rules.
+
+MAPPED_ANSWER: dict[str, Any] = {
+    "catalog": {"id": 2052, "name": "Jackets & Coats"},
+    "brand": {"id": 90804, "name": "Patagonia"},
+    "sizes": [{"id": 208, "name": "M"}],
+    "price_to": "60",
+    "currency": "EUR",
+    "search_text": "patagonia torrentshell",
+    "keywords": ["torrentshell"],
+    "visual_signature": "a hooded shell jacket, one plain colour, taped seams",
+    "watch_hints": {"required_keywords": ["torrentshell"], "title_pattern": r"\btorrentshell\b"},
+}
+
+
+class FakeFlow:
+    """A stand-in n8n mapper: answers with what it was given, or fails how it was told to."""
+
+    def __init__(
+        self, answer: dict[str, Any] | None = None, *, raises: Exception | None = None
+    ) -> None:
+        self.answer = MAPPED_ANSWER if answer is None else answer
+        self.raises = raises
+        self.calls = 0
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return httpx.Response(200, json=self.answer)
+
+    def mapper(self) -> MapperClient:
+        return MapperClient(
+            "https://n8n.test/webhook/magic",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle)),
+        )
+
+
+@pytest.fixture
+def magic_client(
+    web_settings: Settings, db: Database, repo: Repo, transport: ScriptedTransport
+) -> Iterator[Callable[[FakeFlow], TestClient]]:
+    """A signed-in dashboard wired to a scripted Vinted and whichever fake flow a test wants."""
+    with contextlib.ExitStack() as stack:
+
+        def build(flow: FakeFlow) -> TestClient:
+            taxonomy = Taxonomy(SessionManager(db, transport), repo)
+            test_client = stack.enter_context(
+                TestClient(create_app(web_settings, repo, taxonomy, flow.mapper()))
+            )
+            test_client.cookies.set(SESSION_COOKIE, TOKEN)
+            return test_client
+
+        yield build
+
+
+def _page_with_jackets() -> Response:
+    payload = {
+        "CSRF_TOKEN": "11112222-3333-4444",
+        "catalogTree": [
+            {
+                "id": 5,
+                "title": "Men",
+                "catalogs": [{"id": 2052, "title": "Jackets & Coats", "catalogs": []}],
+            }
+        ],
+    }
+    html = f"<script>self.__next_f.push([1,{json.dumps(json.dumps(payload))}])</script>"
+    return Response(status_code=200, text=html, headers={}, cookies={"access_token_web": "t"})
+
+
+def _api_response(payload: dict[str, Any]) -> Response:
+    return Response(status_code=200, text=json.dumps(payload), headers={}, cookies={})
+
+
+def _script_the_id_check(transport: ScriptedTransport) -> None:
+    """Line up what validation reads: the category tree, then the brand and size facets."""
+    transport.queue_root(_page_with_jackets())  # session bootstrap
+    transport.queue_root(_page_with_jackets())  # the page that carries the tree and the token
+    transport.queue(_api_response({"options": [{"id": 90804, "title": "Patagonia"}]}))
+    transport.queue(_api_response({"options": [{"id": 208, "title": "M"}]}))
+
+
+def test_magic_search_needs_a_login(client: TestClient) -> None:
+    response = client.post(
+        "/api/magic-search/map", json={"text": "panska bunda Patagonia", "tld": "sk"}
+    )
+
+    assert response.status_code == 401
+
+
+def test_without_a_mapper_magic_search_says_it_is_not_set_up(signed_in: TestClient) -> None:
+    response = signed_in.post(
+        "/api/magic-search/map", json={"text": "panska bunda Patagonia", "tld": "sk"}
+    )
+
+    assert response.status_code == 503
+    assert "not set up" in response.json()["detail"]
+
+
+def test_without_a_taxonomy_the_ids_cannot_be_checked_so_magic_search_refuses(
+    web_settings: Settings, repo: Repo
+) -> None:
+    flow = FakeFlow()
+    with TestClient(create_app(web_settings, repo, None, flow.mapper())) as test_client:
+        test_client.cookies.set(SESSION_COOKIE, TOKEN)
+
+        response = test_client.post(
+            "/api/magic-search/map", json={"text": "panska bunda Patagonia", "tld": "sk"}
+        )
+
+    assert response.status_code == 503
+    assert flow.calls == 0  # nothing is asked of the AI when the answer could not be checked
+
+
+def test_a_sentence_becomes_the_params_a_search_already_takes(
+    magic_client: Callable[[FakeFlow], TestClient], transport: ScriptedTransport
+) -> None:
+    _script_the_id_check(transport)
+
+    response = magic_client(FakeFlow()).post(
+        "/api/magic-search/map",
+        json={"text": "panska bunda Patagonia Torrentshell M do 60 eur", "tld": "sk"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["params"] == {
+        "catalog_ids": "2052",
+        "brand_ids": "90804",
+        "size_ids": "208",
+        "price_to": "60",
+        "currency": "EUR",
+        "search_text": "patagonia torrentshell",
+        "order": "newest_first",
+    }
+    assert body["tld"] == "sk"
+    assert body["keywords"] == ["torrentshell"]
+    assert body["visual_signature"]
+    # The names ride along so a confirmation screen can show words, not three integers.
+    assert body["labels"] == {
+        "catalog": "Jackets & Coats",
+        "brand": "Patagonia",
+        "sizes": ["M"],
+    }
+
+
+def test_the_title_rules_travel_beside_the_params_never_inside_them(
+    magic_client: Callable[[FakeFlow], TestClient], transport: ScriptedTransport
+) -> None:
+    """R003: a sweep ranks on the title, it never filters on it — so the hints stay out."""
+    _script_the_id_check(transport)
+
+    body = (
+        magic_client(FakeFlow())
+        .post("/api/magic-search/map", json={"text": "patagonia bunda", "tld": "sk"})
+        .json()
+    )
+
+    assert "required_keywords" not in body["params"]
+    assert "title_pattern" not in body["params"]
+    assert body["watch_hints"]["required_keywords"] == ["torrentshell"]
+    assert body["watch_hints"]["title_pattern"]
+
+
+def test_a_category_the_model_invented_is_refused_by_number(
+    magic_client: Callable[[FakeFlow], TestClient], transport: ScriptedTransport
+) -> None:
+    transport.queue_root(_page_with_jackets())  # session bootstrap
+    transport.queue_root(_page_with_jackets())  # the tree, which has no catalog 9999
+    invented = {**MAPPED_ANSWER, "catalog": {"id": 9999, "name": "Jackets & Coats"}}
+
+    response = magic_client(FakeFlow(invented)).post(
+        "/api/magic-search/map", json={"text": "panska bunda", "tld": "sk"}
+    )
+
+    assert response.status_code == 422
+    assert "9999" in response.json()["error"]
+    assert transport.requests[-1]["url"].endswith("/catalog")  # no brand or size call followed
+
+
+def test_a_mapper_that_cannot_be_reached_is_a_422_in_plain_words(
+    magic_client: Callable[[FakeFlow], TestClient], transport: ScriptedTransport
+) -> None:
+    flow = FakeFlow(raises=httpx.ConnectError("nodename nor servname provided"))
+
+    response = magic_client(flow).post(
+        "/api/magic-search/map", json={"text": "panska bunda", "tld": "sk"}
+    )
+
+    assert response.status_code == 422
+    assert set(response.json()) == {"error"}
+    assert "could not reach the mapper" in response.json()["error"]
+    assert "Traceback" not in response.text
+    assert transport.requests == []  # a failed mapping never touches Vinted
+
+
+def test_an_unknown_site_is_refused_before_the_mapper_is_called(
+    magic_client: Callable[[FakeFlow], TestClient]
+) -> None:
+    flow = FakeFlow()
+
+    response = magic_client(flow).post(
+        "/api/magic-search/map", json={"text": "panska bunda", "tld": "xx"}
+    )
+
+    assert response.status_code == 404
+    assert flow.calls == 0

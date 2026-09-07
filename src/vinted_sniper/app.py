@@ -28,6 +28,7 @@ from vinted_sniper.engine.poller import Poller
 from vinted_sniper.engine.report import WeeklyReport
 from vinted_sniper.engine.watchdog import Watchdog
 from vinted_sniper.log import get_logger
+from vinted_sniper.magic.client import MapperClient
 from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.pacing import RequestBudget
 from vinted_sniper.vinted.proxies import ProxyRotation
@@ -139,7 +140,18 @@ class Application:
                             tg.create_task(self._run_telegram_bot(repo), name="telegram-bot")
                         if settings.web_enabled:
                             taxonomy = Taxonomy(sessions, repo)
-                            tg.create_task(self._run_web(repo, taxonomy), name="web")
+                            # No flow URL means Magic Search is simply off: the endpoint
+                            # says so rather than the dashboard guessing at filters.
+                            mapper = (
+                                MapperClient(
+                                    settings.magic_webhook_url,
+                                    token=settings.magic_webhook_token,
+                                    timeout_s=settings.magic_timeout_s,
+                                )
+                                if settings.magic_webhook_url
+                                else None
+                            )
+                            tg.create_task(self._run_web(repo, taxonomy, mapper), name="web")
                 except* Exception as group:
                     for error in group.exceptions:
                         log.exception("app.task_failed", error=str(error))
@@ -272,22 +284,29 @@ class Application:
         except Exception as exc:
             log.exception("telegram_bot.failed", error=str(exc))
 
-    async def _run_web(self, repo: Repo, taxonomy: Taxonomy) -> None:
+    async def _run_web(
+        self, repo: Repo, taxonomy: Taxonomy, mapper: MapperClient | None = None
+    ) -> None:
         try:
-            from vinted_sniper.web.server import serve  # noqa: PLC0415
-        except ImportError:
-            # The dashboard is on by default but its dependencies are an extra, so a
-            # bare install shouldn't die over it — the poller is the point.
-            log.warning(
-                "web.unavailable",
-                hint="install the web extra to get the dashboard: uv sync --extra web",
-            )
-            return
+            try:
+                from vinted_sniper.web.server import serve  # noqa: PLC0415
+            except ImportError:
+                # The dashboard is on by default but its dependencies are an extra, so a
+                # bare install shouldn't die over it — the poller is the point.
+                log.warning(
+                    "web.unavailable",
+                    hint="install the web extra to get the dashboard: uv sync --extra web",
+                )
+                return
 
-        try:
-            await serve(self._settings, repo, self._stop, taxonomy)
+            await serve(self._settings, repo, self._stop, taxonomy, mapper)
         except Exception as exc:
             log.exception("web.failed", error=str(exc))
+        finally:
+            # The mapper owns the httpx client this app built for it, and the web task is
+            # the only thing that ever uses it — so it closes here, on every way out.
+            if mapper is not None:
+                await mapper.aclose()
 
     # --- Signals -------------------------------------------------------------------
 

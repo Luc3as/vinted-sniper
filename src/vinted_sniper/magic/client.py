@@ -106,8 +106,11 @@ class MapperClient:
         except ValidationError as exc:
             _fail("schema", f"the mapper answered with an unusable shape: {_first_error(exc)}")
 
+        # Named for the step it is, not for the outcome: the flow answered with a shape
+        # this app can use. Whether the ids in it are real is `validate()`'s answer, and
+        # the endpoint logs that one as `magic.mapped`.
         log.info(
-            "magic.mapped",
+            "magic.flow_answered",
             tld=tld,
             catalog=mapped.catalog.id if mapped.catalog else None,
             brand=mapped.brand.id if mapped.brand else None,
