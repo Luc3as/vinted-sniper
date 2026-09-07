@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from decimal import Decimal
+
 import pytest
 
 from vinted_sniper.db.connection import Database
 from vinted_sniper.db.repo import Repo, SweepCandidate
+from vinted_sniper.enrichment import EnrichmentIn
 
 
 def make_candidate(item_id: int, *, rank_score: float = 0.0, **overrides: object) -> SweepCandidate:
@@ -219,3 +223,195 @@ async def test_sweeps_never_touch_the_pollers_item_table(repo: Repo, db: Databas
     assert await repo.known_item_ids([1234]) == set()
     assert await db.fetch_value("SELECT COUNT(*) FROM items") == 0
     assert await db.fetch_value("SELECT COUNT(*) FROM outbox") == 0
+
+
+@dataclass(frozen=True)
+class FakeTriage:
+    """The shape `magic.triage` returns: id, judgement, confidence, one-line reason."""
+
+    id: int
+    matches_target: bool
+    confidence: float
+    reason: str | None = None
+
+
+async def test_triage_lands_on_the_right_rows_and_leaves_the_rest_alone(repo: Repo) -> None:
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    await repo.record_sweep_candidates(
+        sweep_id, [make_candidate(1), make_candidate(2), make_candidate(3)]
+    )
+
+    written = await repo.record_triage(
+        sweep_id,
+        [
+            FakeTriage(id=1, matches_target=True, confidence=0.9, reason="right shell, right cut"),
+            FakeTriage(id=3, matches_target=False, confidence=0.2, reason="a fleece, not a shell"),
+        ],
+    )
+
+    assert written == 2
+    stored = {c.item_id: c for c in await repo.sweep_candidates(sweep_id)}
+    assert stored[1].stage == "triage"
+    assert stored[1].matches_target is True
+    assert stored[1].confidence == 0.9
+    assert stored[1].triage_reason == "right shell, right cut"
+    assert stored[3].matches_target is False
+    assert stored[3].confidence == 0.2
+    # Untouched: never triaged is not the same answer as triaged and rejected.
+    assert stored[2].stage == "funnel"
+    assert stored[2].matches_target is None
+    assert stored[2].confidence is None
+    assert stored[2].triage_reason is None
+
+
+async def test_triage_for_an_item_outside_the_sweep_is_a_no_op(repo: Repo) -> None:
+    """A flow that invents an id must not take the rest of the batch down with it."""
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    await repo.record_sweep_candidates(sweep_id, [make_candidate(1)])
+
+    written = await repo.record_triage(
+        sweep_id,
+        [
+            FakeTriage(id=1, matches_target=True, confidence=0.8),
+            FakeTriage(id=404, matches_target=True, confidence=0.7),
+        ],
+    )
+
+    # It reports what it was handed; the caller compares that against the ids it sent.
+    assert written == 2
+    stored = await repo.sweep_candidates(sweep_id)
+    assert [c.item_id for c in stored] == [1]
+    assert stored[0].matches_target is True
+
+
+async def test_triaging_nothing_is_a_no_op(repo: Repo) -> None:
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    await repo.record_sweep_candidates(sweep_id, [make_candidate(1)])
+
+    assert await repo.record_triage(sweep_id, []) == 0
+    assert (await repo.sweep_candidates(sweep_id))[0].stage == "funnel"
+
+
+async def test_re_running_the_funnel_write_never_clears_a_triage_result(repo: Repo) -> None:
+    """Triage costs money; writing the funnel again must not erase what it bought."""
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    await repo.record_sweep_candidates(sweep_id, [make_candidate(5, rank_score=1.0)])
+    await repo.record_triage(
+        sweep_id, [FakeTriage(id=5, matches_target=True, confidence=0.77, reason="same jacket")]
+    )
+
+    await repo.record_sweep_candidates(sweep_id, [make_candidate(5, rank_score=2.0)])
+
+    stored = await repo.sweep_candidates(sweep_id)
+    assert len(stored) == 1
+    assert stored[0].rank_score == 2.0
+    assert stored[0].matches_target is True
+    assert stored[0].confidence == 0.77
+    assert stored[0].triage_reason == "same jacket"
+
+
+async def test_a_thumbnail_url_round_trips(repo: Repo) -> None:
+    """The small variant is what the triage stage is billed on, so it must be stored."""
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    await repo.record_sweep_candidates(
+        sweep_id, [make_candidate(1, thumb_url="https://images.vinted.net/1-thumb.jpeg")]
+    )
+
+    stored = await repo.sweep_candidates(sweep_id)
+    assert stored[0].thumb_url == "https://images.vinted.net/1-thumb.jpeg"
+    assert stored[0].photo_url == "https://images.vinted.net/1.jpeg"
+
+
+async def test_a_verdict_is_stored_on_the_candidate_not_on_items(repo: Repo, db: Database) -> None:
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    await repo.record_sweep_candidates(sweep_id, [make_candidate(1), make_candidate(2)])
+
+    wrote = await repo.record_verdict(
+        sweep_id,
+        1,
+        EnrichmentIn(
+            score=88,
+            model="Patagonia Torrentshell 3L",
+            retail_price=Decimal("180.00"),
+            retail_source="patagonia.com",
+            matches_query=True,
+            risk="no authenticity worries",
+            verdict="Half price for the current model.",
+        ),
+        judged_at=1_700_000_000,
+    )
+
+    assert wrote is True
+    stored = {c.item_id: c for c in await repo.sweep_candidates(sweep_id)}
+    judged = stored[1]
+    assert judged.stage == "verdict"
+    assert judged.verdict_score == 88
+    assert judged.verdict_model == "Patagonia Torrentshell 3L"
+    assert judged.verdict_retail_price == 180.0
+    assert judged.verdict_retail_source == "patagonia.com"
+    assert judged.verdict_matches_query is True
+    assert judged.verdict_risk == "no authenticity worries"
+    assert judged.verdict_text == "Half price for the current model."
+    assert judged.judged_at == 1_700_000_000
+    assert stored[2].judged_at is None
+    # The whole point of the separate columns: no items row was created for a candidate.
+    assert await db.fetch_value("SELECT COUNT(*) FROM items") == 0
+
+
+async def test_a_partial_verdict_stores_what_it_has(repo: Repo) -> None:
+    """Everything in EnrichmentIn is optional, and a partial answer beats none."""
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    await repo.record_sweep_candidates(sweep_id, [make_candidate(1)])
+
+    assert await repo.record_verdict(
+        sweep_id, 1, EnrichmentIn(verdict="Looks right but the photos are dark."), judged_at=17
+    )
+
+    stored = (await repo.sweep_candidates(sweep_id))[0]
+    assert stored.stage == "verdict"
+    assert stored.verdict_text == "Looks right but the photos are dark."
+    assert stored.verdict_score is None
+    assert stored.verdict_matches_query is None
+    assert stored.judged_at == 17
+
+
+async def test_a_verdict_for_an_item_outside_the_sweep_reports_that_it_missed(repo: Repo) -> None:
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    await repo.record_sweep_candidates(sweep_id, [make_candidate(1)])
+
+    assert await repo.record_verdict(sweep_id, 404, EnrichmentIn(score=50), judged_at=17) is False
+    assert await repo.record_verdict(4242, 1, EnrichmentIn(score=50), judged_at=17) is False
+
+
+async def test_a_verdict_never_clears_the_triage_answer_underneath_it(repo: Repo) -> None:
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    await repo.record_sweep_candidates(sweep_id, [make_candidate(1)])
+    await repo.record_triage(
+        sweep_id, [FakeTriage(id=1, matches_target=True, confidence=0.9, reason="same jacket")]
+    )
+
+    await repo.record_verdict(sweep_id, 1, EnrichmentIn(score=70), judged_at=17)
+
+    stored = (await repo.sweep_candidates(sweep_id))[0]
+    assert stored.matches_target is True
+    assert stored.confidence == 0.9
+    assert stored.triage_reason == "same jacket"
+
+
+async def test_sweep_cost_accumulates_across_stages(repo: Repo) -> None:
+    """A run that dies after triage still reports what triage cost, so the writer adds."""
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+
+    await repo.add_sweep_cost(sweep_id, 12_000, 0.04)
+    await repo.add_sweep_cost(sweep_id, 14_600, 0.06)
+
+    run = await repo.get_sweep_run(sweep_id)
+    assert run is not None
+    assert run.tokens == 26_600
+    assert run.cost_eur == pytest.approx(0.10)
+
+
+async def test_adding_cost_to_a_sweep_that_does_not_exist_is_harmless(repo: Repo) -> None:
+    await repo.add_sweep_cost(4242, 100, 1.0)
+
+    assert await repo.get_sweep_run(4242) is None

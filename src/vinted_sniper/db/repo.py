@@ -9,9 +9,10 @@ from __future__ import annotations
 import itertools
 import json
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 import aiosqlite
 
@@ -214,6 +215,39 @@ class SweepCandidate:
     seller_login: str | None = None
     promoted: bool = False
     sweep_id: int = 0
+    # The small variant the triage stage is billed on; falls back to the full-size cover.
+    thumb_url: str | None = None
+    # Three-valued on purpose: None = never triaged, False = rejected, True = recognised.
+    matches_target: bool | None = None
+    confidence: float | None = None
+    triage_reason: str | None = None
+    # The full photo verdict, same answer shape as `items`' enrich_* columns but kept
+    # here: a sweep candidate has no `items` row and must never gain one.
+    verdict_score: int | None = None
+    verdict_model: str | None = None
+    verdict_retail_price: float | None = None
+    verdict_retail_source: str | None = None
+    verdict_matches_query: bool | None = None
+    verdict_risk: str | None = None
+    verdict_text: str | None = None
+    judged_at: int | None = None
+
+
+class TriageOutcome(Protocol):
+    """One item's thumbnail verdict, as `magic.triage` returns it.
+
+    Structural rather than a concrete class so the repo stays free of the AI stage's
+    response models: anything carrying these four attributes can be persisted.
+    """
+
+    @property
+    def id(self) -> int: ...
+    @property
+    def matches_target(self) -> bool: ...
+    @property
+    def confidence(self) -> float: ...
+    @property
+    def reason(self) -> str | None: ...
 
 
 def _json_list(raw: str | None) -> list[str] | None:
@@ -1349,14 +1383,20 @@ class Repo:
         )
 
     async def record_sweep_candidates(self, sweep_id: int, candidates: list[SweepCandidate]) -> int:
-        """Store the kept listings in one write, numbering them in the order given."""
+        """Store the kept listings in one write, numbering them in the order given.
+
+        The conflict clause updates only the funnel's own columns. The triage and verdict
+        columns are left out **deliberately**: re-running the funnel write must never
+        clear an AI answer that already landed on a row, because that answer cost money
+        and cannot be recovered by writing the funnel again.
+        """
         if not candidates:
             return 0
         await self._db.execute_many(
             "INSERT INTO sweep_candidates (sweep_id, item_id, rank_score, position, stage, "
             "reason, title, url, price, total_price, currency, brand, size, condition, "
-            "photo_url, photo_urls_json, seller_login, promoted) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "photo_url, photo_urls_json, thumb_url, seller_login, promoted) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(sweep_id, item_id) DO UPDATE SET rank_score = excluded.rank_score, "
             "position = excluded.position, stage = excluded.stage, reason = excluded.reason",
             [
@@ -1377,6 +1417,7 @@ class Repo:
                     candidate.condition,
                     candidate.photo_url,
                     json.dumps(candidate.photo_urls),
+                    candidate.thumb_url,
                     candidate.seller_login,
                     int(candidate.promoted),
                 )
@@ -1425,6 +1466,79 @@ class Repo:
         )
         return [self._to_sweep_candidate(row) for row in rows]
 
+    async def record_triage(self, sweep_id: int, results: Iterable[TriageOutcome]) -> int:
+        """Attach a batch of thumbnail verdicts to candidates already stored.
+
+        An update in place, not a re-insert: the funnel row is what triage judged, and a
+        batch that comes back for only some of the ids must leave the rest alone rather
+        than rewriting a truncated set. An id that is not in this sweep simply matches no
+        row — no error, because the caller logs that mismatch itself and a flow inventing
+        an id must not take the whole batch down with it.
+
+        Returns how many results were written, which is what the caller compares against
+        the number of rows it expected to move.
+        """
+        rows = [
+            (
+                int(result.matches_target),
+                float(result.confidence),
+                result.reason,
+                sweep_id,
+                int(result.id),
+            )
+            for result in results
+        ]
+        if not rows:
+            return 0
+        await self._db.execute_many(
+            "UPDATE sweep_candidates SET stage = 'triage', matches_target = ?, "
+            "confidence = ?, triage_reason = ? WHERE sweep_id = ? AND item_id = ?",
+            rows,
+        )
+        return len(rows)
+
+    async def record_verdict(
+        self, sweep_id: int, item_id: int, verdict: EnrichmentIn, judged_at: int
+    ) -> bool:
+        """Store a full photo verdict on one candidate. False if it is not in the sweep.
+
+        Deliberately not `store_enrichment()`: that writes `items`, where a sweep
+        candidate has no row and must never gain one, so the same call would silently do
+        nothing. Same answer shape, different table.
+        """
+        changed = await self._db.execute(
+            "UPDATE sweep_candidates SET stage = 'verdict', verdict_score = ?, "
+            "verdict_model = ?, verdict_retail_price = ?, verdict_retail_source = ?, "
+            "verdict_matches_query = ?, verdict_risk = ?, verdict_text = ?, judged_at = ? "
+            "WHERE sweep_id = ? AND item_id = ?",
+            (
+                verdict.score,
+                verdict.model,
+                float(verdict.retail_price) if verdict.retail_price is not None else None,
+                verdict.retail_source,
+                None if verdict.matches_query is None else int(verdict.matches_query),
+                verdict.risk,
+                verdict.verdict,
+                judged_at,
+                sweep_id,
+                item_id,
+            ),
+        )
+        return changed > 0
+
+    async def add_sweep_cost(self, sweep_id: int, tokens: int, cost_eur: float) -> None:
+        """Add what a stage just spent to the run's running total.
+
+        Additive rather than assignment, and called as each stage finishes: a run whose
+        triage succeeded and whose verdict stage then died still reports what triage
+        cost. Same discipline as the `status='partial'` arm — never discard work already
+        paid for, including the bill for it.
+        """
+        await self._db.execute(
+            "UPDATE sweep_runs SET tokens = tokens + ?, cost_eur = cost_eur + ? WHERE id = ?",
+            (int(tokens), float(cost_eur), sweep_id),
+        )
+
     @staticmethod
     def _to_sweep_run(row: aiosqlite.Row) -> SweepRun:
         funnel = json.loads(row["funnel_json"] or "{}")
@@ -1467,6 +1581,21 @@ class Repo:
             photo_urls=_json_list(row["photo_urls_json"]) or [],
             seller_login=row["seller_login"],
             promoted=bool(row["promoted"]),
+            thumb_url=row["thumb_url"],
+            # NULL stays None: "never triaged" is not "triaged and rejected".
+            matches_target=None if row["matches_target"] is None else bool(row["matches_target"]),
+            confidence=row["confidence"],
+            triage_reason=row["triage_reason"],
+            verdict_score=row["verdict_score"],
+            verdict_model=row["verdict_model"],
+            verdict_retail_price=row["verdict_retail_price"],
+            verdict_retail_source=row["verdict_retail_source"],
+            verdict_matches_query=(
+                None if row["verdict_matches_query"] is None else bool(row["verdict_matches_query"])
+            ),
+            verdict_risk=row["verdict_risk"],
+            verdict_text=row["verdict_text"],
+            judged_at=row["judged_at"],
         )
 
     # --- Miscellaneous state -------------------------------------------------------
