@@ -135,6 +135,20 @@
                 <input type="text" id="e-block-{{ q.id }}" name="blocked_sellers" value="{{ q.blocked_sellers | join(', ') }}">
               </div>
             </div>
+            {% if destinations %}
+            <div style="margin-top:.85rem">
+              <label>Send alerts to {{ help('Which destinations this search feeds. A search with none selected still records listings, it just tells nobody.') }}</label>
+              <div class="row">
+                {% for destination in destinations if destination.active %}
+                <label class="row" style="margin:0;color:var(--ink)">
+                  <input type="checkbox" name="destination_ids" value="{{ destination.id }}"
+                         {% if destination.id in routes.get(q.id, ()) %}checked{% endif %}>
+                  {{ destination.name }} <span class="muted">({{ destination.kind }})</span>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+            {% endif %}
             <div class="row" style="margin-top:.8rem">
               <button type="submit">Save changes</button>
               <button type="button" class="quiet" data-edit="{{ search.query_id }}">Cancel</button>

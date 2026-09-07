@@ -175,6 +175,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         snapshot = await health.snapshot(repo)
         destinations = await repo.list_destinations()
         queries = {query.id: query for query in await repo.list_queries()}
+        routes = {
+            query_id: set(await repo.destination_ids_for_query(query_id)) for query_id in queries
+        }
         watched_tlds = [search.tld for search in snapshot.searches]
         return TEMPLATES.TemplateResponse(
             request,
@@ -183,6 +186,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
                 "nav": "searches",
                 "snapshot": snapshot,
                 "queries": queries,
+                "routes": routes,
                 "destinations": destinations,
                 "languages": i18n.LANGUAGES,
                 "first_run_newest": settings.first_run_mode == "newest",
@@ -390,6 +394,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         min_seller_reviews: Annotated[str, Form()] = "",
         blocked_sellers: Annotated[str, Form()] = "",
         max_market_percentile: Annotated[str, Form()] = "",
+        destination_ids: Annotated[list[int] | None, Form()] = None,
         _: None = guard,
     ) -> Response:
         query = await repo.get_query(query_id)
@@ -417,6 +422,14 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             blocked_sellers=_csv(blocked_sellers),
             max_market_percentile=_percent_or_none(max_market_percentile),
         )
+        # The edit form carries the same destination checkboxes as the add form, so a save
+        # is also a routing change: unchecked means "stop sending there".
+        wanted = set(destination_ids or [])
+        current = set(await repo.destination_ids_for_query(query_id))
+        for destination_id in current - wanted:
+            await repo.unroute(query_id, destination_id)
+        for destination_id in wanted - current:
+            await repo.route(query_id, destination_id)
         return _redirect_with_notice("Saved. The new settings apply from the next check.")
 
     @app.post("/searches/interval")

@@ -697,6 +697,51 @@ async def test_editing_with_a_cleared_interval_keeps_the_old_one(
     assert edited is not None and edited.poll_interval_s == 300
 
 
+async def test_editing_a_search_updates_its_destinations(signed_in: TestClient, repo: Repo) -> None:
+    telegram_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    webhook_id = await repo.add_destination(
+        kind="webhook", name="agent", config={"url": "http://x"}
+    )
+    signed_in.post(
+        "/searches",
+        data={
+            "url": "https://www.vinted.fr/catalog?search_text=nike",
+            "destination_ids": [str(telegram_id)],
+        },
+        follow_redirects=False,
+    )
+    (query,) = await repo.list_queries()
+    assert await repo.destination_ids_for_query(query.id) == [telegram_id]
+
+    response = signed_in.post(
+        f"/searches/{query.id}/edit",
+        data={"destination_ids": [str(webhook_id)]},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303 and "error=" not in response.headers["location"]
+    assert await repo.destination_ids_for_query(query.id) == [webhook_id]
+
+
+async def test_editing_a_search_with_no_boxes_ticked_unroutes_it(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    signed_in.post(
+        "/searches",
+        data={
+            "url": "https://www.vinted.fr/catalog?search_text=nike",
+            "destination_ids": [str(destination_id)],
+        },
+        follow_redirects=False,
+    )
+    (query,) = await repo.list_queries()
+
+    signed_in.post(f"/searches/{query.id}/edit", data={}, follow_redirects=False)
+
+    assert await repo.destination_ids_for_query(query.id) == []
+
+
 async def test_apply_to_all_with_a_blank_interval_says_so_instead_of_crashing(
     signed_in: TestClient, repo: Repo
 ) -> None:
