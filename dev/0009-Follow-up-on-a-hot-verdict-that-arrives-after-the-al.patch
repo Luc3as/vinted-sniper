@@ -1,0 +1,251 @@
+From 98efba3837eb96e2c1d53cf981c2f5ff98734266 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:26:30 +0000
+Subject: [PATCH 09/25] Follow up on a hot verdict that arrives after the alert
+
+The enrichment loop held the alert for a while and then sent it as-is if no
+verdict had come. A verdict landing a minute later was stored but never
+mentioned, which is exactly the case where it matters most: the agent took
+its time because the product was worth a proper look. Now a late verdict
+that scores at least ENRICHMENT_HIGHLIGHT_SCORE (and does not call the
+listing the wrong product) queues a short "verdict is in: hot deal"
+follow-up to the same chat destinations. A late "nothing special" stays
+quiet. Third notification kind, hence another outbox rebuild (0008).
+---
+ docs/enrichment.md                            |  5 ++-
+ .../migrations/0008_verdict_notifications.sql | 25 +++++++++++++
+ src/vinted_sniper/db/repo.py                  | 32 +++++++++++++++-
+ src/vinted_sniper/deliver/ntfy.py             |  2 +-
+ src/vinted_sniper/deliver/telegram.py         | 21 ++++++++++-
+ src/vinted_sniper/web/server.py               |  4 +-
+ tests/integration/test_delivery.py            | 37 +++++++++++++++++++
+ 7 files changed, 120 insertions(+), 6 deletions(-)
+ create mode 100644 src/vinted_sniper/db/migrations/0008_verdict_notifications.sql
+
+diff --git a/docs/enrichment.md b/docs/enrichment.md
+index f445c89..86c9160 100644
+--- a/docs/enrichment.md
++++ b/docs/enrichment.md
+@@ -22,7 +22,10 @@ nothing posted in time?       → the alert goes out as it always did
+ ```
+ 
+ Silence from the agent costs a delay, never an alert. If the verdict arrives after the
+-alert went out, it is stored (the dashboard shows it) but not re-sent.
++alert went out, it is stored (the dashboard shows it) and, when it scores at least
++`ENRICHMENT_HIGHLIGHT_SCORE` and does not say the listing is the wrong product, a short
++"verdict is in: hot deal" follow-up goes to the same chat destinations. A late verdict
++that says "nothing special" is kept quiet: it would not earn a second message.
+ 
+ ## Setting it up
+ 
+diff --git a/src/vinted_sniper/db/migrations/0008_verdict_notifications.sql b/src/vinted_sniper/db/migrations/0008_verdict_notifications.sql
+new file mode 100644
+index 0000000..0c35ae3
+--- /dev/null
++++ b/src/vinted_sniper/db/migrations/0008_verdict_notifications.sql
+@@ -0,0 +1,25 @@
++-- A third kind of notification: a verdict that arrived after the listing's alert had
++-- already gone out. Only sent for hot deals — a late "meh" is not worth a second message.
++-- Same rebuild dance as 0006: SQLite cannot widen a CHECK in place.
++CREATE TABLE outbox_new (
++    id               INTEGER PRIMARY KEY AUTOINCREMENT,
++    item_id          INTEGER NOT NULL,
++    query_id         INTEGER NOT NULL,
++    destination_id   INTEGER NOT NULL REFERENCES destinations(id) ON DELETE CASCADE,
++    status           TEXT    NOT NULL DEFAULT 'pending'
++                     CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'cancelled')),
++    attempts         INTEGER NOT NULL DEFAULT 0,
++    next_attempt_at  INTEGER NOT NULL,
++    lease_expires_at INTEGER,
++    last_error       TEXT,
++    created_at       INTEGER NOT NULL,
++    sent_at          INTEGER,
++    kind             TEXT    NOT NULL DEFAULT 'new' CHECK (kind IN ('new', 'price_drop', 'verdict')),
++    previous_price   REAL    NOT NULL DEFAULT 0,
++    UNIQUE (item_id, destination_id, kind, previous_price)
++);
++
++INSERT INTO outbox_new SELECT * FROM outbox;
++DROP TABLE outbox;
++ALTER TABLE outbox_new RENAME TO outbox;
++CREATE INDEX idx_outbox_claim ON outbox(destination_id, status, next_attempt_at);
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index 7ee6e40..495b731 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -106,8 +106,14 @@ class PendingNotification:
+     def is_price_drop(self) -> bool:
+         return self.kind == "price_drop"
+ 
++    @property
++    def is_verdict(self) -> bool:
++        return self.kind == "verdict"
++
+     def headline(self) -> str:
+         """What kind of news this is, for the top of a message."""
++        if self.is_verdict:
++            return "Verdict is in"
+         if not self.is_price_drop:
+             return "New match"
+         item = self.item
+@@ -578,9 +584,15 @@ class Repo:
+         )
+         return {row["id"] for row in rows}
+ 
+-    async def store_enrichment(self, item_id: int, verdict: EnrichmentIn) -> bool:
++    async def store_enrichment(
++        self, item_id: int, verdict: EnrichmentIn, *, followup_min_score: int | None = None
++    ) -> bool:
+         """Record an outside verdict and release any held notification for the listing.
+ 
++        If the alert has already gone out and the verdict scores at least
++        `followup_min_score`, a short follow-up is queued for the same chat destinations —
++        a hot deal is worth a second message; a late "nothing special" is not.
++
+         Returns False if the listing is unknown (pruned, or never recorded).
+         """
+         now = int(time.time())
+@@ -603,11 +615,27 @@ class Repo:
+             )
+             if cursor.rowcount == 0:
+                 return False
+-            await conn.execute(
++            released = await conn.execute(
+                 "UPDATE outbox SET next_attempt_at = ? "
+                 "WHERE item_id = ? AND status = 'pending' AND next_attempt_at > ?",
+                 (now, item_id, now),
+             )
++            hot = (
++                followup_min_score is not None
++                and verdict.score is not None
++                and verdict.score >= followup_min_score
++                and verdict.matches_query is not False
++            )
++            if hot and released.rowcount == 0:
++                await conn.execute(
++                    "INSERT OR IGNORE INTO outbox (item_id, query_id, destination_id, "
++                    "next_attempt_at, created_at, kind) "
++                    "SELECT o.item_id, o.query_id, o.destination_id, ?, ?, 'verdict' "
++                    "FROM outbox o JOIN destinations d ON d.id = o.destination_id "
++                    "WHERE o.item_id = ? AND o.kind = 'new' AND o.status = 'sent' "
++                    "AND d.kind != 'webhook' AND d.active = 1",
++                    (now, now, item_id),
++                )
+         return True
+ 
+     async def current_prices(self, item_ids: list[int]) -> dict[int, Decimal | None]:
+diff --git a/src/vinted_sniper/deliver/ntfy.py b/src/vinted_sniper/deliver/ntfy.py
+index 989b301..3a96f0f 100644
+--- a/src/vinted_sniper/deliver/ntfy.py
++++ b/src/vinted_sniper/deliver/ntfy.py
+@@ -51,7 +51,7 @@ class NtfySender:
+             headers = {
+                 "Title": (
+                     f"{notification.headline()} — {item.title}"
+-                    if notification.is_price_drop
++                    if notification.is_price_drop or notification.is_verdict
+                     else item.title
+                 )[:200],
+                 "Click": item.url,
+diff --git a/src/vinted_sniper/deliver/telegram.py b/src/vinted_sniper/deliver/telegram.py
+index cc1c55f..26b7bc3 100644
+--- a/src/vinted_sniper/deliver/telegram.py
++++ b/src/vinted_sniper/deliver/telegram.py
+@@ -87,7 +87,9 @@ class TelegramSender:
+         for notification in individually:
+             result = await self._post(
+                 "sendMessage",
+-                self._listing_payload(
++                self._verdict_payload(notification)
++                if notification.is_verdict
++                else self._listing_payload(
+                     notification.item,
+                     query_id=notification.query_id,
+                     headline=notification.headline() if notification.is_price_drop else None,
+@@ -196,6 +198,23 @@ class TelegramSender:
+             payload["link_preview_options"] = {"is_disabled": True}
+         return payload
+ 
++    def _verdict_payload(self, notification: PendingNotification) -> dict[str, Any]:
++        """A follow-up for a verdict that arrived after the alert: short, and only sent
++        when the deal is hot, so it earns its buzz."""
++        item = notification.item
++        payable = item.total_price if item.total_price is not None else item.price
++        lines = [f"🔥 <b>Verdict is in: hot deal</b> · {html.escape(item.title)}"]
++        if notification.enrichment is not None:
++            summary, details = notification.enrichment.lines(payable, item.currency)
++            if summary:
++                lines.append(html.escape(summary))
++            lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
++        return self._base_payload() | {
++            "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
++            "reply_markup": {"inline_keyboard": [[{"text": "Open listing", "url": item.url}]]},
++            "link_preview_options": {"is_disabled": True},
++        }
++
+     def _weave_verdict(
+         self, lines: list[str], item: Item, verdict: Enrichment, *, silent: bool
+     ) -> None:
+diff --git a/src/vinted_sniper/web/server.py b/src/vinted_sniper/web/server.py
+index 06fa821..1bb6e09 100644
+--- a/src/vinted_sniper/web/server.py
++++ b/src/vinted_sniper/web/server.py
+@@ -154,7 +154,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+     @app.post("/api/items/{item_id}/enrichment")
+     async def post_enrichment(item_id: int, verdict: EnrichmentIn, _: None = guard) -> JSONResponse:
+         """What an outside agent concluded about a listing. Releases any held alert."""
+-        if not await repo.store_enrichment(item_id, verdict):
++        if not await repo.store_enrichment(
++            item_id, verdict, followup_min_score=settings.enrichment_highlight_score
++        ):
+             raise HTTPException(status_code=404, detail="no such listing")
+         log.info(
+             "enrichment.received",
+diff --git a/tests/integration/test_delivery.py b/tests/integration/test_delivery.py
+index 563313a..76b2abd 100644
+--- a/tests/integration/test_delivery.py
++++ b/tests/integration/test_delivery.py
+@@ -436,3 +436,40 @@ async def test_a_verdict_for_an_unknown_listing_is_refused(repo: Repo) -> None:
+ 
+ def endpoint_last_request(endpoint: FakeEndpoint) -> httpx.Request:
+     return endpoint.requests[-1]
++
++
++async def test_a_hot_verdict_arriving_late_earns_a_follow_up_but_a_dull_one_does_not(
++    repo: Repo, settings: Settings
++) -> None:
++    query = await a_search(repo)
++    phone = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
++    await repo.record_new_items(query, [listing(1), listing(2)], [phone])
++    endpoint = FakeEndpoint()
++    dispatcher = make_dispatcher(repo, settings, endpoint)
++    assert await dispatcher.drain() == 2, "both alerts went out before any verdict"
++
++    assert await repo.store_enrichment(
++        1, EnrichmentIn(score=92, verdict="Berte."), followup_min_score=75
++    )
++    assert await repo.store_enrichment(
++        2, EnrichmentIn(score=30, verdict="Nič moc."), followup_min_score=75
++    )
++
++    batch = await repo.claim_batch(phone, 10)
++    assert [n.item.item_id for n in batch] == [1]
++    assert batch[0].is_verdict
++    assert batch[0].enrichment is not None and batch[0].enrichment.score == 92
++    assert batch[0].headline() == "Verdict is in"
++
++
++async def test_a_verdict_that_arrives_in_time_does_not_also_send_a_follow_up(
++    repo: Repo, settings: Settings
++) -> None:
++    query = await a_search(repo)
++    phone = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
++    await repo.record_new_items(query, [listing(1)], [phone], hold_s=90)
++
++    assert await repo.store_enrichment(1, EnrichmentIn(score=95), followup_min_score=75)
++
++    batch = await repo.claim_batch(phone, 10)
++    assert len(batch) == 1 and batch[0].kind == "new", "released, enriched, once"
+-- 
+2.43.0
+

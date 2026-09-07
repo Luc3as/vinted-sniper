@@ -165,6 +165,57 @@ class PendingNotification:
         return t("Price drop")
 
 
+@dataclass(frozen=True, slots=True)
+class SweepRun:
+    """One relevance sweep: a single pass over existing stock, start to finish."""
+
+    id: int
+    tld: str
+    params: dict[str, str]
+    keywords: list[str]
+    started_at: int
+    # A sweep runs before there is a saved search to hang it on, so this stays None until
+    # someone turns the sweep into a standing watch.
+    query_id: int | None = None
+    finished_at: int | None = None
+    status: str = "running"
+    pages_fetched: int = 0
+    items_seen: int = 0
+    candidates: int = 0
+    # Stage name to how many listings survived it, in the order the sweep applied them.
+    funnel: dict[str, int] = field(default_factory=dict)
+    error: str | None = None
+    tokens: int = 0
+    cost_eur: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class SweepCandidate:
+    """A listing a sweep kept, with enough of it copied in to show it later."""
+
+    item_id: int
+    title: str
+    url: str
+    # Higher is a better match. Title keywords rank here; they never gate.
+    rank_score: float = 0.0
+    # Where it sat in the order the sweep handed it over; breaks rank ties reproducibly.
+    position: int = 0
+    # How far it got: "funnel", then "triage" and "verdict" once those stages exist.
+    stage: str = "funnel"
+    reason: str | None = None
+    price: float | None = None
+    total_price: float | None = None
+    currency: str | None = None
+    brand: str | None = None
+    size: str | None = None
+    condition: str | None = None
+    photo_url: str | None = None
+    photo_urls: list[str] = field(default_factory=list)
+    seller_login: str | None = None
+    promoted: bool = False
+    sweep_id: int = 0
+
+
 def _json_list(raw: str | None) -> list[str] | None:
     if not raw:
         return None
@@ -1275,6 +1326,148 @@ class Repo:
             "SELECT COUNT(*) FROM outbox WHERE status IN ('pending', 'sending')"
         )
         return int(value or 0)
+
+    # --- Relevance sweeps ----------------------------------------------------------
+    #
+    # Deliberately separate from items/outbox: a sweep reads stock the standing poller has
+    # not necessarily seen, and writing any of it into `items` would make the poller treat
+    # those listings as already-alerted. See 0014_sweep_runs.sql.
+
+    async def create_sweep_run(
+        self,
+        *,
+        tld: str,
+        params: dict[str, str],
+        keywords: list[str],
+        query_id: int | None = None,
+    ) -> int:
+        """Open a sweep. The row exists from the start so a crashed run is still visible."""
+        return await self._db.insert(
+            "INSERT INTO sweep_runs (query_id, tld, params_json, keywords_json, started_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (query_id, tld, json.dumps(params), json.dumps(keywords), int(time.time())),
+        )
+
+    async def record_sweep_candidates(self, sweep_id: int, candidates: list[SweepCandidate]) -> int:
+        """Store the kept listings in one write, numbering them in the order given."""
+        if not candidates:
+            return 0
+        await self._db.execute_many(
+            "INSERT INTO sweep_candidates (sweep_id, item_id, rank_score, position, stage, "
+            "reason, title, url, price, total_price, currency, brand, size, condition, "
+            "photo_url, photo_urls_json, seller_login, promoted) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(sweep_id, item_id) DO UPDATE SET rank_score = excluded.rank_score, "
+            "position = excluded.position, stage = excluded.stage, reason = excluded.reason",
+            [
+                (
+                    sweep_id,
+                    candidate.item_id,
+                    float(candidate.rank_score),
+                    position,
+                    candidate.stage,
+                    candidate.reason,
+                    candidate.title,
+                    candidate.url,
+                    candidate.price,
+                    candidate.total_price,
+                    candidate.currency,
+                    candidate.brand,
+                    candidate.size,
+                    candidate.condition,
+                    candidate.photo_url,
+                    json.dumps(candidate.photo_urls),
+                    candidate.seller_login,
+                    int(candidate.promoted),
+                )
+                for position, candidate in enumerate(candidates)
+            ],
+        )
+        return len(candidates)
+
+    async def finish_sweep_run(
+        self,
+        sweep_id: int,
+        *,
+        status: str,
+        pages_fetched: int,
+        items_seen: int,
+        candidates: int,
+        funnel: dict[str, int],
+        error: str | None = None,
+    ) -> None:
+        """Close a sweep with its counts, whether it succeeded or died partway."""
+        await self._db.execute(
+            "UPDATE sweep_runs SET status = ?, finished_at = ?, pages_fetched = ?, "
+            "items_seen = ?, candidates = ?, funnel_json = ?, error = ? WHERE id = ?",
+            (
+                status,
+                int(time.time()),
+                pages_fetched,
+                items_seen,
+                candidates,
+                json.dumps(funnel),
+                error[:500] if error else None,
+                sweep_id,
+            ),
+        )
+
+    async def get_sweep_run(self, sweep_id: int) -> SweepRun | None:
+        row = await self._db.fetch_one("SELECT * FROM sweep_runs WHERE id = ?", (sweep_id,))
+        return None if row is None else self._to_sweep_run(row)
+
+    async def sweep_candidates(self, sweep_id: int) -> list[SweepCandidate]:
+        """Best first, which is the only order a sweep result is ever read in."""
+        rows = await self._db.fetch_all(
+            "SELECT * FROM sweep_candidates WHERE sweep_id = ? "
+            "ORDER BY rank_score DESC, position ASC",
+            (sweep_id,),
+        )
+        return [self._to_sweep_candidate(row) for row in rows]
+
+    @staticmethod
+    def _to_sweep_run(row: aiosqlite.Row) -> SweepRun:
+        funnel = json.loads(row["funnel_json"] or "{}")
+        return SweepRun(
+            id=row["id"],
+            query_id=row["query_id"],
+            tld=row["tld"],
+            params=json.loads(row["params_json"]),
+            keywords=_json_list(row["keywords_json"]) or [],
+            started_at=int(row["started_at"]),
+            finished_at=row["finished_at"],
+            status=row["status"],
+            pages_fetched=int(row["pages_fetched"]),
+            items_seen=int(row["items_seen"]),
+            candidates=int(row["candidates"]),
+            funnel={str(k): int(v) for k, v in funnel.items()} if isinstance(funnel, dict) else {},
+            error=row["error"],
+            tokens=int(row["tokens"]),
+            cost_eur=float(row["cost_eur"]),
+        )
+
+    @staticmethod
+    def _to_sweep_candidate(row: aiosqlite.Row) -> SweepCandidate:
+        return SweepCandidate(
+            sweep_id=row["sweep_id"],
+            item_id=row["item_id"],
+            rank_score=float(row["rank_score"]),
+            position=int(row["position"]),
+            stage=row["stage"],
+            reason=row["reason"],
+            title=row["title"],
+            url=row["url"],
+            price=row["price"],
+            total_price=row["total_price"],
+            currency=row["currency"],
+            brand=row["brand"],
+            size=row["size"],
+            condition=row["condition"],
+            photo_url=row["photo_url"],
+            photo_urls=_json_list(row["photo_urls_json"]) or [],
+            seller_login=row["seller_login"],
+            promoted=bool(row["promoted"]),
+        )
 
     # --- Miscellaneous state -------------------------------------------------------
 

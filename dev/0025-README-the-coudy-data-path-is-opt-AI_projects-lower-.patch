@@ -1,0 +1,26 @@
+From e789d7a959cfcd3f669dc76e6dff305d8ff1e225 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 20:46:49 +0000
+Subject: [PATCH 25/25] README: the coudy data path is /opt/AI_projects
+ (lower-case projects)
+
+---
+ README.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/README.md b/README.md
+index 92d86c3..8f7438b 100644
+--- a/README.md
++++ b/README.md
+@@ -132,7 +132,7 @@ services:
+       - VINTED_SNIPER_ENRICHMENT_WAIT_S=90
+       - VINTED_SNIPER_WEB_PUBLIC_URL=http://<host-ip>:8000
+     volumes:
+-      - /opt/AI_PROJECTS/vinted-sniper-data:/data
++      - /opt/AI_projects/vinted-sniper-data:/data
+     ports: ["8000:8000"]
+     read_only: true
+     tmpfs: [/tmp]
+-- 
+2.43.0
+

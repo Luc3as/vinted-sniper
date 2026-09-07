@@ -1,0 +1,391 @@
+From 7668e5bff14594907155c7be782087766b6392f4 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 16:47:38 +0000
+Subject: [PATCH 03/25] Act on an alert from the alert: skip the seller, pause
+ the search
+
+The two things people want to do right after reading a notification are
+"never show me this seller again" and "enough of this search for tonight",
+and both meant opening the dashboard from a phone. Each Telegram alert now
+has a second row of buttons for exactly those, handled by the bot already
+running for pairing and /status. A /resume <id> command undoes the pause,
+and /status now shows search ids so the argument is easy to find.
+
+Buttons are only honoured from a chat that is a paired destination: anyone
+who can see an alert can see the button, which is not the same as anyone
+being allowed to press it. Callback data stays inside Telegram's 64-byte
+limit; a seller name too long to fit simply loses its button.
+
+Repo.block_seller() appends to the skip list added in the previous change,
+case-insensitively and idempotently.
+---
+ docs/configuration.md                    |  2 +-
+ pyproject.toml                           |  2 +
+ src/vinted_sniper/botctl/telegram_bot.py | 90 ++++++++++++++++++++++--
+ src/vinted_sniper/db/repo.py             | 14 ++++
+ src/vinted_sniper/deliver/telegram.py    | 46 +++++++++---
+ tests/integration/test_delivery.py       | 34 ++++++++-
+ tests/unit/test_senders.py               | 23 +++++-
+ 7 files changed, 192 insertions(+), 19 deletions(-)
+
+diff --git a/docs/configuration.md b/docs/configuration.md
+index b63b115..bb4e98d 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -129,7 +129,7 @@ Where to get each kind of target:
+ | Kind | Setup |
+ |---|---|
+ | `discord` | In your server: Settings → Integrations → Webhooks → New Webhook → Copy URL. Nothing to invite, nothing to host. |
+-| `telegram` | Create a bot with [@BotFather](https://t.me/BotFather), set `TELEGRAM_BOT_TOKEN`, then run `vinted-sniper pair-telegram` and tap the link it prints. It finds your chat id for you. |
++| `telegram` | Create a bot with [@BotFather](https://t.me/BotFather), set `TELEGRAM_BOT_TOKEN`, then run `vinted-sniper pair-telegram` and tap the link it prints. It finds your chat id for you. Each alert carries two extra buttons the bot handles itself: skip that seller for the search, and pause the search (`/resume <id>` brings it back). Buttons only work from a paired chat. |
+ | `ntfy` | Pick a topic name, install the ntfy app. No account. |
+ | `webhook` | Any URL you control: n8n, Home Assistant, a script. Payload below. |
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index 3430e5d..a4b19db 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -94,6 +94,8 @@ ignore = [
+ # up — and each needs its own early exit. Splitting them would hide the flow, not clarify it.
+ "src/vinted_sniper/deliver/dispatcher.py" = ["C901", "PLR0911"]
+ "src/vinted_sniper/engine/poller.py" = ["PLR0911"]  # one return per error type is the point
++# The bot is one handler per command and button, registered in one closure by design.
++"src/vinted_sniper/botctl/telegram_bot.py" = ["C901", "PLR0915"]
+ 
+ [tool.ruff.lint.mccabe]
+ max-complexity = 10
+diff --git a/src/vinted_sniper/botctl/telegram_bot.py b/src/vinted_sniper/botctl/telegram_bot.py
+index fc4801e..c911831 100644
+--- a/src/vinted_sniper/botctl/telegram_bot.py
++++ b/src/vinted_sniper/botctl/telegram_bot.py
+@@ -6,7 +6,12 @@ lose them. Instead the app prints a link, you tap it, the bot receives `/start`
+ one-time code, and it records the chat itself. Works the same for a group or a forum topic.
+ 
+ Beyond that it answers `/status`, so you can ask whether everything is still running without
+-opening the web UI.
++opening the web UI, and it handles the action buttons under each alert — skipping a seller
++or pausing the search — because those are the two things people reach for right after
++reading one, and the dashboard is a long way from a phone notification.
++
++Buttons are only honoured from a chat that is a paired destination. Anyone who can see the
++alert can see the button; that does not mean anyone should be able to press it.
+ """
+ 
+ from __future__ import annotations
+@@ -19,9 +24,10 @@ from typing import Any
+ 
+ from aiogram import Bot, Dispatcher, F
+ from aiogram.filters import Command, CommandObject
+-from aiogram.types import Message
++from aiogram.types import CallbackQuery, Message
+ 
+ from vinted_sniper.db.repo import Repo
++from vinted_sniper.deliver.telegram import CALLBACK_BLOCK_SELLER, CALLBACK_PAUSE_SEARCH
+ from vinted_sniper.engine import health
+ from vinted_sniper.log import get_logger
+ 
+@@ -129,21 +135,95 @@ def build_dispatcher(repo: Repo) -> Dispatcher:
+     async def handle_help(message: Message) -> None:
+         await message.answer(
+             "/status — is everything still running\n"
++            "/resume <id> — resume a search paused from an alert\n"
+             "/start <code> — connect this chat to vinted-sniper\n\n"
+-            "Searches and destinations are managed in vinted-sniper itself."
++            "Under each alert: skip that seller for the search, or pause the search.\n"
++            "Everything else is managed in vinted-sniper itself."
+         )
+ 
+     @dispatcher.message(Command("status"))
+     async def handle_status(message: Message) -> None:
+         await message.answer(await _status_text(repo), parse_mode="HTML")
+ 
++    @dispatcher.callback_query(F.data.startswith(f"{CALLBACK_BLOCK_SELLER}:"))
++    async def handle_block_seller(callback: CallbackQuery) -> None:
++        if not await _from_paired_chat(repo, callback):
++            await callback.answer("This chat is not connected to vinted-sniper.", show_alert=True)
++            return
++        _, _, rest = (callback.data or "").partition(":")
++        raw_id, _, login = rest.partition(":")
++        query_id = _int_or_none(raw_id)
++        if query_id is None or not login:
++            await callback.answer("That button is out of date.")
++            return
++        if await repo.block_seller(query_id, login):
++            log.info("telegram.seller_blocked", query_id=query_id, seller=login)
++            await callback.answer(f"Skipping {login} for this search from now on.")
++        else:
++            await callback.answer(f"{login} is already skipped (or the search is gone).")
++
++    @dispatcher.callback_query(F.data.startswith(f"{CALLBACK_PAUSE_SEARCH}:"))
++    async def handle_pause_search(callback: CallbackQuery) -> None:
++        if not await _from_paired_chat(repo, callback):
++            await callback.answer("This chat is not connected to vinted-sniper.", show_alert=True)
++            return
++        query_id = _int_or_none((callback.data or "").partition(":")[2])
++        query = await repo.get_query(query_id) if query_id is not None else None
++        if query is None:
++            await callback.answer("That search no longer exists.")
++            return
++        if query.paused:
++            await callback.answer(f"“{query.name}” is already paused.")
++            return
++        await repo.set_paused(query.id, True)
++        log.info("telegram.search_paused", query_id=query.id)
++        await callback.answer(
++            f"Paused “{query.name}”. Resume it from the dashboard or /resume {query.id}.",
++            show_alert=True,
++        )
++
++    @dispatcher.message(Command("resume"))
++    async def handle_resume(message: Message, command: CommandObject) -> None:
++        if not await _chat_is_paired(repo, message.chat.id):
++            await message.answer("This chat is not connected to vinted-sniper.")
++            return
++        query_id = _int_or_none((command.args or "").strip())
++        query = await repo.get_query(query_id) if query_id is not None else None
++        if query is None:
++            await message.answer("Usage: /resume <search id> — ids are in /status.")
++            return
++        await repo.set_paused(query.id, False)
++        await message.answer(f"Resumed “{query.name}”.")
++
+     @dispatcher.message(F.text)
+     async def handle_anything_else(message: Message) -> None:
+-        await message.answer("I understand /status and /help.")
++        await message.answer("I understand /status, /resume and /help.")
+ 
+     return dispatcher
+ 
+ 
++def _int_or_none(raw: str) -> int | None:
++    try:
++        return int(raw)
++    except ValueError:
++        return None
++
++
++async def _chat_is_paired(repo: Repo, chat_id: int) -> bool:
++    wanted = str(chat_id)
++    return any(
++        destination.kind == "telegram" and destination.config.get("chat_id") == wanted
++        for destination in await repo.list_destinations()
++    )
++
++
++async def _from_paired_chat(repo: Repo, callback: CallbackQuery) -> bool:
++    message = callback.message
++    if message is None:
++        return False
++    return await _chat_is_paired(repo, message.chat.id)
++
++
+ async def _status_text(repo: Repo) -> str:
+     snapshot = await health.snapshot(repo)
+     if not snapshot.searches:
+@@ -156,7 +236,7 @@ async def _status_text(repo: Repo) -> str:
+             if search.last_success_at
+             else "never"
+         )
+-        line = f"• {search.name} — {search.state}, last checked {last}"
++        line = f"• {search.name} (id {search.query_id}) — {search.state}, last checked {last}"
+         if search.state == "failing" and search.last_error:
+             line += f"\n  {search.last_error[:120]}"
+         lines.append(line)
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index 970a588..d358f14 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -174,6 +174,20 @@ class Repo:
+     async def delete_query(self, query_id: int) -> None:
+         await self._db.execute("DELETE FROM queries WHERE id = ?", (query_id,))
+ 
++    async def block_seller(self, query_id: int, seller_login: str) -> bool:
++        """Add a seller to a search's skip list. Returns False if already there or unknown."""
++        query = await self.get_query(query_id)
++        if query is None:
++            return False
++        login = seller_login.strip()
++        if not login or login.lower() in {s.lower() for s in query.blocked_sellers}:
++            return False
++        await self._db.execute(
++            "UPDATE queries SET blocked_sellers_json = ?, updated_at = ? WHERE id = ?",
++            (json.dumps([*query.blocked_sellers, login]), int(time.time()), query_id),
++        )
++        return True
++
+     @staticmethod
+     def _to_query(row: aiosqlite.Row) -> Query:
+         return Query(
+diff --git a/src/vinted_sniper/deliver/telegram.py b/src/vinted_sniper/deliver/telegram.py
+index 29a1801..523521f 100644
+--- a/src/vinted_sniper/deliver/telegram.py
++++ b/src/vinted_sniper/deliver/telegram.py
+@@ -82,7 +82,7 @@ class TelegramSender:
+         for notification in individually:
+             result = await self._post(
+                 "sendMessage",
+-                self._listing_payload(notification.item),
++                self._listing_payload(notification.item, query_id=notification.query_id),
+                 [notification.outbox_id],
+             )
+             if not result.delivered:
+@@ -127,7 +127,7 @@ class TelegramSender:
+             payload["message_thread_id"] = self._thread_id
+         return payload
+ 
+-    def _listing_payload(self, item: Item) -> dict[str, Any]:
++    def _listing_payload(self, item: Item, *, query_id: int | None = None) -> dict[str, Any]:
+         lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line())]
+ 
+         details = " · ".join(
+@@ -143,17 +143,22 @@ class TelegramSender:
+         if item.listed_at:
+             lines.append(f"Listed {item.listed_at.strftime('%H:%M UTC')}")
+ 
++        keyboard: list[list[dict[str, str]]] = [
++            [
++                {"text": "Open listing", "url": item.url},
++                {"text": "Message seller", "url": item.message_url},
++                {"text": "Buy", "url": item.buy_url},
++            ]
++        ]
++        # A second row of actions the bot handles itself: the two things people most
++        # often want to do from the alert without opening the dashboard.
++        actions = inline_actions(query_id, item.seller_login)
++        if actions:
++            keyboard.append(actions)
++
+         payload = self._base_payload() | {
+             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
+-            "reply_markup": {
+-                "inline_keyboard": [
+-                    [
+-                        {"text": "Open listing", "url": item.url},
+-                        {"text": "Message seller", "url": item.message_url},
+-                        {"text": "Buy", "url": item.buy_url},
+-                    ]
+-                ]
+-            },
++            "reply_markup": {"inline_keyboard": keyboard},
+         }
+         if item.photo_url:
+             payload["link_preview_options"] = {
+@@ -215,6 +220,25 @@ class TelegramSender:
+             await self._client.aclose()
+ 
+ 
++# Telegram allows 64 bytes of callback data per button.
++_CALLBACK_LIMIT = 64
++CALLBACK_BLOCK_SELLER = "bs"
++CALLBACK_PAUSE_SEARCH = "ps"
++
++
++def inline_actions(query_id: int | None, seller_login: str | None) -> list[dict[str, str]]:
++    """Callback buttons the bot in botctl answers. Empty when there is no search to act on."""
++    if query_id is None:
++        return []
++    row: list[dict[str, str]] = []
++    if seller_login:
++        data = f"{CALLBACK_BLOCK_SELLER}:{query_id}:{seller_login}"
++        if len(data.encode()) <= _CALLBACK_LIMIT:
++            row.append({"text": "🚫 Skip seller", "callback_data": data})
++    row.append({"text": "⏸ Pause search", "callback_data": f"{CALLBACK_PAUSE_SEARCH}:{query_id}"})
++    return row
++
++
+ def _classify(description: str, status_code: int, outbox_ids: list[int]) -> SendResult:
+     """Decide what a Telegram error means for the queue."""
+     lowered = description.lower()
+diff --git a/tests/integration/test_delivery.py b/tests/integration/test_delivery.py
+index cfc7ffa..0b7f5bc 100644
+--- a/tests/integration/test_delivery.py
++++ b/tests/integration/test_delivery.py
+@@ -10,7 +10,7 @@ from typing import Any
+ import httpx
+ import pytest
+ 
+-from vinted_sniper.botctl.telegram_bot import claim_pairing, create_pairing
++from vinted_sniper.botctl.telegram_bot import _chat_is_paired, claim_pairing, create_pairing
+ from vinted_sniper.config import Settings
+ from vinted_sniper.db.repo import Query, Repo
+ from vinted_sniper.deliver.dispatcher import MAX_ATTEMPTS, Dispatcher
+@@ -313,3 +313,35 @@ async def test_asking_for_a_second_pairing_link_reuses_the_waiting_destination(
+     assert len(await repo.list_destinations()) == 1
+     assert await claim_pairing(repo, code, chat_id=7, thread_id=None) == first_id
+     assert await repo.destination_ids_for_query(query.id) == [first_id]
++
++
++# --- Actions under an alert ----------------------------------------------------------
++
++
++async def test_skipping_a_seller_from_an_alert_extends_the_search_filter(repo: Repo) -> None:
++    query_id = await repo.add_query(
++        name="x",
++        url="https://www.vinted.fr/catalog?search_text=x",
++        tld="fr",
++        params={"search_text": "x"},
++        poll_interval_s=60,
++        blocked_sellers=["already"],
++    )
++
++    assert await repo.block_seller(query_id, "Scammer99") is True
++    assert await repo.block_seller(query_id, "scammer99") is False, "case-insensitively once"
++    assert await repo.block_seller(query_id, "already") is False
++    assert await repo.block_seller(9999, "nobody") is False
++
++    query = await repo.get_query(query_id)
++    assert query is not None
++    assert query.blocked_sellers == ["already", "Scammer99"]
++
++
++async def test_buttons_are_only_honoured_from_a_paired_chat(repo: Repo) -> None:
++    _, code = await create_pairing(repo, "phone")
++    assert not await _chat_is_paired(repo, 4242)
++
++    await claim_pairing(repo, code, chat_id=4242, thread_id=None)
++    assert await _chat_is_paired(repo, 4242)
++    assert not await _chat_is_paired(repo, 1)
+diff --git a/tests/unit/test_senders.py b/tests/unit/test_senders.py
+index 51d5d6e..fab07d0 100644
+--- a/tests/unit/test_senders.py
++++ b/tests/unit/test_senders.py
+@@ -12,7 +12,7 @@ import pytest
+ from vinted_sniper.db.repo import PendingNotification
+ from vinted_sniper.deliver.discord import DiscordSender
+ from vinted_sniper.deliver.ratelimit import Gate, TokenBucket
+-from vinted_sniper.deliver.telegram import TelegramSender
++from vinted_sniper.deliver.telegram import TelegramSender, inline_actions
+ from vinted_sniper.vinted.models import Item
+ 
+ 
+@@ -255,6 +255,27 @@ async def test_telegram_sends_one_message_per_listing_with_a_photo_preview() ->
+     assert payload["reply_markup"]["inline_keyboard"][0][0]["url"].endswith("/items/1")
+ 
+ 
++async def test_telegram_alerts_carry_skip_seller_and_pause_buttons() -> None:
++    recorder = Recorder(httpx.Response(200, json={"ok": True}))
++    sender = TelegramSender(
++        {"chat_id": "123"}, bot_token="t", client=recorder.client(), bucket=fast_bucket()
++    )
++
++    await sender.send([notification(1)])
++
++    actions = recorder.payload(0)["reply_markup"]["inline_keyboard"][1]
++    data = [button["callback_data"] for button in actions]
++    query_id = notification(1).query_id
++    assert f"bs:{query_id}:{notification(1).item.seller_login}" in data
++    assert f"ps:{query_id}" in data
++
++
++def test_inline_actions_stay_inside_telegrams_callback_limit() -> None:
++    row = inline_actions(7, "x" * 80)
++    assert [b["text"] for b in row] == ["⏸ Pause search"], "an oversized login drops its button"
++    assert inline_actions(None, "someone") == []
++
++
+ @pytest.mark.parametrize(
+     "title",
+     [
+-- 
+2.43.0
+

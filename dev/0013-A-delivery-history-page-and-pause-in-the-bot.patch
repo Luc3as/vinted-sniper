@@ -1,0 +1,371 @@
+From 32ed84654c5e22b18d10908603ad1c03d68daf52 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:39:48 +0000
+Subject: [PATCH 13/25] A delivery history page, and /pause in the bot
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+"Items are found but nothing arrives" was the first question this project
+got asked, and the answer lived in docker logs. /history now lists every
+notification newest first — the listing, its kind (new, price drop, verdict),
+which search found it, which destination it went to, its status with the last
+error and attempt count, and for a held alert how long until it is due — with
+filters by search and status. The same as JSON at /api/history. The header
+gained a small nav between searches and history.
+
+/pause <id> joins /resume <id> in the Telegram bot, sharing one handler.
+---
+ CHANGELOG.md                                 |  2 +
+ src/vinted_sniper/botctl/telegram_bot.py     | 35 ++++++----
+ src/vinted_sniper/db/repo.py                 | 25 +++++++
+ src/vinted_sniper/web/server.py              | 67 +++++++++++++++++++
+ src/vinted_sniper/web/templates/base.html    |  9 ++-
+ src/vinted_sniper/web/templates/history.html | 69 ++++++++++++++++++++
+ tests/integration/test_web.py                | 36 ++++++++++
+ 7 files changed, 230 insertions(+), 13 deletions(-)
+ create mode 100644 src/vinted_sniper/web/templates/history.html
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 448a87c..9feb604 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -34,6 +34,8 @@ All notable changes, newest first. Dates are when the change landed on `main`.
+   `enrichment_url`; a verdict posted to `/api/items/{id}/enrichment` (deal score, identified
+   model, retail price, match, risk, one line) is woven into the alert — hot deals headlined,
+   dull ones muted. Late hot verdicts get a short follow-up. See `docs/enrichment.md`.
++- **Delivery history** page (`/history`, `/api/history`): every notification, its kind, where it went, sent/pending/failed with the error, held-until for enrichment — the answer to "did my alert go out?".
++- Telegram `/pause <id>` alongside `/resume <id>`.
+ - **Weekly report** to status destinations on Monday morning (`WEEKLY_REPORT`).
+ - **`export` / `import`** of searches, destinations and routes as one JSON document; also
+   `/api/export` and `/api/import`.
+diff --git a/src/vinted_sniper/botctl/telegram_bot.py b/src/vinted_sniper/botctl/telegram_bot.py
+index 0c0104f..465e438 100644
+--- a/src/vinted_sniper/botctl/telegram_bot.py
++++ b/src/vinted_sniper/botctl/telegram_bot.py
+@@ -135,7 +135,7 @@ def build_dispatcher(repo: Repo) -> Dispatcher:
+     async def handle_help(message: Message) -> None:
+         await message.answer(
+             "/status — is everything still running\n"
+-            "/resume <id> — resume a search paused from an alert\n"
++            "/pause <id>, /resume <id> — pause or resume a search\n"
+             "/start <code> — connect this chat to vinted-sniper\n\n"
+             "Under each alert: skip that seller for the search, or pause the search.\n"
+             "Everything else is managed in vinted-sniper itself."
+@@ -184,24 +184,35 @@ def build_dispatcher(repo: Repo) -> Dispatcher:
+ 
+     @dispatcher.message(Command("resume"))
+     async def handle_resume(message: Message, command: CommandObject) -> None:
+-        if not await _chat_is_paired(repo, message.chat.id):
+-            await message.answer("This chat is not connected to vinted-sniper.")
+-            return
+-        query_id = _int_or_none((command.args or "").strip())
+-        query = await repo.get_query(query_id) if query_id is not None else None
+-        if query is None:
+-            await message.answer("Usage: /resume <search id> — ids are in /status.")
+-            return
+-        await repo.set_paused(query.id, False)
+-        await message.answer(f"Resumed “{query.name}”.")
++        await _set_paused_from_chat(repo, message, command, paused=False)
++
++    @dispatcher.message(Command("pause"))
++    async def handle_pause(message: Message, command: CommandObject) -> None:
++        await _set_paused_from_chat(repo, message, command, paused=True)
+ 
+     @dispatcher.message(F.text)
+     async def handle_anything_else(message: Message) -> None:
+-        await message.answer("I understand /status, /resume and /help.")
++        await message.answer("I understand /status, /pause, /resume and /help.")
+ 
+     return dispatcher
+ 
+ 
++async def _set_paused_from_chat(
++    repo: Repo, message: Message, command: CommandObject, *, paused: bool
++) -> None:
++    verb = "pause" if paused else "resume"
++    if not await _chat_is_paired(repo, message.chat.id):
++        await message.answer("This chat is not connected to vinted-sniper.")
++        return
++    query_id = _int_or_none((command.args or "").strip())
++    query = await repo.get_query(query_id) if query_id is not None else None
++    if query is None:
++        await message.answer(f"Usage: /{verb} <search id> — ids are in /status.")
++        return
++    await repo.set_paused(query.id, paused)
++    await message.answer(f"{'Paused' if paused else 'Resumed'} “{query.name}”.")
++
++
+ def _int_or_none(raw: str) -> int | None:
+     try:
+         return int(raw)
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index cc21863..c54a454 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -690,6 +690,31 @@ class Repo:
+                 )
+         return len(drops)
+ 
++    async def delivery_history(
++        self, *, limit: int = 200, query_id: int | None = None, status: str | None = None
++    ) -> list[aiosqlite.Row]:
++        """What was sent where, newest first — the answer to "did my alert go out?"."""
++        sql = (
++            "SELECT o.id, o.kind, o.status, o.attempts, o.created_at, o.sent_at, o.last_error, "
++            "o.next_attempt_at, o.previous_price, "
++            "i.item_id, i.title, i.url, i.price, i.total_price, i.currency, i.photo_url, "
++            "i.enrich_score, q.name AS query_name, d.name AS destination_name, "
++            "d.kind AS destination_kind FROM outbox o "
++            "LEFT JOIN items i ON i.item_id = o.item_id "
++            "LEFT JOIN queries q ON q.id = o.query_id "
++            "LEFT JOIN destinations d ON d.id = o.destination_id WHERE 1 = 1"
++        )
++        params: list[Any] = []
++        if query_id is not None:
++            sql += " AND o.query_id = ?"
++            params.append(query_id)
++        if status:
++            sql += " AND o.status = ?"
++            params.append(status)
++        sql += " ORDER BY o.id DESC LIMIT ?"
++        params.append(limit)
++        return await self._db.fetch_all(sql, tuple(params))
++
+     async def weekly_figures(self, since: int) -> dict[str, Any]:
+         """What the last stretch looked like, for the report to status destinations."""
+         found = await self._db.fetch_one(
+diff --git a/src/vinted_sniper/web/server.py b/src/vinted_sniper/web/server.py
+index ec865f2..bf56b49 100644
+--- a/src/vinted_sniper/web/server.py
++++ b/src/vinted_sniper/web/server.py
+@@ -180,6 +180,35 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+             raise HTTPException(status_code=422, detail=str(exc)) from exc
+         return JSONResponse({"ok": True, "added": added})
+ 
++    @app.get("/history", response_class=HTMLResponse)
++    async def history_page(
++        request: Request,
++        session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
++        search: int | None = None,
++        status: str | None = None,
++    ) -> Response:
++        if not _authorised(session, token):
++            return RedirectResponse("/login", status_code=303)
++        rows = await repo.delivery_history(limit=200, query_id=search, status=status or None)
++        return TEMPLATES.TemplateResponse(
++            request,
++            "history.html",
++            {
++                "rows": _history_views(rows, now=int(time.time())),
++                "queries": await repo.list_queries(),
++                "selected_search": search,
++                "selected_status": status or "",
++                "auth_enabled": token is not None,
++            },
++        )
++
++    @app.get("/api/history")
++    async def api_history(
++        search: int | None = None, status: str | None = None, _: None = guard
++    ) -> JSONResponse:
++        rows = await repo.delivery_history(limit=200, query_id=search, status=status or None)
++        return JSONResponse({"deliveries": _history_views(rows, now=int(time.time()))})
++
+     @app.get("/api/health")
+     async def api_health(_: None = guard) -> JSONResponse:
+         snapshot = await health.snapshot(repo)
+@@ -492,6 +521,44 @@ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
+     return views
+ 
+ 
++def _history_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
++    views: list[dict[str, Any]] = []
++    for row in rows:
++        currency = row["currency"] or ""
++        payable = row["total_price"] if row["total_price"] is not None else row["price"]
++        when = row["sent_at"] or row["created_at"]
++        views.append(
++            {
++                "id": row["id"],
++                "kind": row["kind"],
++                "status": row["status"],
++                "attempts": row["attempts"],
++                "error": row["last_error"],
++                "when": when,
++                "age": _age(max(0, now - when)) if when else "",
++                "due_in": (
++                    _age(row["next_attempt_at"] - now).removesuffix(" ago")
++                    if row["status"] == "pending" and row["next_attempt_at"] > now
++                    else None
++                ),
++                "title": row["title"] or (f"Listing {row['item_id']}" if row["item_id"] else "—"),
++                "url": row["url"],
++                "photo": row["photo_url"],
++                "price": f"{payable:.2f} {currency}".strip() if payable is not None else None,
++                "previous_price": (
++                    f"{row['previous_price']:.2f} {currency}".strip()
++                    if row["kind"] == "price_drop" and row["previous_price"]
++                    else None
++                ),
++                "score": row["enrich_score"],
++                "query_name": row["query_name"] or "—",
++                "destination": row["destination_name"] or "—",
++                "destination_kind": row["destination_kind"] or "",
++            }
++        )
++    return views
++
++
+ def _age(seconds: int) -> str:
+     """A found-time a human scans, not arithmetic they have to do."""
+     seconds = max(seconds, 0)
+diff --git a/src/vinted_sniper/web/templates/base.html b/src/vinted_sniper/web/templates/base.html
+index e9f4aa0..2b9e8e3 100644
+--- a/src/vinted_sniper/web/templates/base.html
++++ b/src/vinted_sniper/web/templates/base.html
+@@ -148,6 +148,11 @@
+     .tag.score { background: #ede7f6; color: #4527a0; }
+     .tag.score.hot { background: #fbe9e7; color: #bf360c; font-weight: 600; }
+     .tag.score.cold { opacity: .6; }
++    .pill.sent { background: #e8f5e9; color: #1b5e20; }
++    .pill.pending { background: #fff8e1; color: #f57f17; }
++    .pill.sending { background: #e3f2fd; color: #0d47a1; }
++    .pill.cancelled { opacity: .6; }
++    .history img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; vertical-align: middle; }
+     .tag.drop { background: #e8f5e9; color: #1b5e20; }
+     tr.edit-row td { background: rgba(0,0,0,.025); }
+     td.actions { white-space: nowrap; }
+@@ -156,7 +161,9 @@
+ </head>
+ <body>
+   <header>
+-    <h1>vinted-sniper</h1>
++    <h1><a href="/" style="color:inherit;text-decoration:none">vinted-sniper</a>
++      <span class="muted" style="font-size:.7em;font-weight:normal;margin-left:.6rem">
++        <a href="/">searches</a> · <a href="/history">history</a></span></h1>
+     {% block header_extra %}{% endblock %}
+   </header>
+   <main>{% block content %}{% endblock %}</main>
+diff --git a/src/vinted_sniper/web/templates/history.html b/src/vinted_sniper/web/templates/history.html
+new file mode 100644
+index 0000000..140f02d
+--- /dev/null
++++ b/src/vinted_sniper/web/templates/history.html
+@@ -0,0 +1,69 @@
++{% extends "base.html" %}
++{% block title %}vinted-sniper · history{% endblock %}
++
++{% block header_extra %}
++  {% if auth_enabled %}
++  <form method="post" action="/logout" class="inline">
++    <button class="quiet" type="submit">Sign out</button>
++  </form>
++  {% endif %}
++{% endblock %}
++
++{% block content %}
++<section>
++  <h2>Delivery history</h2>
++  <div class="card">
++    <form method="get" action="/history" class="row" style="gap:.6rem">
++      <label style="margin:0">Search</label>
++      <select name="search" style="width:auto">
++        <option value="">all</option>
++        {% for q in queries %}
++        <option value="{{ q.id }}" {% if selected_search == q.id %}selected{% endif %}>{{ q.name }}</option>
++        {% endfor %}
++      </select>
++      <label style="margin:0">Status</label>
++      <select name="status" style="width:auto">
++        {% for s in ["", "sent", "pending", "sending", "failed", "cancelled"] %}
++        <option value="{{ s }}" {% if selected_status == s %}selected{% endif %}>{{ s or "all" }}</option>
++        {% endfor %}
++      </select>
++      <button class="quiet" type="submit">Filter</button>
++      <span class="muted">Last 200 notifications, newest first. “cancelled” means expired before delivery or discarded on purpose.</span>
++    </form>
++  </div>
++
++  {% if not rows %}
++  <div class="card"><p class="muted" style="margin:0">Nothing has been queued yet.</p></div>
++  {% else %}
++  <div class="card history">
++    <table>
++      <tr><th></th><th>Listing</th><th>Kind</th><th>Search</th><th>To</th><th>Status</th><th>When</th></tr>
++      {% for row in rows %}
++      <tr>
++        <td>{% if row.photo %}<img src="{{ row.photo }}" alt="" loading="lazy">{% endif %}</td>
++        <td>
++          {% if row.url %}<a href="{{ row.url }}" target="_blank" rel="noreferrer">{{ row.title }}</a>
++          {% else %}{{ row.title }}{% endif %}
++          <div class="muted">
++            {% if row.price %}{{ row.price }}{% endif %}
++            {% if row.previous_price %}<span class="tag drop">📉 was {{ row.previous_price }}</span>{% endif %}
++            {% if row.score is not none %}<span class="tag score {{ 'hot' if row.score >= 75 else ('cold' if row.score < 40 else '') }}">🤖 {{ row.score }}</span>{% endif %}
++          </div>
++        </td>
++        <td class="muted">{{ row.kind.replace('_', ' ') }}</td>
++        <td class="muted">{{ row.query_name }}</td>
++        <td class="muted">{{ row.destination }} <span style="opacity:.6">({{ row.destination_kind }})</span></td>
++        <td>
++          <span class="pill {{ row.status }}">{{ row.status }}</span>
++          {% if row.due_in %}<div class="muted">held, due in {{ row.due_in }}</div>{% endif %}
++          {% if row.attempts > 1 %}<div class="muted">{{ row.attempts }} attempts</div>{% endif %}
++          {% if row.error %}<div class="muted error-line">{{ row.error[:110] }}</div>{% endif %}
++        </td>
++        <td class="muted">{{ row.age }}</td>
++      </tr>
++      {% endfor %}
++    </table>
++  </div>
++  {% endif %}
++</section>
++{% endblock %}
+diff --git a/tests/integration/test_web.py b/tests/integration/test_web.py
+index 488e77e..a917aed 100644
+--- a/tests/integration/test_web.py
++++ b/tests/integration/test_web.py
+@@ -486,3 +486,39 @@ def test_the_health_feed_carries_what_the_live_table_needs(signed_in: TestClient
+     (search,) = body["searches"]
+     for key in ("state", "items_total", "last_success_at", "next_check_at", "poll_interval_s"):
+         assert key in search
++
++
++async def test_the_history_page_shows_what_was_queued_and_where(
++    signed_in: TestClient, repo: Repo
++) -> None:
++    signed_in.post(
++        "/searches",
++        data={"url": "https://www.vinted.fr/catalog?search_text=nike"},
++        follow_redirects=False,
++    )
++    (query,) = await repo.list_queries()
++    destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
++    item = parse_item(
++        {
++            "id": 77,
++            "title": "Nike Air Max 90",
++            "url": "https://www.vinted.fr/items/77",
++            "price": {"amount": "30.0", "currency_code": "EUR"},
++            "photo": {
++                "full_size_url": "https://images.vinted.net/77.jpeg",
++                "high_resolution": {"timestamp": 1},
++            },
++        },
++        "fr",
++    )
++    await repo.record_new_items(query, [item], [destination_id])
++
++    page = signed_in.get("/history")
++    assert page.status_code == 200
++    assert "Nike Air Max 90" in page.text
++    assert "phone" in page.text
++    assert "pending" in page.text
++
++    body = signed_in.get("/api/history", params={"status": "pending"}).json()
++    assert body["deliveries"][0]["title"] == "Nike Air Max 90"
++    assert signed_in.get("/api/history", params={"status": "sent"}).json()["deliveries"] == []
+-- 
+2.43.0
+

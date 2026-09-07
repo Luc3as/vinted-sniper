@@ -1,0 +1,102 @@
+From 8febcaece7634b0851a663a43a8b28cdabe22ea2 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 20:11:19 +0000
+Subject: [PATCH 20/25] Tell the agent which language the buyer reads
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The verdict's one sentence is the only piece of an alert the sniper does
+not write itself. The webhook payload now carries `reader_language` — the
+most common language among the search's chat destinations — so the agent
+can write it in the language the person will read it in, instead of the
+prompt hard-coding one.
+---
+ docs/enrichment.md                      |  1 +
+ src/vinted_sniper/db/repo.py            | 12 ++++++++++++
+ src/vinted_sniper/deliver/dispatcher.py |  3 +++
+ tests/integration/test_delivery.py      | 22 ++++++++++++++++++++++
+ 4 files changed, 38 insertions(+)
+
+diff --git a/docs/enrichment.md b/docs/enrichment.md
+index fd84a1b..399c482 100644
+--- a/docs/enrichment.md
++++ b/docs/enrichment.md
+@@ -52,6 +52,7 @@ cares about:
+ | `items[].favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour` | Demand. A listing twelve minutes old with six hearts is one the market has already noticed. |
+ | `items[].market` | Where the price sits among everything this search has shown in the last 30 days (`null` until there are ten points): `n`, `p10`, `p25`, `median`, `p75`, `median_same_condition`, `this_percentile` (share of listings cheaper than this one), and `sells_fast_under` — the median price of listings that vanished within a day, the closest thing to a sold price the catalog offers. Built from every listing on the page, filters or not, at no extra requests. |
+ | `items[].known_retail` | Retail prices earlier verdicts reported for this search, `[{model, price, currency, source}]`. Reuse instead of searching again when the product matches. |
++| `items[].reader_language` | `en` or `sk`: the language the buyer reads this search's alerts in (the most common among its chat destinations). Write `verdict` in it. |
+ | `items[].buyer_feedback` | The buyer's thumbs on recent verdicts for this search: `[{title, condition, total_price, agent_score, agent_model, buyer_said}]`. What this particular buyer calls a deal. |
+ 
+ ## What the agent posts back
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index a2c86f0..ee5249d 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -661,6 +661,18 @@ class Repo:
+                 )
+         return len(items)
+ 
++    async def reader_language_for_query(self, query_id: int) -> str:
++        """The language the buyer will read this search's alerts in: the most common one
++        among its chat destinations (webhooks do not count — they are the readers' agents)."""
++        rows = await self._db.fetch_all(
++            "SELECT d.language, COUNT(*) AS n FROM query_destinations qd "
++            "JOIN destinations d ON d.id = qd.destination_id "
++            "WHERE qd.query_id = ? AND d.active = 1 AND d.kind != 'webhook' "
++            "GROUP BY d.language ORDER BY n DESC LIMIT 1",
++            (query_id,),
++        )
++        return str(rows[0]["language"]) if rows else i18n.DEFAULT_LANGUAGE
++
+     async def destination_ids_of_kind(self, kind: str) -> set[int]:
+         rows = await self._db.fetch_all(
+             "SELECT id FROM destinations WHERE kind = ? AND active = 1", (kind,)
+diff --git a/src/vinted_sniper/deliver/dispatcher.py b/src/vinted_sniper/deliver/dispatcher.py
+index 153c1ac..a00b6fd 100644
+--- a/src/vinted_sniper/deliver/dispatcher.py
++++ b/src/vinted_sniper/deliver/dispatcher.py
+@@ -234,6 +234,9 @@ class Dispatcher:
+             ),
+             "known_retail": await self._repo.known_retail(notification.query_id),
+             "buyer_feedback": await self._repo.feedback_examples(notification.query_id),
++            # Which language the buyer reads alerts for this search in, so the agent can
++            # write its one-line verdict in it.
++            "reader_language": await self._repo.reader_language_for_query(notification.query_id),
+         }
+ 
+     async def notify_status(self, message: str | Callable[[Translator], str]) -> None:
+diff --git a/tests/integration/test_delivery.py b/tests/integration/test_delivery.py
+index aed3702..b916873 100644
+--- a/tests/integration/test_delivery.py
++++ b/tests/integration/test_delivery.py
+@@ -580,3 +580,25 @@ async def test_status_notices_are_rendered_per_destination_language(
+     bodies = {json.loads(r.content)["status"] for r in endpoint.requests}
+     assert bodies == {"Running.", "Beží."}
+     assert en != sk
++
++
++async def test_the_agent_is_told_which_language_the_buyer_reads(
++    repo: Repo, settings: Settings
++) -> None:
++    query = await a_search(repo)
++    brain = await repo.add_destination(
++        kind="webhook", name="n8n", config={"url": "https://example.test/n8n"}
++    )
++    phone = await repo.add_destination(
++        kind="ntfy", name="phone", config={"topic": "t"}, language="sk"
++    )
++    await repo.route(query.id, brain)
++    await repo.route(query.id, phone)
++    await repo.record_new_items(query, [listing(1)], [brain])
++
++    endpoint = FakeEndpoint()
++    await make_dispatcher(repo, settings, endpoint).drain()
++
++    body = json.loads(endpoint.requests[-1].content)
++    assert body["items"][0]["reader_language"] == "sk"
++    assert await repo.reader_language_for_query(9999) == "en", "no readers: default"
+-- 
+2.43.0
+

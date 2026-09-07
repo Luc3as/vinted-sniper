@@ -1,0 +1,661 @@
+From 92e901c95ba253823dce7d604ca71044dcb5f2e1 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 16:54:55 +0000
+Subject: [PATCH 04/25] Quiet hours per destination, with a digest when they
+ end
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A phone that buzzes at 03:14 about a jacket is a phone that mutes the bot.
+A destination can now have a daily window — "23:00-07:00", crossing midnight
+allowed — during which the dispatcher leaves it alone. What turns up meanwhile
+is held rather than expired, its delivery clock restarts when the window ends,
+and it goes out together; Telegram and Discord already fold a large batch into
+one digest message, so the morning brings one summary instead of silence.
+
+Times are read in a new TIMEZONE setting (IANA name, validated at startup).
+Set with --quiet on `destination`, or per row in the dashboard, which also
+gained a toggle for health notices — previously only reachable through the
+CLI, which meant the "site is refusing us" warning from the last change had
+nowhere to go for most people.
+---
+ .env.example                                  |  3 +
+ README.md                                     |  1 +
+ docs/configuration.md                         |  7 ++
+ src/vinted_sniper/cli.py                      | 13 +++-
+ src/vinted_sniper/config.py                   | 17 ++++-
+ .../db/migrations/0005_quiet_hours.sql        |  4 ++
+ src/vinted_sniper/db/repo.py                  | 56 +++++++++++++--
+ src/vinted_sniper/deliver/dispatcher.py       | 34 +++++++++-
+ src/vinted_sniper/engine/quiet.py             | 68 +++++++++++++++++++
+ src/vinted_sniper/web/server.py               | 32 ++++++++-
+ .../web/templates/dashboard.html              | 28 +++++++-
+ tests/integration/test_delivery.py            | 39 +++++++++++
+ tests/unit/test_quiet.py                      | 51 ++++++++++++++
+ 13 files changed, 340 insertions(+), 13 deletions(-)
+ create mode 100644 src/vinted_sniper/db/migrations/0005_quiet_hours.sql
+ create mode 100644 src/vinted_sniper/engine/quiet.py
+ create mode 100644 tests/unit/test_quiet.py
+
+diff --git a/.env.example b/.env.example
+index 7c31456..98a48dd 100644
+--- a/.env.example
++++ b/.env.example
+@@ -4,6 +4,9 @@
+ # Full reference: docs/configuration.md
+ 
+ # --- Telegram (only if you want alerts there) ----------------------------------------
++# Timezone that a destination's quiet hours are read in.
++# VINTED_SNIPER_TIMEZONE=UTC
++
+ # Talk to @BotFather on Telegram to create a bot; it gives you a token like
+ # 123456:AAxxxx. Setting this turns on Telegram delivery and the pairing bot.
+ # VINTED_SNIPER_TELEGRAM_BOT_TOKEN=
+diff --git a/README.md b/README.md
+index da815a2..a0b2b5c 100644
+--- a/README.md
++++ b/README.md
+@@ -48,6 +48,7 @@ Raspberry Pi, NAS or cheap VPS: see [the self-hosting guide](docs/self-hosting.m
+ ## Features
+ 
+ - **Filters on what you actually pay**, buyer protection included. Vinted's own price filter ignores it.
++- **Quiet hours per destination**: nothing at 03:00, a digest of the night at 07:00.
+ - **Filters Vinted's search cannot express**: words the title must contain, a title regex, a floor on seller rating and review count, and sellers to skip.
+ - **Tells you when it stops working.** A watchdog spots a search going silent and fixes the session itself.
+ - **No Vinted account, no login, no cookies.** Nothing for Vinted to restrict.
+diff --git a/docs/configuration.md b/docs/configuration.md
+index bb4e98d..54a8864 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -58,6 +58,7 @@ was found, so you can see the real delay yourself.
+ 
+ | Variable | Default | What it does |
+ |---|---|---|
++| `TIMEZONE` | `UTC` | IANA timezone (e.g. `Europe/Bratislava`) that a destination's quiet hours are read in. |
+ | `TELEGRAM_BOT_TOKEN` | unset | From [@BotFather](https://t.me/BotFather). Enables Telegram delivery and the pairing bot. |
+ 
+ ### Dashboard
+@@ -136,6 +137,12 @@ Where to get each kind of target:
+ Each search can go to its own set of destinations, so a Discord channel for one thing and
+ your phone for another is normal.
+ 
++A destination can have **quiet hours** — `--quiet 23:00-07:00` on the command line, or the
++field next to it in the dashboard — during which nothing is sent. Alerts found meanwhile are
++kept (they are exempt from `OUTBOX_EXPIRY_MINUTES`) and go out together when the window
++ends; Discord and Telegram fold a large batch into one digest message. Times are read in
++`TIMEZONE`.
++
+ What is stored per destination — the dashboard and `vinted-sniper destination` fill these in
+ for you:
+ 
+diff --git a/src/vinted_sniper/cli.py b/src/vinted_sniper/cli.py
+index 67bb981..193063d 100644
+--- a/src/vinted_sniper/cli.py
++++ b/src/vinted_sniper/cli.py
+@@ -13,7 +13,7 @@ from vinted_sniper import __version__, app, log
+ from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
+ from vinted_sniper.db import Database, apply_pending
+ from vinted_sniper.db.repo import Repo
+-from vinted_sniper.engine import filters, health
++from vinted_sniper.engine import filters, health, quiet
+ from vinted_sniper.vinted import urls
+ from vinted_sniper.vinted.client import VintedClient
+ from vinted_sniper.vinted.errors import BlockedError, VintedError
+@@ -96,6 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
+     destination.add_argument(
+         "--status", action="store_true", help="Also send health warnings here."
+     )
++    destination.add_argument(
++        "--quiet",
++        default="",
++        help="Daily window to send nothing, e.g. 23:00-07:00 (in TIMEZONE). "
++        "Alerts found meanwhile arrive as a digest when it ends.",
++    )
+ 
+     sub.add_parser("destinations", help="List destinations.")
+ 
+@@ -301,6 +307,10 @@ async def _cmd_destination(settings: Settings, args: argparse.Namespace) -> int:
+         case _:
+             config = {"topic": args.target}
+ 
++    if args.quiet and (problem := quiet.validate(args.quiet)):
++        print(f"--quiet: {problem}", file=sys.stderr)
++        return 1
++
+     async with Database(settings.db_path) as db:
+         await apply_pending(db)
+         destination_id = await Repo(db).add_destination(
+@@ -308,6 +318,7 @@ async def _cmd_destination(settings: Settings, args: argparse.Namespace) -> int:
+             name=args.name.strip() or args.kind,
+             config=config,
+             notify_status=args.status,
++            quiet_hours=args.quiet.strip() or None,
+         )
+     print(f"Added {args.kind} destination (id {destination_id}).")
+     print("Route a search to it with: vinted-sniper watch <url> --to " + str(destination_id))
+diff --git a/src/vinted_sniper/config.py b/src/vinted_sniper/config.py
+index e8a9f51..cd6f42c 100644
+--- a/src/vinted_sniper/config.py
++++ b/src/vinted_sniper/config.py
+@@ -9,8 +9,9 @@ from __future__ import annotations
+ 
+ from pathlib import Path
+ from typing import Literal
++from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+ 
+-from pydantic import Field, SecretStr, model_validator
++from pydantic import Field, SecretStr, field_validator, model_validator
+ from pydantic_settings import BaseSettings, SettingsConfigDict
+ 
+ # Not configurable. Polling faster than this earns 403s without finding items any sooner,
+@@ -133,6 +134,20 @@ class Settings(BaseSettings):
+         default=None,
+         description="Enables Telegram delivery and the /start binding bot when set.",
+     )
++    timezone: str = Field(
++        default="UTC",
++        description="IANA timezone (e.g. Europe/Bratislava) that a destination's quiet hours "
++        "are read in.",
++    )
++
++    @field_validator("timezone")
++    @classmethod
++    def _timezone_must_exist(cls, value: str) -> str:
++        try:
++            ZoneInfo(value)
++        except (ZoneInfoNotFoundError, ValueError) as exc:
++            raise ValueError(f"unknown timezone {value!r}") from exc
++        return value
+ 
+     # --- Development ---------------------------------------------------------------
+     fetch_mode: Literal["live", "mock"] = Field(
+diff --git a/src/vinted_sniper/db/migrations/0005_quiet_hours.sql b/src/vinted_sniper/db/migrations/0005_quiet_hours.sql
+new file mode 100644
+index 0000000..2ea7f24
+--- /dev/null
++++ b/src/vinted_sniper/db/migrations/0005_quiet_hours.sql
+@@ -0,0 +1,4 @@
++-- A window each day during which a destination is not sent anything. Alerts found in the
++-- window are kept and delivered when it ends, rather than expiring, so the morning
++-- brings a digest of the night instead of silence. NULL means always on.
++ALTER TABLE destinations ADD COLUMN quiet_hours TEXT;
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index d358f14..4857a15 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -76,6 +76,8 @@ class Destination:
+     active: bool = True
+     notify_status: bool = False
+     failure_count: int = 0
++    # "HH:MM-HH:MM" in the app's timezone, or None. See engine/quiet.py.
++    quiet_hours: str | None = None
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -290,11 +292,31 @@ class Repo:
+         name: str,
+         config: dict[str, Any],
+         notify_status: bool = False,
++        quiet_hours: str | None = None,
+     ) -> int:
+         return await self._db.insert(
+-            "INSERT INTO destinations (kind, name, config_json, notify_status, created_at) "
+-            "VALUES (?, ?, ?, ?, ?)",
+-            (kind, name, json.dumps(config), int(notify_status), int(time.time())),
++            "INSERT INTO destinations (kind, name, config_json, notify_status, quiet_hours, "
++            "created_at) VALUES (?, ?, ?, ?, ?, ?)",
++            (
++                kind,
++                name,
++                json.dumps(config),
++                int(notify_status),
++                quiet_hours or None,
++                int(time.time()),
++            ),
++        )
++
++    async def set_quiet_hours(self, destination_id: int, quiet_hours: str | None) -> None:
++        await self._db.execute(
++            "UPDATE destinations SET quiet_hours = ? WHERE id = ?",
++            (quiet_hours or None, destination_id),
++        )
++
++    async def set_notify_status(self, destination_id: int, enabled: bool) -> None:
++        await self._db.execute(
++            "UPDATE destinations SET notify_status = ? WHERE id = ?",
++            (int(enabled), destination_id),
+         )
+ 
+     async def list_destinations(self, *, active_only: bool = False) -> list[Destination]:
+@@ -350,6 +372,7 @@ class Repo:
+             active=bool(row["active"]),
+             notify_status=bool(row["notify_status"]),
+             failure_count=row["failure_count"],
++            quiet_hours=row["quiet_hours"],
+         )
+ 
+     # --- Routing -------------------------------------------------------------------
+@@ -597,18 +620,37 @@ class Repo:
+             "UPDATE outbox SET status = 'pending', lease_expires_at = NULL WHERE status = 'sending'"
+         )
+ 
+-    async def expire_stale_notifications(self, older_than_minutes: int) -> int:
++    async def restart_delivery_clock(self, destination_id: int) -> int:
++        """Treat a destination's pending notifications as if found just now.
++
++        Used when its quiet hours end: they were held on purpose, and the expiry window
++        should count from the moment they may be sent, not from the middle of the night.
++        """
++        return await self._db.execute(
++            "UPDATE outbox SET created_at = ? WHERE destination_id = ? AND status = 'pending'",
++            (int(time.time()), destination_id),
++        )
++
++    async def expire_stale_notifications(
++        self, older_than_minutes: int, *, held: list[int] | None = None
++    ) -> int:
+         """Drop notifications too old to be worth sending.
+ 
+         An alert about a listing from two hours ago is not news, and quietly flushing them
+         keeps a destination that was offline from dumping its whole backlog on return.
++        Destinations in `held` (in their quiet hours) are exempt: theirs are being kept
++        on purpose, to go out as a digest when the window ends.
+         """
+         cutoff = int(time.time()) - older_than_minutes * 60
+-        return await self._db.execute(
++        sql = (
+             "UPDATE outbox SET status = 'cancelled', last_error = 'expired before delivery' "
+-            "WHERE status = 'pending' AND created_at < ?",
+-            (cutoff,),
++            "WHERE status = 'pending' AND created_at < ?"
+         )
++        params: list[Any] = [cutoff]
++        if held:
++            sql += f" AND destination_id NOT IN ({','.join('?' * len(held))})"
++            params.extend(held)
++        return await self._db.execute(sql, tuple(params))
+ 
+     async def outbox_depth(self) -> int:
+         value = await self._db.fetch_value(
+diff --git a/src/vinted_sniper/deliver/dispatcher.py b/src/vinted_sniper/deliver/dispatcher.py
+index 9051c79..743b971 100644
+--- a/src/vinted_sniper/deliver/dispatcher.py
++++ b/src/vinted_sniper/deliver/dispatcher.py
+@@ -15,7 +15,9 @@ from __future__ import annotations
+ import asyncio
+ import contextlib
+ import json
++from datetime import datetime
+ from typing import Any
++from zoneinfo import ZoneInfo
+ 
+ import httpx
+ 
+@@ -27,6 +29,7 @@ from vinted_sniper.deliver.ntfy import NtfySender
+ from vinted_sniper.deliver.ratelimit import Gate, TokenBucket
+ from vinted_sniper.deliver.telegram import TelegramSender
+ from vinted_sniper.deliver.webhook import WebhookSender
++from vinted_sniper.engine import quiet
+ from vinted_sniper.log import get_logger
+ 
+ log = get_logger(__name__)
+@@ -71,6 +74,8 @@ class Dispatcher:
+         self._signatures: dict[int, str] = {}
+         self._discord_gate = Gate()
+         self._telegram_budget = TokenBucket(TELEGRAM_GLOBAL_PER_S, capacity=TELEGRAM_GLOBAL_PER_S)
++        self._zone = ZoneInfo(settings.timezone)
++        self._quiet_now: set[int] = set()
+ 
+     async def run(self, idle_interval_s: float = 2.0) -> None:
+         """Deliver whatever is queued, then wait to be told there is more."""
+@@ -90,9 +95,31 @@ class Dispatcher:
+ 
+         await self.aclose()
+ 
++    def _local_now(self) -> datetime:
++        return datetime.now(self._zone)
++
++    async def _quiet_destinations(self) -> list[int]:
++        """Destinations inside their quiet hours right now. Logged on the way in and out."""
++        now = self._local_now()
++        quiet_now = {
++            d.id
++            for d in await self._repo.list_destinations(active_only=True)
++            if quiet.is_quiet(d.quiet_hours, now)
++        }
++        for destination_id in quiet_now - self._quiet_now:
++            log.info("destination.quiet_hours_started", destination_id=destination_id)
++        for destination_id in self._quiet_now - quiet_now:
++            held = await self._repo.restart_delivery_clock(destination_id)
++            log.info("destination.quiet_hours_ended", destination_id=destination_id, held=held)
++        self._quiet_now = quiet_now
++        return sorted(quiet_now)
++
+     async def drain(self) -> int:
+         """Send everything currently due. Returns how many notifications went out."""
+-        expired = await self._repo.expire_stale_notifications(self._settings.outbox_expiry_minutes)
++        held = await self._quiet_destinations()
++        expired = await self._repo.expire_stale_notifications(
++            self._settings.outbox_expiry_minutes, held=held
++        )
+         if expired:
+             log.info("outbox.expired", count=expired, reason="older than the delivery window")
+ 
+@@ -128,6 +155,11 @@ class Dispatcher:
+             # claimed, or expire on their own.
+             return 0
+ 
++        if destination_id in self._quiet_now:
++            # Asleep. Whatever is queued waits, exempt from expiry, and goes out together
++            # when the window ends — the senders fold a large batch into a digest.
++            return 0
++
+         try:
+             sender = await self._sender_for(destination)
+         except SenderConfigError as exc:
+diff --git a/src/vinted_sniper/engine/quiet.py b/src/vinted_sniper/engine/quiet.py
+new file mode 100644
+index 0000000..764535a
+--- /dev/null
++++ b/src/vinted_sniper/engine/quiet.py
+@@ -0,0 +1,68 @@
++"""Quiet hours: a daily window during which a destination is left alone.
++
++A phone that buzzes at 03:14 about a jacket is a phone that gets the bot muted. The window
++is written the way people say it — "23:00-07:00" — and is allowed to cross midnight,
++because that is when most of them do. Alerts found during the window are held rather than
++dropped, so the first message after it ends is a digest of what turned up overnight.
++
++Times are read in the app's configured timezone; see `TIMEZONE` in the settings.
++"""
++
++from __future__ import annotations
++
++import re
++from dataclasses import dataclass
++from datetime import datetime, time
++
++_SPEC = re.compile(r"^\s*(\d{1,2}):(\d{1,2})\s*-\s*(\d{1,2}):(\d{1,2})\s*$")
++
++
++@dataclass(frozen=True, slots=True)
++class QuietHours:
++    start: time
++    end: time
++
++    def contains(self, moment: datetime) -> bool:
++        """True while the window is open. Handles windows that cross midnight."""
++        now = moment.time().replace(second=0, microsecond=0)
++        if self.start <= self.end:
++            return self.start <= now < self.end
++        return now >= self.start or now < self.end
++
++    def __str__(self) -> str:
++        return f"{self.start:%H:%M}-{self.end:%H:%M}"
++
++
++def parse(spec: str | None) -> QuietHours | None:
++    """Read "HH:MM-HH:MM". Returns None for blank input; raises ValueError for nonsense."""
++    if spec is None or not spec.strip():
++        return None
++    match = _SPEC.match(spec)
++    if match is None:
++        raise ValueError("quiet hours must look like 23:00-07:00")
++    h1, m1, h2, m2 = (int(part) for part in match.groups())
++    try:
++        start, end = time(h1, m1), time(h2, m2)
++    except ValueError as exc:
++        raise ValueError("quiet hours must use real clock times") from exc
++    if start == end:
++        raise ValueError("quiet hours cannot start and end at the same time")
++    return QuietHours(start, end)
++
++
++def validate(spec: str) -> str | None:
++    """Why a spec will not parse, or None if it is fine."""
++    try:
++        parse(spec)
++    except ValueError as exc:
++        return str(exc)
++    return None
++
++
++def is_quiet(spec: str | None, moment: datetime) -> bool:
++    """Convenience for callers holding the raw string; an unparseable one is never quiet."""
++    try:
++        window = parse(spec)
++    except ValueError:
++        return False
++    return window is not None and window.contains(moment)
+diff --git a/src/vinted_sniper/web/server.py b/src/vinted_sniper/web/server.py
+index e54f16e..0ca215c 100644
+--- a/src/vinted_sniper/web/server.py
++++ b/src/vinted_sniper/web/server.py
+@@ -36,7 +36,7 @@ from pydantic import SecretStr
+ 
+ from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
+ from vinted_sniper.db.repo import Repo
+-from vinted_sniper.engine import filters, health
++from vinted_sniper.engine import filters, health, quiet
+ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted import urls
+ from vinted_sniper.vinted.errors import VintedError
+@@ -270,9 +270,14 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+         kind: Annotated[str, Form()],
+         name: Annotated[str, Form()] = "",
+         target: Annotated[str, Form()] = "",
++        quiet_hours: Annotated[str, Form()] = "",
++        notify_status: Annotated[str, Form()] = "",
+         _: None = guard,
+     ) -> Response:
+         target = target.strip()
++        quiet_hours = quiet_hours.strip()
++        if quiet_hours and (problem := quiet.validate(quiet_hours)):
++            return _redirect_with_error(problem)
+         config: dict[str, Any]
+         match kind:
+             case "discord":
+@@ -292,7 +297,30 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+             case _:
+                 return _redirect_with_error(f"unknown destination type {kind!r}")
+ 
+-        await repo.add_destination(kind=kind, name=name.strip() or kind, config=config)
++        await repo.add_destination(
++            kind=kind,
++            name=name.strip() or kind,
++            config=config,
++            notify_status=notify_status == "1",
++            quiet_hours=quiet_hours or None,
++        )
++        return RedirectResponse("/", status_code=303)
++
++    @app.post("/destinations/{destination_id}/quiet")
++    async def set_destination_quiet(
++        destination_id: int, quiet_hours: Annotated[str, Form()] = "", _: None = guard
++    ) -> Response:
++        quiet_hours = quiet_hours.strip()
++        if quiet_hours and (problem := quiet.validate(quiet_hours)):
++            return _redirect_with_error(problem)
++        await repo.set_quiet_hours(destination_id, quiet_hours or None)
++        return RedirectResponse("/", status_code=303)
++
++    @app.post("/destinations/{destination_id}/status")
++    async def set_destination_status(
++        destination_id: int, enabled: Annotated[str, Form()], _: None = guard
++    ) -> Response:
++        await repo.set_notify_status(destination_id, enabled == "1")
+         return RedirectResponse("/", status_code=303)
+ 
+     @app.post("/destinations/{destination_id}/delete")
+diff --git a/src/vinted_sniper/web/templates/dashboard.html b/src/vinted_sniper/web/templates/dashboard.html
+index 0561b1d..0dce442 100644
+--- a/src/vinted_sniper/web/templates/dashboard.html
++++ b/src/vinted_sniper/web/templates/dashboard.html
+@@ -224,7 +224,7 @@
+   {% if destinations %}
+   <div class="card">
+     <table>
+-      <tr><th>Name</th><th>Type</th><th>State</th><th></th></tr>
++      <tr><th>Name</th><th>Type</th><th>State</th><th>Quiet hours</th><th>Health notices</th><th></th></tr>
+       {% for destination in destinations %}
+       <tr>
+         <td>{{ destination.name }}</td>
+@@ -233,6 +233,21 @@
+           {% if destination.active %}<span class="pill ok">active</span>
+           {% else %}<span class="pill failing">disabled</span>{% endif %}
+         </td>
++        <td>
++          <form method="post" action="/destinations/{{ destination.id }}/quiet" class="inline">
++            <input type="text" name="quiet_hours" value="{{ destination.quiet_hours or '' }}"
++                   placeholder="23:00-07:00" size="11" style="width:auto">
++            <button class="quiet" type="submit">Set</button>
++          </form>
++        </td>
++        <td>
++          <form method="post" action="/destinations/{{ destination.id }}/status" class="inline">
++            <input type="hidden" name="enabled" value="{{ '0' if destination.notify_status else '1' }}">
++            <button class="quiet" type="submit">
++              {{ 'on — turn off' if destination.notify_status else 'off — turn on' }}
++            </button>
++          </form>
++        </td>
+         <td>
+           {% if destination.active %}
+           <form method="post" action="/destinations/{{ destination.id }}/delete" class="inline">
+@@ -266,10 +281,21 @@
+           <label for="target">Webhook URL, chat id, or topic</label>
+           <input type="text" id="target" name="target" required>
+         </div>
++        <div>
++          <label for="quiet_hours">Quiet hours (optional)</label>
++          <input type="text" id="quiet_hours" name="quiet_hours" placeholder="23:00-07:00">
++        </div>
++        <div>
++          <label class="row" style="margin-top:1.6rem">
++            <input type="checkbox" name="notify_status" value="1"> Also send health notices here
++          </label>
++        </div>
+       </div>
+       <p class="muted">
+         For Discord: server settings → Integrations → Webhooks → copy the URL. For Telegram,
+         <code>vinted-sniper pair-telegram</code> gives you a link that sets this up for you.
++        During quiet hours nothing is sent; what turned up arrives as a digest when they end.
++        Health notices are the "site is refusing us" and "search went stale" warnings.
+       </p>
+       <button type="submit">Add destination</button>
+     </form>
+diff --git a/tests/integration/test_delivery.py b/tests/integration/test_delivery.py
+index 0b7f5bc..7a14d4a 100644
+--- a/tests/integration/test_delivery.py
++++ b/tests/integration/test_delivery.py
+@@ -4,6 +4,7 @@ from __future__ import annotations
+ 
+ import asyncio
+ import time
++from datetime import datetime
+ from decimal import Decimal
+ from typing import Any
+ 
+@@ -345,3 +346,41 @@ async def test_buttons_are_only_honoured_from_a_paired_chat(repo: Repo) -> None:
+     await claim_pairing(repo, code, chat_id=4242, thread_id=None)
+     assert await _chat_is_paired(repo, 4242)
+     assert not await _chat_is_paired(repo, 1)
++
++
++# --- Quiet hours ---------------------------------------------------------------------
++
++
++async def test_a_destination_in_its_quiet_hours_is_left_alone_and_nothing_expires(
++    repo: Repo, settings: Settings, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    query = await a_search(repo)
++    sleeping = await repo.add_destination(
++        kind="webhook",
++        name="phone",
++        config={"url": "https://example.test/phone"},
++        quiet_hours="23:00-07:00",
++    )
++    awake = await repo.add_destination(
++        kind="webhook", name="desk", config={"url": "https://example.test/desk"}
++    )
++    await repo.record_new_items(query, [listing(1)], [sleeping, awake])
++    await _age_outbox(repo, minutes=settings.outbox_expiry_minutes + 10)
++
++    endpoint = FakeEndpoint()
++    dispatcher = make_dispatcher(repo, settings, endpoint)
++
++    night = datetime(2026, 9, 6, 3, 0, tzinfo=dispatcher._zone)
++    monkeypatch.setattr(dispatcher, "_local_now", lambda: night)
++    sent = await dispatcher.drain()
++
++    assert sent == 0, "the desk's copy was stale and dropped; the phone's is held"
++    assert await repo.outbox_depth() == 1, "the phone keeps its alert through the night"
++
++    morning = datetime(2026, 9, 6, 7, 30, tzinfo=dispatcher._zone)
++    monkeypatch.setattr(dispatcher, "_local_now", lambda: morning)
++    sent = await dispatcher.drain()
++
++    assert sent == 1, "the held alert goes out when the window ends, not into the bin"
++    assert endpoint.calls == 1
++    assert await repo.outbox_depth() == 0
+diff --git a/tests/unit/test_quiet.py b/tests/unit/test_quiet.py
+new file mode 100644
+index 0000000..7e35c1b
+--- /dev/null
++++ b/tests/unit/test_quiet.py
+@@ -0,0 +1,51 @@
++"""Quiet hours: the window is read the way people write it, midnight included."""
++
++from __future__ import annotations
++
++from datetime import datetime
++
++import pytest
++
++from vinted_sniper.engine import quiet
++
++DAY = datetime(2026, 9, 6)
++
++
++def at(hhmm: str) -> datetime:
++    hour, minute = (int(p) for p in hhmm.split(":"))
++    return DAY.replace(hour=hour, minute=minute)
++
++
++def test_a_window_inside_one_day() -> None:
++    window = quiet.parse("13:00-14:30")
++    assert window is not None
++    assert not window.contains(at("12:59"))
++    assert window.contains(at("13:00"))
++    assert window.contains(at("14:29"))
++    assert not window.contains(at("14:30"))
++
++
++def test_a_window_across_midnight() -> None:
++    window = quiet.parse("23:00-07:00")
++    assert window is not None
++    assert window.contains(at("23:00"))
++    assert window.contains(at("03:14"))
++    assert window.contains(at("06:59"))
++    assert not window.contains(at("07:00"))
++    assert not window.contains(at("12:00"))
++
++
++def test_blank_means_never_quiet() -> None:
++    assert quiet.parse(None) is None
++    assert quiet.parse("   ") is None
++    assert not quiet.is_quiet("", at("03:00"))
++
++
++@pytest.mark.parametrize("spec", ["23-07", "25:00-07:00", "23:00-23:00", "night", "23:00-07:60"])
++def test_nonsense_is_rejected_at_input_time(spec: str) -> None:
++    assert quiet.validate(spec) is not None
++    assert not quiet.is_quiet(spec, at("03:00")), "and never silences anything by accident"
++
++
++def test_spacing_is_forgiven() -> None:
++    assert str(quiet.parse(" 9:5 - 17:00 ")) == "09:05-17:00"
+-- 
+2.43.0
+

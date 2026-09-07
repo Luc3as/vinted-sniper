@@ -1,0 +1,199 @@
+From 4d0101844f206feddc2ee50ee2ecd08eaad752fa Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:05:55 +0000
+Subject: [PATCH 07/25] Show a site-wide hold as "cooling", and keep it across
+ restarts
+
+When one search was refused and the rest waited out its backoff, the
+dashboard showed a row of failures and a row of searches that looked idle,
+and a restart forgot the hold and started a fresh volley. The poller now
+records the hold in app_state; health reports it as a "cooling" state on
+every search for that site, the dashboard and /status show how long is left,
+and the app restores the hold at startup.
+---
+ src/vinted_sniper/app.py                       | 12 ++++++++++++
+ src/vinted_sniper/botctl/telegram_bot.py       |  2 ++
+ src/vinted_sniper/engine/health.py             | 13 +++++++++++++
+ src/vinted_sniper/engine/poller.py             |  5 +++++
+ src/vinted_sniper/web/templates/base.html      |  1 +
+ src/vinted_sniper/web/templates/dashboard.html |  3 ++-
+ tests/integration/test_poller.py               | 15 +++++++++++++++
+ 7 files changed, 50 insertions(+), 1 deletion(-)
+
+diff --git a/src/vinted_sniper/app.py b/src/vinted_sniper/app.py
+index 89e9160..19ca6e5 100644
+--- a/src/vinted_sniper/app.py
++++ b/src/vinted_sniper/app.py
+@@ -16,6 +16,7 @@ from __future__ import annotations
+ import asyncio
+ import contextlib
+ import signal
++import time
+ 
+ from vinted_sniper.config import Settings
+ from vinted_sniper.db import Database, apply_pending
+@@ -88,6 +89,7 @@ class Application:
+                 client = VintedClient(
+                     None, sessions, keep_raw=settings.keep_raw_json, budget=budget
+                 )
++                await self._restore_cooldowns(repo, sessions)
+                 dispatcher = Dispatcher(
+                     repo=repo,
+                     settings=settings,
+@@ -226,6 +228,16 @@ class Application:
+         except Exception as exc:
+             log.exception("poller.crashed", query_id=poller.query.id, error=str(exc))
+ 
++    @staticmethod
++    async def _restore_cooldowns(repo: Repo, sessions: SessionManager) -> None:
++        """A restart must not turn a hold into a fresh volley of requests."""
++        now = time.time()
++        for query in await repo.list_queries():
++            raw = await repo.get_state_value(f"cooldown_until:{query.tld}")
++            if raw and raw.isdigit() and int(raw) > now:
++                sessions.cooldown.close(query.tld, int(raw) - now)
++                log.info("cooldown.restored", tld=query.tld, seconds=round(int(raw) - now))
++
+     # --- Background chores ---------------------------------------------------------
+ 
+     async def _housekeeping(self, repo: Repo) -> None:
+diff --git a/src/vinted_sniper/botctl/telegram_bot.py b/src/vinted_sniper/botctl/telegram_bot.py
+index c911831..0c0104f 100644
+--- a/src/vinted_sniper/botctl/telegram_bot.py
++++ b/src/vinted_sniper/botctl/telegram_bot.py
+@@ -237,6 +237,8 @@ async def _status_text(repo: Repo) -> str:
+             else "never"
+         )
+         line = f"• {search.name} (id {search.query_id}) — {search.state}, last checked {last}"
++        if search.state == "cooling" and search.cooling_until:
++            line += f" (site held for {max(0, search.cooling_until - int(time.time())) // 60} min)"
+         if search.state == "failing" and search.last_error:
+             line += f"\n  {search.last_error[:120]}"
+         lines.append(line)
+diff --git a/src/vinted_sniper/engine/health.py b/src/vinted_sniper/engine/health.py
+index 46deac5..656419b 100644
+--- a/src/vinted_sniper/engine/health.py
++++ b/src/vinted_sniper/engine/health.py
+@@ -41,6 +41,8 @@ class SearchHealth:
+     rate_limits: int
+     poll_interval_s: int = 0
+     last_polled_at: int | None = None
++    # Set when the whole site is being held off after a refusal; see vinted/pacing.py.
++    cooling_until: int | None = None
+ 
+     @property
+     def next_check_at(self) -> int | None:
+@@ -54,6 +56,8 @@ class SearchHealth:
+         """A one-word summary, chosen so the unhappy cases are never mistaken for quiet."""
+         if self.paused:
+             return "paused"
++        if self.cooling_until is not None:
++            return "cooling"
+         if self.last_success_at is None:
+             return "starting"
+         if self.last_status and self.last_status != "ok":
+@@ -80,6 +84,7 @@ class SearchHealth:
+             "poll_interval_s": self.poll_interval_s,
+             "last_polled_at": self.last_polled_at,
+             "next_check_at": self.next_check_at,
++            "cooling_until": self.cooling_until,
+         }
+ 
+ 
+@@ -112,6 +117,13 @@ async def snapshot(repo: Repo) -> Snapshot:
+     """Gather the current state of every search in one pass."""
+     queries = await repo.list_queries()
+     states = {state.query_id: state for state in await repo.all_states()}
++    now = int(time.time())
++
++    cooling: dict[str, int] = {}
++    for tld in {query.tld for query in queries}:
++        raw = await repo.get_state_value(f"cooldown_until:{tld}")
++        if raw and raw.isdigit() and int(raw) > now:
++            cooling[tld] = int(raw)
+ 
+     searches = []
+     for query in queries:
+@@ -132,6 +144,7 @@ async def snapshot(repo: Repo) -> Snapshot:
+                 rate_limits=state.count_429 if state else 0,
+                 poll_interval_s=query.poll_interval_s,
+                 last_polled_at=state.last_polled_at if state else None,
++                cooling_until=cooling.get(query.tld),
+             )
+         )
+ 
+diff --git a/src/vinted_sniper/engine/poller.py b/src/vinted_sniper/engine/poller.py
+index 841a3da..bb4a024 100644
+--- a/src/vinted_sniper/engine/poller.py
++++ b/src/vinted_sniper/engine/poller.py
+@@ -103,6 +103,11 @@ class Poller:
+             delay = self._backoff()
+             first_on_site = not self._sessions.cooldown.is_closed(self.query.tld)
+             self._sessions.cooldown.close(self.query.tld, delay)
++            # Written down so the dashboard and /status can show "cooling down" rather
++            # than a row of failures, and so a restart does not forget the hold.
++            await self._repo.set_state_value(
++                f"cooldown_until:{self.query.tld}", str(int(time.time() + delay))
++            )
+             self._log.warning("poll.blocked", error=str(exc), retry_in_s=round(delay))
+             if first_on_site and self._announce is not None:
+                 with contextlib.suppress(Exception):
+diff --git a/src/vinted_sniper/web/templates/base.html b/src/vinted_sniper/web/templates/base.html
+index e95f2c0..5efb44c 100644
+--- a/src/vinted_sniper/web/templates/base.html
++++ b/src/vinted_sniper/web/templates/base.html
+@@ -144,6 +144,7 @@
+                          border-radius: 0; padding: .4rem .6rem; text-align: left;
+                          font-weight: 400; }
+     .combo-list button:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
++    .pill.cooling { background: #fff3e0; color: #e65100; }
+     .tag.drop { background: #e8f5e9; color: #1b5e20; }
+     tr.edit-row td { background: rgba(0,0,0,.025); }
+     td.actions { white-space: nowrap; }
+diff --git a/src/vinted_sniper/web/templates/dashboard.html b/src/vinted_sniper/web/templates/dashboard.html
+index 6b7ee52..fc4386c 100644
+--- a/src/vinted_sniper/web/templates/dashboard.html
++++ b/src/vinted_sniper/web/templates/dashboard.html
+@@ -138,7 +138,8 @@
+       <p class="muted" style="margin:0">
+         “stale” means this search has stopped seeing new listings while others on the same
+         site keep finding them — usually a session that needs replacing, which happens
+-        automatically. This table refreshes itself.
++        automatically. “cooling” means the site refused one search and every search on it
++        is waiting out the same backoff. This table refreshes itself.
+       </p>
+       <form method="post" action="/searches/interval" class="row inline" style="margin:0">
+         <label style="margin:0">Check all every</label>
+diff --git a/tests/integration/test_poller.py b/tests/integration/test_poller.py
+index 0f697b5..cfc6625 100644
+--- a/tests/integration/test_poller.py
++++ b/tests/integration/test_poller.py
+@@ -18,6 +18,7 @@ import pytest
+ from tests.conftest import ScriptedTransport
+ from vinted_sniper.config import Settings
+ from vinted_sniper.db.repo import Repo
++from vinted_sniper.engine import health
+ from vinted_sniper.engine.poller import Poller
+ from vinted_sniper.vinted.client import VintedClient
+ from vinted_sniper.vinted.pacing import SiteCooldown
+@@ -548,3 +549,17 @@ async def test_price_drop_tracking_can_be_switched_off(
+     transport.queue_catalog([make_item(1, photo_ts=now - 5, price="10.0")])
+     await poller.tick()
+     assert await repo.outbox_depth() == 0
++
++
++async def test_a_hold_is_written_down_and_shows_as_cooling(
++    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
++) -> None:
++    clock = FakeClock()
++    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock)
++    transport.queue_status(403, "Forbidden")
++    await poller.tick()
++
++    snapshot = await health.snapshot(repo)
++    (search,) = snapshot.searches
++    assert search.state == "cooling"
++    assert search.cooling_until is not None and search.cooling_until > time.time()
+-- 
+2.43.0
+

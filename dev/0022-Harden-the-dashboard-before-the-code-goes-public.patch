@@ -1,0 +1,464 @@
+From 0ee3b90b3bb599f9ce27799b3cc2e7b7920c7caa Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 20:29:17 +0000
+Subject: [PATCH 22/25] Harden the dashboard before the code goes public
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+An audit before publishing (bandit, ruff's S rules, pip-audit, detect-secrets,
+and a read of the web layer against the OWASP list) found no injection, no
+secrets, no vulnerable dependencies — and four things a dashboard on a home
+network gets away with but a public repository should not ship:
+
+- No CSRF defence. Forms authenticated by a cookie could be posted from any
+  site the owner happened to visit. The cookie is now SameSite=Strict (and
+  Secure behind HTTPS), state-changing requests whose Origin or Referer name
+  another host are refused, and CSP adds form-action 'self'.
+- No security headers. Every response now carries a CSP, X-Frame-Options
+  DENY, nosniff, no-referrer and a Permissions-Policy.
+- Inline onsubmit confirmations interpolated a search's name into a
+  JavaScript string. Autoescaping protects HTML, not JavaScript-in-attribute:
+  a name with a quote in it would have become code. Confirmations moved to
+  data attributes read by one handler.
+- The login form accepted guesses at network speed. Five wrong tokens from
+  one address now earn a 60 s cooldown with Retry-After.
+
+Also: the Telegram bot token is redacted from transport error messages
+before they can reach the outbox, the logs or the History page. SECURITY.md
+states the threat model, what is in place and what deliberately is not.
+---
+ CHANGELOG.md                                  |   3 +
+ SECURITY.md                                   |  55 +++++++
+ src/vinted_sniper/deliver/telegram.py         |   9 +-
+ src/vinted_sniper/web/security.py             | 150 ++++++++++++++++++
+ src/vinted_sniper/web/server.py               |  24 ++-
+ src/vinted_sniper/web/templates/base.html     |   8 +
+ .../web/templates/dashboard.html              |   4 +-
+ tests/integration/test_web.py                 |  52 ++++++
+ 8 files changed, 301 insertions(+), 4 deletions(-)
+ create mode 100644 SECURITY.md
+ create mode 100644 src/vinted_sniper/web/security.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 555470a..a99ba87 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -57,6 +57,9 @@ All notable changes, newest first. Dates are when the change landed on `main`.
+   `/api/export` and `/api/import`.
+ - The Docker image now includes the `impersonate` extra.
+ 
++### Security
++- Security headers on every response (CSP with `frame-ancestors 'none'` and `form-action 'self'`, `X-Frame-Options`, `nosniff`, `Referrer-Policy`); state-changing requests from another origin are refused; session cookie is `SameSite=Strict` and `Secure` behind HTTPS; five wrong tokens from one address earn a 60 s cooldown; no inline event handlers in templates; the Telegram bot token is redacted from stored error messages. `SECURITY.md` documents the threat model.
++
+ ### Changed
+ - New identity: a coat hanger whose hook is a target ring (mark), the same inside a scope (icon/favicon), and a wordmark set in Outfit converted to paths. Logo files carry their own licence (all rights reserved; code stays MIT).
+ - New README (English with a Slovak section) and an original logo (`docs/media/logo/`, light and
+diff --git a/SECURITY.md b/SECURITY.md
+new file mode 100644
+index 0000000..d9174ba
+--- /dev/null
++++ b/SECURITY.md
+@@ -0,0 +1,55 @@
++# Security
++
++## Reporting
++
++Found something? Open a private security advisory on GitHub (Security → Report a
++vulnerability) or write to the address on the maintainer's profile. Please do not open a
++public issue for anything that could let someone else read your alerts or drive your
++searches. You will get an answer within a week.
++
++## What this is, in security terms
++
++A single-tenant, self-hosted poller with a small web dashboard and a Telegram bot. It holds
++one secret worth protecting — `WEB_AUTH_TOKEN`, which is both the dashboard password and the
++bearer the agent uses — plus your Telegram bot token and whatever destination URLs you
++configure. It stores public Vinted listings; nothing about you beyond your searches.
++
++It never logs in to Vinted, never buys, never lists, never messages anyone. It reads the
++public catalog anonymously.
++
++## Threat model and what is in place
++
++| Threat | Control |
++|---|---|
++| Someone on the network opens the dashboard | `WEB_AUTH_TOKEN` gates every page and every API call except `/healthz`. Set it. Without it the app logs `web.no_password` and the dashboard is open to anyone who can reach the port — fine on `127.0.0.1`, not fine on `0.0.0.0`. |
++| Guessing the token | Constant-time comparison; five wrong tries from one address earn a 60 s cooldown (`429`, `Retry-After`). Use `openssl rand -hex 32`. |
++| Cross-site request forgery against the dashboard's forms | Session cookie is `HttpOnly`, `SameSite=Strict`, `Secure` behind HTTPS; state-changing requests whose `Origin`/`Referer` name another host are refused (403); CSP `form-action 'self'`. |
++| Cross-site scripting | Jinja autoescape everywhere; no inline event handlers (confirmations live in data attributes); CSP restricts scripts and styles to this origin and inline. Text from Vinted (titles, seller names) and from the agent (model, verdict) is escaped in HTML, Telegram HTML and RSS alike. |
++| Clickjacking, MIME sniffing, referrer leaks | `X-Frame-Options: DENY`, `frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. |
++| Token in logs or on the History page | Telegram error messages have the bot token redacted before they are stored; `httpx`/`httpcore` loggers run at WARNING; the dashboard token is never logged. |
++| SQL injection | Parameterised queries throughout; the only string-built SQL is a fixed whitelist of column names and `?` placeholder lists. |
++| A malicious Telegram user pressing buttons | Callback buttons are honoured only from a chat that is a paired destination. |
++| The agent (webhook) being someone else | Verdicts need the bearer token. The payload the agent receives never contains it. |
++| Supply chain | `uv.lock` pins everything; `pip-audit` reports no known vulnerabilities as of this release; CI runs `gitleaks`. |
++| Container | Runs as an unprivileged user, read-only root filesystem, `no-new-privileges`, only `/data` writable. |
++
++## What is deliberately *not* in place
++
++- **No multi-user model.** One token, one owner. Anyone with the token can do everything,
++  including exporting destination URLs and chat ids from `/api/export`. Treat the token like a
++  password to all of it.
++- **No TLS.** Put a reverse proxy (Caddy, nginx, Tailscale Serve) in front if the dashboard is
++  reachable beyond your LAN. The cookie's `Secure` flag turns on automatically behind HTTPS.
++- **No outbound URL allow-list.** Webhook destinations are URLs you type; the app will POST to
++  them, including addresses on your own network. That is the point of a webhook, but it means
++  the token holder can make the app talk to anything the container can reach.
++- **No rate limit on the API.** The token holder is you.
++
++## Publishing the code
++
++The code contains no secrets (`detect-secrets`, `gitleaks`), no vendored credentials, no test
++fixtures with real tokens. `.env` is gitignored; `.env.example` has placeholders only. The
++name is a nominative reference to Vinted; the project is not affiliated with Vinted and the
++README says so. Automated access to Vinted is against its terms of service — see
++`docs/legal.md`; running the tool is the operator's decision, publishing the code is not the
++same act.
+diff --git a/src/vinted_sniper/deliver/telegram.py b/src/vinted_sniper/deliver/telegram.py
+index 6d70da4..7babbfc 100644
+--- a/src/vinted_sniper/deliver/telegram.py
++++ b/src/vinted_sniper/deliver/telegram.py
+@@ -267,7 +267,9 @@ class TelegramSender:
+                 f"{API_ROOT}/bot{self._token}/{method}", json=payload
+             )
+         except httpx.HTTPError as exc:
+-            return SendResult.transient(outbox_ids, f"could not reach Telegram: {exc}")
++            return SendResult.transient(
++                outbox_ids, f"could not reach Telegram: {self._redact(str(exc))}"
++            )
+ 
+         try:
+             body = response.json()
+@@ -291,6 +293,11 @@ class TelegramSender:
+ 
+         return _classify(description, response.status_code, outbox_ids)
+ 
++    def _redact(self, text: str) -> str:
++        """The bot token appears in Telegram API URLs; it must never reach a log or the
++        history page by way of an error message."""
++        return text.replace(self._token, "<bot-token>")
++
+     async def aclose(self) -> None:
+         if self._owns_client:
+             await self._client.aclose()
+diff --git a/src/vinted_sniper/web/security.py b/src/vinted_sniper/web/security.py
+new file mode 100644
+index 0000000..a4a9ade
+--- /dev/null
++++ b/src/vinted_sniper/web/security.py
+@@ -0,0 +1,150 @@
++"""The parts of a web app that keep it honest when someone other than its owner finds it.
++
++The dashboard is meant for a home network or a tailnet, but "meant for" is not a control.
++So: response headers that stop the page being framed, sniffed or scripted from elsewhere;
++a same-origin rule for anything that changes state, which is what stands in for CSRF
++tokens when the session is a cookie; and a brake on the login form so a token cannot be
++guessed at network speed. None of it needs configuration, none of it gets in the owner's way.
++"""
++
++from __future__ import annotations
++
++import time
++from collections import defaultdict, deque
++from collections.abc import Awaitable, Callable
++from urllib.parse import urlsplit
++
++from starlette.requests import Request
++from starlette.responses import JSONResponse, Response
++from starlette.types import ASGIApp
++
++# Inline styles and scripts are how this app is built (one template, no bundler), so those
++# two get 'unsafe-inline'. Everything else is locked to this origin; listing photos come
++# from Vinted's CDN, whose hostnames vary, hence the https: allowance for images only.
++CONTENT_SECURITY_POLICY = (
++    "default-src 'self'; "
++    "img-src 'self' https: data:; "
++    "style-src 'self' 'unsafe-inline'; "
++    "script-src 'self' 'unsafe-inline'; "
++    "connect-src 'self'; "
++    "font-src 'self'; "
++    "frame-ancestors 'none'; "
++    "form-action 'self'; "
++    "base-uri 'none'"
++)
++
++SECURITY_HEADERS = {
++    "Content-Security-Policy": CONTENT_SECURITY_POLICY,
++    "X-Frame-Options": "DENY",
++    "X-Content-Type-Options": "nosniff",
++    "Referrer-Policy": "no-referrer",
++    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
++    "Cross-Origin-Opener-Policy": "same-origin",
++}
++
++_STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
++
++
++class SecurityHeadersMiddleware:
++    """Adds the headers above to every response."""
++
++    def __init__(self, app: ASGIApp) -> None:
++        self.app = app
++
++    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
++        if scope["type"] != "http":
++            await self.app(scope, receive, send)
++            return
++
++        async def send_with_headers(message):  # type: ignore[no-untyped-def]
++            if message["type"] == "http.response.start":
++                headers = message.setdefault("headers", [])
++                present = {k.lower() for k, _ in headers}
++                for name, value in SECURITY_HEADERS.items():
++                    if name.lower().encode() not in present:
++                        headers.append((name.lower().encode(), value.encode()))
++            await send(message)
++
++        await self.app(scope, receive, send_with_headers)
++
++
++class SameOriginMiddleware:
++    """Refuses state-changing requests that arrive from another site.
++
++    A browser sends `Origin` (or at least `Referer`) with every cross-site form post; when
++    it names a different host than the one we are being addressed as, the request was not
++    made by the owner clicking in the dashboard. Requests that carry no browser provenance
++    at all — curl, n8n posting a verdict with a bearer token — are left alone; they cannot
++    be a CSRF, because CSRF needs the browser's cookie.
++    """
++
++    def __init__(self, app: ASGIApp) -> None:
++        self.app = app
++
++    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
++        if scope["type"] == "http" and scope["method"] in _STATE_CHANGING:
++            request = Request(scope)
++            if not _same_origin(request):
++                response = JSONResponse({"detail": "cross-site request refused"}, status_code=403)
++                await response(scope, receive, send)
++                return
++        await self.app(scope, receive, send)
++
++
++def _same_origin(request: Request) -> bool:
++    provenance = request.headers.get("origin") or request.headers.get("referer")
++    if not provenance or provenance == "null":
++        # No browser provenance: not a cross-site form post. (Cookie-bearing requests from
++        # a browser always carry Origin on POST; a missing one means a non-browser client.)
++        return "cookie" not in request.headers or request.headers.get("sec-fetch-site") in (
++            None,
++            "same-origin",
++            "none",
++        )
++    origin_host = urlsplit(provenance).netloc.lower()
++    our_host = (request.headers.get("host") or "").lower()
++    return origin_host == our_host
++
++
++class LoginThrottle:
++    """After a few wrong tokens from one address, make it wait.
++
++    Enough to turn guessing a 64-hex token from impossible-in-theory into
++    impossible-in-practice-too, without ever locking the owner out for long.
++    """
++
++    def __init__(
++        self, *, attempts: int = 5, window_s: float = 600.0, cooldown_s: float = 60.0
++    ) -> None:
++        self._attempts = attempts
++        self._window_s = window_s
++        self._cooldown_s = cooldown_s
++        self._failures: dict[str, deque[float]] = defaultdict(deque)
++        self._blocked_until: dict[str, float] = {}
++
++    def retry_after(self, client: str, now: float | None = None) -> float:
++        """Seconds this client must wait before another try; zero when it may try now."""
++        now = time.monotonic() if now is None else now
++        until = self._blocked_until.get(client, 0.0)
++        return max(0.0, until - now)
++
++    def failed(self, client: str, now: float | None = None) -> None:
++        now = time.monotonic() if now is None else now
++        recent = self._failures[client]
++        recent.append(now)
++        while recent and now - recent[0] > self._window_s:
++            recent.popleft()
++        if len(recent) >= self._attempts:
++            self._blocked_until[client] = now + self._cooldown_s
++            recent.clear()
++
++    def succeeded(self, client: str) -> None:
++        self._failures.pop(client, None)
++        self._blocked_until.pop(client, None)
++
++
++def client_address(request: Request) -> str:
++    return request.client.host if request.client else "unknown"
++
++
++ExceptionHandler = Callable[[Request, Exception], Awaitable[Response]]
+diff --git a/src/vinted_sniper/web/server.py b/src/vinted_sniper/web/server.py
+index 3c23ac7..1bd8676 100644
+--- a/src/vinted_sniper/web/server.py
++++ b/src/vinted_sniper/web/server.py
+@@ -44,6 +44,12 @@ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted import urls
+ from vinted_sniper.vinted.errors import VintedError
+ from vinted_sniper.vinted.taxonomy import FACET_CODES, Taxonomy
++from vinted_sniper.web.security import (
++    LoginThrottle,
++    SameOriginMiddleware,
++    SecurityHeadersMiddleware,
++    client_address,
++)
+ 
+ log = get_logger(__name__)
+ 
+@@ -63,6 +69,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+     token = settings.web_auth_token  # None means no password: the dashboard just opens
+ 
+     app = FastAPI(title="vinted-sniper", docs_url=None, redoc_url=None)
++    app.add_middleware(SecurityHeadersMiddleware)
++    app.add_middleware(SameOriginMiddleware)
++    throttle = LoginThrottle()
+ 
+     async def require_login(
+         session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+@@ -95,19 +104,32 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+     async def login(request: Request, access_token: Annotated[str, Form()]) -> Response:
+         if token is None:
+             return RedirectResponse("/", status_code=303)
++        client = client_address(request)
++        if (wait := throttle.retry_after(client)) > 0:
++            return TEMPLATES.TemplateResponse(
++                request,
++                "login.html",
++                {"error": f"Too many wrong tokens. Try again in {int(wait) + 1} s."},
++                status_code=429,
++                headers={"Retry-After": str(int(wait) + 1)},
++            )
+         if not _authorised(access_token, token):
++            throttle.failed(client)
++            log.warning("web.login_failed", client=client)
+             return TEMPLATES.TemplateResponse(
+                 request,
+                 "login.html",
+                 {"error": "That token does not match."},
+                 status_code=401,
+             )
++        throttle.succeeded(client)
+         response = RedirectResponse("/", status_code=303)
+         response.set_cookie(
+             SESSION_COOKIE,
+             access_token,
+             httponly=True,
+-            samesite="lax",
++            samesite="strict",
++            secure=request.url.scheme == "https",
+             max_age=30 * 86_400,
+         )
+         return response
+diff --git a/src/vinted_sniper/web/templates/base.html b/src/vinted_sniper/web/templates/base.html
+index aec1b7f..d8456cc 100644
+--- a/src/vinted_sniper/web/templates/base.html
++++ b/src/vinted_sniper/web/templates/base.html
+@@ -262,5 +262,13 @@
+     {% endif %}
+     {% block content %}{% endblock %}
+   </main>
++  <script>
++    // Confirmations live in data attributes, never in inline handlers: a name with a quote
++    // in it must be text, not code.
++    document.addEventListener("submit", (event) => {
++      const form = event.target.closest("form[data-confirm]");
++      if (form && !window.confirm(form.dataset.confirm)) event.preventDefault();
++    });
++  </script>
+ </body>
+ </html>
+diff --git a/src/vinted_sniper/web/templates/dashboard.html b/src/vinted_sniper/web/templates/dashboard.html
+index 4006b9b..5ab6e33 100644
+--- a/src/vinted_sniper/web/templates/dashboard.html
++++ b/src/vinted_sniper/web/templates/dashboard.html
+@@ -90,7 +90,7 @@
+             </button>
+           </form>
+           <form method="post" action="/searches/{{ search.query_id }}/delete" class="inline"
+-                onsubmit="return confirm('Delete “{{ search.name }}”?\n\nIts recorded listings and market history go with it. Pausing keeps them.')">
++                data-confirm="Delete “{{ search.name }}”? Its recorded listings and market history go with it. Pausing keeps them.">
+             <button class="danger icon" type="submit" title="Remove this search and its history">{{ icon('trash') }} Delete</button>
+           </form>
+         </td>
+@@ -377,7 +377,7 @@
+         <td class="actions">
+           {% if destination.active %}
+           <form method="post" action="/destinations/{{ destination.id }}/delete" class="inline"
+-                onsubmit="return confirm('Remove “{{ destination.name }}”? Searches routed to it will stop alerting there.')">
++                data-confirm="Remove “{{ destination.name }}”? Searches routed to it will stop alerting there.">
+             <button class="danger icon" type="submit">{{ icon('trash') }} Remove</button>
+           </form>
+           {% endif %}
+diff --git a/tests/integration/test_web.py b/tests/integration/test_web.py
+index 031f9ee..adcf48a 100644
+--- a/tests/integration/test_web.py
++++ b/tests/integration/test_web.py
+@@ -569,3 +569,55 @@ def test_the_help_page_explains_the_words(signed_in: TestClient) -> None:
+     assert page.status_code == 200
+     for phrase in ("Only the cheapest", "Total price", "Quiet hours", "Current settings"):
+         assert phrase in page.text
++
++
++# --- Security --------------------------------------------------------------------------
++
++
++def test_every_response_carries_the_security_headers(signed_in: TestClient) -> None:
++    response = signed_in.get("/")
++    assert response.headers["x-frame-options"] == "DENY"
++    assert response.headers["x-content-type-options"] == "nosniff"
++    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
++    assert "form-action 'self'" in response.headers["content-security-policy"]
++    assert response.headers["referrer-policy"] == "no-referrer"
++
++
++def test_a_form_posted_from_another_site_is_refused(signed_in: TestClient, repo: Repo) -> None:
++    payload = {"url": "https://www.vinted.fr/catalog?search_text=csrf"}
++    response = signed_in.post(
++        "/searches",
++        data=payload,
++        headers={"Origin": "https://evil.example", "Referer": "https://evil.example/page"},
++        follow_redirects=False,
++    )
++    assert response.status_code == 403
++
++    same = signed_in.post(
++        "/searches", data=payload, headers={"Origin": "http://testserver"}, follow_redirects=False
++    )
++    assert same.status_code == 303
++
++
++def test_wrong_tokens_are_throttled(client: TestClient) -> None:
++    for _ in range(5):
++        assert client.post("/login", data={"access_token": "nope"}).status_code == 401
++    blocked = client.post("/login", data={"access_token": "nope"})
++    assert blocked.status_code == 429
++    assert "Retry-After" in blocked.headers
++
++
++def test_the_session_cookie_is_httponly_and_strict(client: TestClient) -> None:
++    response = client.post("/login", data={"access_token": TOKEN}, follow_redirects=False)
++    cookie = response.headers["set-cookie"].lower()
++    assert "httponly" in cookie
++    assert "samesite=strict" in cookie
++
++
++def test_no_inline_event_handlers_in_the_templates() -> None:
++    """A name with a quote in it must stay text; inline handlers turn it into code."""
++
++    templates = Path(__file__).resolve().parents[2] / "src/vinted_sniper/web/templates"
++    for page in templates.glob("*.html"):
++        text = page.read_text(encoding="utf-8")
++        assert " onsubmit=" not in text and " onclick=" not in text, page.name
+-- 
+2.43.0
+

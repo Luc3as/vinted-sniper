@@ -1,0 +1,607 @@
+From 78672c72efdd32a78a6e8aa49b75f142eab2f92b Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 16:45:30 +0000
+Subject: [PATCH 02/25] Filter on the title and the seller, not just the price
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Vinted's text search matches descriptions as well as titles, so a search for
+one model returns every listing that mentions it in passing. And the API says
+who is selling — rating, review count, username — which is the difference
+between a bargain and a gamble, but nothing acted on it.
+
+A search can now require words in the title (all of them), match the title
+against a regular expression, skip sellers below a rating or review count, and
+skip named sellers. Available as CLI flags on `watch`, under "More filters" in
+the dashboard, and stored in five new nullable columns (migration 0004) so
+existing searches behave exactly as before.
+
+filters.check() is now a pipeline of small gates rather than one long function;
+same behaviour, same rejection reasons, easier to add the next one.
+---
+ README.md                                     |   1 +
+ docs/configuration.md                         |   7 +
+ src/vinted_sniper/cli.py                      |  54 ++++++-
+ .../0004_title_and_seller_filters.sql         |   9 ++
+ src/vinted_sniper/db/repo.py                  |  27 +++-
+ src/vinted_sniper/engine/filters.py           | 134 ++++++++++++++++--
+ src/vinted_sniper/web/server.py               |  49 ++++++-
+ .../web/templates/dashboard.html              |  30 ++++
+ tests/unit/test_dedup_and_filters.py          |  55 +++++++
+ 9 files changed, 351 insertions(+), 15 deletions(-)
+ create mode 100644 src/vinted_sniper/db/migrations/0004_title_and_seller_filters.sql
+
+diff --git a/README.md b/README.md
+index 4f91cec..da815a2 100644
+--- a/README.md
++++ b/README.md
+@@ -48,6 +48,7 @@ Raspberry Pi, NAS or cheap VPS: see [the self-hosting guide](docs/self-hosting.m
+ ## Features
+ 
+ - **Filters on what you actually pay**, buyer protection included. Vinted's own price filter ignores it.
++- **Filters Vinted's search cannot express**: words the title must contain, a title regex, a floor on seller rating and review count, and sellers to skip.
+ - **Tells you when it stops working.** A watchdog spots a search going silent and fixes the session itself.
+ - **No Vinted account, no login, no cookies.** Nothing for Vinted to restrict.
+ - **Search builder in the dashboard**: Vinted's own categories, brand autocomplete and filters, with live counts.
+diff --git a/docs/configuration.md b/docs/configuration.md
+index add5ecb..b63b115 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -103,6 +103,13 @@ Options for `watch`:
+ | `--every N` | Seconds between checks for this search. |
+ | `--max-price N` | Skip anything above this **including buyer protection**. |
+ | `--exclude a,b,c` | Skip listings whose title contains any of these words. |
++| `--require a,b` | Only keep listings whose title contains **all** of these words. Vinted's own text search also matches descriptions, which is where most of the noise comes from. |
++| `--title-regex PATTERN` | Only keep listings whose title matches this regular expression (case-insensitive). |
++| `--min-seller-rating N` | Skip sellers rated below N percent. Sellers with no rating yet are skipped too. |
++| `--min-seller-reviews N` | Skip sellers with fewer than N reviews. |
++| `--block-seller a,b` | Skip these seller usernames outright. |
++
++The same fields are under "More filters" when adding a search in the dashboard.
+ | `--to 1,2` | Destination ids to notify. Defaults to all active ones. |
+ 
+ ## Adding a search
+diff --git a/src/vinted_sniper/cli.py b/src/vinted_sniper/cli.py
+index fe75eea..67bb981 100644
+--- a/src/vinted_sniper/cli.py
++++ b/src/vinted_sniper/cli.py
+@@ -13,7 +13,7 @@ from vinted_sniper import __version__, app, log
+ from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
+ from vinted_sniper.db import Database, apply_pending
+ from vinted_sniper.db.repo import Repo
+-from vinted_sniper.engine import health
++from vinted_sniper.engine import filters, health
+ from vinted_sniper.vinted import urls
+ from vinted_sniper.vinted.client import VintedClient
+ from vinted_sniper.vinted.errors import BlockedError, VintedError
+@@ -57,6 +57,25 @@ def build_parser() -> argparse.ArgumentParser:
+         help="Skip anything above this, buyer protection included.",
+     )
+     watch.add_argument("--exclude", default="", help="Comma-separated words to skip in titles.")
++    watch.add_argument(
++        "--require", default="", help="Comma-separated words that must all appear in the title."
++    )
++    watch.add_argument(
++        "--title-regex",
++        default="",
++        help="A regular expression the title must match (case-insensitive).",
++    )
++    watch.add_argument(
++        "--min-seller-rating",
++        default="",
++        help="Skip sellers rated below this, as a percentage (e.g. 90).",
++    )
++    watch.add_argument(
++        "--min-seller-reviews", type=int, default=0, help="Skip sellers with fewer reviews."
++    )
++    watch.add_argument(
++        "--block-seller", default="", help="Comma-separated seller usernames to skip."
++    )
+     watch.add_argument(
+         "--to",
+         default="",
+@@ -184,6 +203,14 @@ async def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
+             print("That search is already being watched.", file=sys.stderr)
+             return 1
+ 
++        if args.title_regex and (problem := filters.validate_pattern(args.title_regex)):
++            print(f"--title-regex does not compile: {problem}", file=sys.stderr)
++            return 1
++        min_rating = _rating_or_none(args.min_seller_rating)
++        if args.min_seller_rating and min_rating is None:
++            print("--min-seller-rating must be a number between 0 and 100", file=sys.stderr)
++            return 1
++
+         interval = max(args.every or settings.poll_default_interval_s, MIN_POLL_INTERVAL_S)
+         query_id = await repo.add_query(
+             name=args.name.strip() or (params.get("search_text") or f"vinted.{tld}"),
+@@ -191,8 +218,13 @@ async def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
+             tld=tld,
+             params=params,
+             poll_interval_s=interval,
+-            banned_keywords=[w.strip() for w in args.exclude.split(",") if w.strip()],
++            banned_keywords=_csv(args.exclude),
+             max_total_price=max_price,
++            required_keywords=_csv(args.require),
++            title_pattern=args.title_regex.strip() or None,
++            min_seller_rating=min_rating,
++            min_seller_reviews=args.min_seller_reviews or None,
++            blocked_sellers=_csv(args.block_seller),
+         )
+ 
+         if args.to.strip():
+@@ -209,6 +241,24 @@ async def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
+     return 0
+ 
+ 
++def _csv(raw: str) -> list[str]:
++    return [part.strip() for part in raw.split(",") if part.strip()]
++
++
++def _rating_or_none(raw: str) -> float | None:
++    """A rating typed as a percentage (90) or a fraction (0.9), stored as a fraction."""
++    raw = raw.strip().rstrip("%")
++    if not raw:
++        return None
++    try:
++        value = float(raw)
++    except ValueError:
++        return None
++    if value > 1.0:
++        value /= 100.0
++    return value if 0.0 <= value <= 1.0 else None
++
++
+ async def _cmd_searches(settings: Settings) -> int:
+     async with Database(settings.db_path) as db:
+         await apply_pending(db)
+diff --git a/src/vinted_sniper/db/migrations/0004_title_and_seller_filters.sql b/src/vinted_sniper/db/migrations/0004_title_and_seller_filters.sql
+new file mode 100644
+index 0000000..0a96a8c
+--- /dev/null
++++ b/src/vinted_sniper/db/migrations/0004_title_and_seller_filters.sql
+@@ -0,0 +1,9 @@
++-- Filters Vinted's own search cannot express. Words that must all appear in the title, a
++-- regular expression the title must match, a floor on the seller's rating and review
++-- count, and sellers to skip outright. All optional; rows written before this migration
++-- keep NULL / '[]' and behave exactly as they did.
++ALTER TABLE queries ADD COLUMN required_keywords_json TEXT NOT NULL DEFAULT '[]';
++ALTER TABLE queries ADD COLUMN title_pattern TEXT;
++ALTER TABLE queries ADD COLUMN min_seller_rating REAL;
++ALTER TABLE queries ADD COLUMN min_seller_reviews INTEGER;
++ALTER TABLE queries ADD COLUMN blocked_sellers_json TEXT NOT NULL DEFAULT '[]';
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index 41db43e..970a588 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -35,6 +35,12 @@ class Query:
+     max_total_price: Decimal | None = None
+     conditions: list[str] | None = None
+     countries: list[str] | None = None
++    # What Vinted's search cannot express; see engine/filters.py.
++    required_keywords: list[str] = field(default_factory=list)
++    title_pattern: str | None = None
++    min_seller_rating: float | None = None
++    min_seller_reviews: int | None = None
++    blocked_sellers: list[str] = field(default_factory=list)
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -112,12 +118,19 @@ class Repo:
+         poll_interval_s: int,
+         banned_keywords: list[str] | None = None,
+         max_total_price: Decimal | None = None,
++        required_keywords: list[str] | None = None,
++        title_pattern: str | None = None,
++        min_seller_rating: float | None = None,
++        min_seller_reviews: int | None = None,
++        blocked_sellers: list[str] | None = None,
+     ) -> int:
+         now = int(time.time())
+         query_id = await self._db.insert(
+             "INSERT INTO queries (name, url, tld, params_json, poll_interval_s, "
+-            "banned_keywords_json, max_total_price, created_at, updated_at) "
+-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
++            "banned_keywords_json, max_total_price, required_keywords_json, title_pattern, "
++            "min_seller_rating, min_seller_reviews, blocked_sellers_json, "
++            "created_at, updated_at) "
++            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (
+                 name,
+                 url,
+@@ -126,6 +139,11 @@ class Repo:
+                 poll_interval_s,
+                 json.dumps(banned_keywords or []),
+                 float(max_total_price) if max_total_price is not None else None,
++                json.dumps(required_keywords or []),
++                title_pattern or None,
++                min_seller_rating,
++                min_seller_reviews,
++                json.dumps(blocked_sellers or []),
+                 now,
+                 now,
+             ),
+@@ -172,6 +190,11 @@ class Repo:
+             ),
+             conditions=_json_list(row["conditions_json"]),
+             countries=_json_list(row["countries_json"]),
++            required_keywords=_json_list(row["required_keywords_json"]) or [],
++            title_pattern=row["title_pattern"],
++            min_seller_rating=row["min_seller_rating"],
++            min_seller_reviews=row["min_seller_reviews"],
++            blocked_sellers=_json_list(row["blocked_sellers_json"]) or [],
+         )
+ 
+     # --- Search state --------------------------------------------------------------
+diff --git a/src/vinted_sniper/engine/filters.py b/src/vinted_sniper/engine/filters.py
+index 75af96a..e51d2b2 100644
+--- a/src/vinted_sniper/engine/filters.py
++++ b/src/vinted_sniper/engine/filters.py
+@@ -4,10 +4,18 @@ Vinted's own filters get you most of the way there; these cover what its search
+ The important one is price: Vinted filters on the asking price, but you pay the asking
+ price plus buyer protection, so a `price_to=30` search happily returns things that cost you
+ 33. Filtering on the total is the difference between a useful alert and a misleading one.
++
++The rest are about the title and the seller. Vinted's text search is loose — a search for
++"Torrentshell" happily returns every Patagonia listing whose description mentions it — so
++words that must appear in the title, or a pattern the title must match, cut the noise at
++the source. And a bargain from a seller with no history is a different offer from the same
++bargain from one with three hundred reviews; the API says which, so the filter can too.
+ """
+ 
+ from __future__ import annotations
+ 
++import functools
++import re
+ from dataclasses import dataclass
+ 
+ from vinted_sniper.db.repo import Query
+@@ -25,35 +33,143 @@ class Rejection:
+ 
+ def check(item: Item, query: Query) -> Rejection | None:
+     """Return why this listing should be skipped, or None if it should be sent."""
++    for gate in _GATES:
++        if rejection := gate(item, query):
++            return rejection
++    return None
++
++
++def _promoted(item: Item, _query: Query) -> Rejection | None:
+     if item.promoted:
+         # Boosted listings resurface old stock. They are not new, whatever the feed says.
+         return Rejection("promoted", "listing is a paid bump")
++    return None
++
+ 
++def _banned(item: Item, query: Query) -> Rejection | None:
+     if banned := _banned_keyword(item, query.banned_keywords):
+         return Rejection("banned_keyword", f"title contains {banned!r}")
++    return None
++
+ 
+-    if query.max_total_price is not None:
+-        payable = item.total_price if item.total_price is not None else item.price
+-        if payable is None:
+-            return Rejection("no_price", "listing has no price to compare")
+-        if payable > query.max_total_price:
+-            return Rejection(
+-                "over_budget",
+-                f"{payable} above limit {query.max_total_price} (buyer protection included)",
+-            )
++def _required(item: Item, query: Query) -> Rejection | None:
++    if missing := _missing_keyword(item, query.required_keywords):
++        return Rejection("missing_keyword", f"title lacks {missing!r}")
++    return None
+ 
++
++def _title_pattern(item: Item, query: Query) -> Rejection | None:
++    if query.title_pattern and not _pattern(query.title_pattern).search(item.title):
++        return Rejection("title_pattern", f"title does not match /{query.title_pattern}/")
++    return None
++
++
++def _price(item: Item, query: Query) -> Rejection | None:
++    if query.max_total_price is None:
++        return None
++    payable = item.total_price if item.total_price is not None else item.price
++    if payable is None:
++        return Rejection("no_price", "listing has no price to compare")
++    if payable > query.max_total_price:
++        return Rejection(
++            "over_budget",
++            f"{payable} above limit {query.max_total_price} (buyer protection included)",
++        )
++    return None
++
++
++def _condition(item: Item, query: Query) -> Rejection | None:
+     if query.conditions and (item.condition or "").lower() not in {
+         condition.lower() for condition in query.conditions
+     }:
+         return Rejection("condition", f"condition {item.condition!r} not wanted")
++    return None
++
++
++def _blocked_seller(item: Item, query: Query) -> Rejection | None:
++    if not query.blocked_sellers or not item.seller_login:
++        return None
++    if item.seller_login.lower() in {s.strip().lower() for s in query.blocked_sellers}:
++        return Rejection("blocked_seller", f"seller {item.seller_login!r} is blocked")
++    return None
++
+ 
++def _seller_rating(item: Item, query: Query) -> Rejection | None:
++    if query.min_seller_rating is None:
++        return None
++    if item.seller_rating is None:
++        return Rejection("seller_rating", "seller has no rating yet")
++    if item.seller_rating < query.min_seller_rating:
++        return Rejection(
++            "seller_rating",
++            f"seller rated {item.seller_rating:.0%}, below {query.min_seller_rating:.0%}",
++        )
+     return None
+ 
+ 
++def _seller_reviews(item: Item, query: Query) -> Rejection | None:
++    if query.min_seller_reviews is None:
++        return None
++    if item.seller_feedback_count is None:
++        return Rejection("seller_reviews", "seller review count unknown")
++    if item.seller_feedback_count < query.min_seller_reviews:
++        return Rejection(
++            "seller_reviews",
++            f"seller has {item.seller_feedback_count} reviews, below {query.min_seller_reviews}",
++        )
++    return None
++
++
++# Cheapest and most common rejections first; the order only affects which reason a
++# doubly-unwanted listing is reported under.
++_GATES = (
++    _promoted,
++    _banned,
++    _required,
++    _title_pattern,
++    _price,
++    _condition,
++    _blocked_seller,
++    _seller_rating,
++    _seller_reviews,
++)
++
++
+ def matches(item: Item, query: Query) -> bool:
+     return check(item, query) is None
+ 
+ 
++def _missing_keyword(item: Item, required: list[str]) -> str | None:
++    """The first required word that is not in the title. Every listed word must appear."""
++    if not required:
++        return None
++    haystack = item.title.lower()
++    for word in required:
++        candidate = word.strip().lower()
++        if candidate and candidate not in haystack:
++            return word
++    return None
++
++
++@functools.lru_cache(maxsize=256)
++def _pattern(pattern: str) -> re.Pattern[str]:
++    """Compiled once per distinct pattern. An invalid one matches nothing rather than
++    crashing the check; validate_pattern() is what tells the person at input time."""
++    try:
++        return re.compile(pattern, re.IGNORECASE)
++    except re.error:
++        return re.compile(r"(?!)")
++
++
++def validate_pattern(pattern: str) -> str | None:
++    """Why a title pattern will not compile, or None if it is fine."""
++    try:
++        re.compile(pattern, re.IGNORECASE)
++    except re.error as exc:
++        return str(exc)
++    return None
++
++
+ def _banned_keyword(item: Item, banned: list[str]) -> str | None:
+     if not banned:
+         return None
+diff --git a/src/vinted_sniper/web/server.py b/src/vinted_sniper/web/server.py
+index 8ca9a81..e54f16e 100644
+--- a/src/vinted_sniper/web/server.py
++++ b/src/vinted_sniper/web/server.py
+@@ -36,7 +36,7 @@ from pydantic import SecretStr
+ 
+ from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
+ from vinted_sniper.db.repo import Repo
+-from vinted_sniper.engine import health
++from vinted_sniper.engine import filters, health
+ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted import urls
+ from vinted_sniper.vinted.errors import VintedError
+@@ -158,6 +158,11 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+         interval: Annotated[int, Form()] = 0,
+         max_total_price: Annotated[str, Form()] = "",
+         banned_keywords: Annotated[str, Form()] = "",
++        required_keywords: Annotated[str, Form()] = "",
++        title_pattern: Annotated[str, Form()] = "",
++        min_seller_rating: Annotated[str, Form()] = "",
++        min_seller_reviews: Annotated[str, Form()] = "",
++        blocked_sellers: Annotated[str, Form()] = "",
+         destination_ids: Annotated[list[int] | None, Form()] = None,
+         _: None = guard,
+     ) -> Response:
+@@ -171,14 +176,26 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+         if await repo.find_query_by_url(normalised) is not None:
+             return _redirect_with_error("that search is already being watched")
+ 
++        title_pattern = title_pattern.strip()
++        if title_pattern and (problem := filters.validate_pattern(title_pattern)):
++            return _redirect_with_error(f"title pattern does not compile: {problem}")
++        rating = _rating_or_none(min_seller_rating)
++        if min_seller_rating.strip() and rating is None:
++            return _redirect_with_error("minimum seller rating must be between 0 and 100")
++
+         query_id = await repo.add_query(
+             name=name.strip() or _name_from(params, tld),
+             url=normalised,
+             tld=tld,
+             params=params,
+             poll_interval_s=max(interval or settings.poll_default_interval_s, MIN_POLL_INTERVAL_S),
+-            banned_keywords=[w.strip() for w in banned_keywords.split(",") if w.strip()],
++            banned_keywords=_csv(banned_keywords),
+             max_total_price=_decimal_or_none(max_total_price),
++            required_keywords=_csv(required_keywords),
++            title_pattern=title_pattern or None,
++            min_seller_rating=rating,
++            min_seller_reviews=_int_or_none(min_seller_reviews),
++            blocked_sellers=_csv(blocked_sellers),
+         )
+         for destination_id in destination_ids or []:
+             await repo.route(query_id, destination_id)
+@@ -382,6 +399,34 @@ def _id_list(raw: str) -> str:
+     return ",".join(part.strip() for part in raw.split(",") if part.strip().isdigit())
+ 
+ 
++def _csv(raw: str) -> list[str]:
++    return [part.strip() for part in raw.split(",") if part.strip()]
++
++
++def _int_or_none(raw: str) -> int | None:
++    raw = raw.strip()
++    if not raw:
++        return None
++    try:
++        return int(raw) or None
++    except ValueError:
++        return None
++
++
++def _rating_or_none(raw: str) -> float | None:
++    """Accepts 90, 90% or 0.9; stores a fraction, which is what the API reports."""
++    raw = raw.strip().rstrip("%")
++    if not raw:
++        return None
++    try:
++        value = float(raw)
++    except ValueError:
++        return None
++    if value > 1.0:
++        value /= 100.0
++    return value if 0.0 <= value <= 1.0 else None
++
++
+ def _decimal_or_none(raw: str) -> Decimal | None:
+     raw = raw.strip()
+     if not raw:
+diff --git a/src/vinted_sniper/web/templates/dashboard.html b/src/vinted_sniper/web/templates/dashboard.html
+index 1e9f4ea..0561b1d 100644
+--- a/src/vinted_sniper/web/templates/dashboard.html
++++ b/src/vinted_sniper/web/templates/dashboard.html
+@@ -167,6 +167,36 @@
+                  placeholder="fake, replica">
+         </div>
+       </div>
++      <details style="margin-top:.75rem">
++        <summary>More filters — title and seller</summary>
++        <div class="grid" style="margin-top:.5rem">
++          <div>
++            <label for="required_keywords">Title must contain (all)</label>
++            <input type="text" id="required_keywords" name="required_keywords"
++                   placeholder="torrentshell, 3l">
++          </div>
++          <div>
++            <label for="title_pattern">Title matches regex</label>
++            <input type="text" id="title_pattern" name="title_pattern"
++                   placeholder="\b(M|L)\b|size 4[0-2]">
++          </div>
++          <div>
++            <label for="min_seller_rating">Min. seller rating (%)</label>
++            <input type="text" id="min_seller_rating" name="min_seller_rating"
++                   placeholder="90" inputmode="numeric">
++          </div>
++          <div>
++            <label for="min_seller_reviews">Min. seller reviews</label>
++            <input type="text" id="min_seller_reviews" name="min_seller_reviews"
++                   placeholder="5" inputmode="numeric">
++          </div>
++          <div>
++            <label for="blocked_sellers">Skip sellers</label>
++            <input type="text" id="blocked_sellers" name="blocked_sellers"
++                   placeholder="usernames, comma-separated">
++          </div>
++        </div>
++      </details>
+       {% if destinations %}
+       <div style="margin-top:.75rem">
+         <label>Send to</label>
+diff --git a/tests/unit/test_dedup_and_filters.py b/tests/unit/test_dedup_and_filters.py
+index f257acd..565b6b7 100644
+--- a/tests/unit/test_dedup_and_filters.py
++++ b/tests/unit/test_dedup_and_filters.py
+@@ -245,3 +245,58 @@ def test_freshness_window_uses_real_clock_units() -> None:
+     )
+ 
+     assert [i.item_id for i in result.to_notify] == [1]
++
++
++# --- Title and seller filters ------------------------------------------------------
++
++
++def test_required_words_must_all_appear() -> None:
++    query = search(required_keywords=["Torrentshell", "3L"])
++    assert filters.matches(item(1, title="Patagonia Torrentshell 3L jacket"), query)
++    rejection = filters.check(item(2, title="Patagonia Torrentshell jacket"), query)
++    assert rejection is not None
++    assert rejection.reason == "missing_keyword"
++    assert "3L" in rejection.detail
++
++
++def test_required_words_ignore_case() -> None:
++    assert filters.matches(item(1, title="RAB DOWNPOUR"), search(required_keywords=["downpour"]))
++
++
++def test_the_title_pattern_is_case_insensitive_and_anchored_nowhere() -> None:
++    query = search(title_pattern=r"\b(m|l)\b")
++    assert filters.matches(item(1, title="Nike jacket size M"), query)
++    assert not filters.matches(item(2, title="Nike jacket size XL"), query)
++
++
++def test_an_invalid_pattern_matches_nothing_rather_than_crashing() -> None:
++    assert not filters.matches(item(1, title="anything"), search(title_pattern="("))
++    assert filters.validate_pattern("(") is not None
++    assert filters.validate_pattern(r"\d+") is None
++
++
++@pytest.mark.parametrize("rating", [0.85, None])
++def test_low_or_unknown_seller_ratings_are_skipped(rating: float | None) -> None:
++    rejection = filters.check(item(1, seller_rating=rating), search(min_seller_rating=0.9))
++    assert rejection is not None
++    assert rejection.reason == "seller_rating"
++
++
++def test_a_seller_on_the_rating_floor_is_kept() -> None:
++    assert filters.matches(item(1, seller_rating=0.9), search(min_seller_rating=0.9))
++
++
++def test_sellers_with_too_few_reviews_are_skipped() -> None:
++    query = search(min_seller_reviews=5)
++    assert filters.matches(item(1, seller_feedback_count=5), query)
++    assert not filters.matches(item(2, seller_feedback_count=4), query)
++    assert not filters.matches(item(3, seller_feedback_count=None), query)
++
++
++def test_blocked_sellers_are_skipped_regardless_of_case() -> None:
++    query = search(blocked_sellers=["Scammer99"])
++    rejection = filters.check(item(1, seller_login="scammer99"), query)
++    assert rejection is not None
++    assert rejection.reason == "blocked_seller"
++    assert filters.matches(item(2, seller_login="honest_hans"), query)
++    assert filters.matches(item(3, seller_login=None), query)
+-- 
+2.43.0
+

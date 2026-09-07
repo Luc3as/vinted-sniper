@@ -1,0 +1,404 @@
+From 9afcb682c84e13cdeb5d88de50e9e994c0be4994 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:30:00 +0000
+Subject: [PATCH 11/25] Export and import the configuration as one JSON
+ document
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The database holds listings, outbox rows and sessions, none of which you
+would carry to another machine. What you would carry is the part you typed:
+searches with their filters, destinations with their settings, and which
+search feeds which destination. `vinted-sniper export` prints that as JSON,
+`vinted-sniper import file.json` merges it back — additively, matched by
+search URL and destination name, so importing the same file twice changes
+nothing. The same is available at /api/export and /api/import, and the
+dashboard links the download.
+---
+ docs/configuration.md                         |   2 +
+ pyproject.toml                                |   2 +-
+ src/vinted_sniper/backup.py                   | 115 ++++++++++++++++++
+ src/vinted_sniper/cli.py                      |  40 +++++-
+ src/vinted_sniper/web/server.py               |  14 +++
+ .../web/templates/dashboard.html              |   7 ++
+ tests/integration/test_backup.py              |  67 ++++++++++
+ tests/unit/test_docs_match_code.py            |  13 +-
+ 8 files changed, 257 insertions(+), 3 deletions(-)
+ create mode 100644 src/vinted_sniper/backup.py
+ create mode 100644 tests/integration/test_backup.py
+
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 49c0e59..da74f85 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -99,6 +99,8 @@ vinted-sniper pair-telegram            print a link that connects a Telegram cha
+ vinted-sniper status                   how each search is doing
+ vinted-sniper migrate                  create or update the database, then exit
+ vinted-sniper heartbeat                exit 0 if the app is alive (the health check)
++vinted-sniper export                   searches, destinations and routes as JSON
++vinted-sniper import <file>            add what an export contains (existing entries untouched)
+ ```
+ 
+ Options for `watch`:
+diff --git a/pyproject.toml b/pyproject.toml
+index a4b19db..723e592 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -89,7 +89,7 @@ ignore = [
+ # A route table and a command table are long and branchy by nature. Splitting them to
+ # satisfy a complexity metric would scatter related handlers across files for no gain.
+ "src/vinted_sniper/web/server.py" = ["C901", "PLR0915", "PLR0917", "PLR0913"]
+-"src/vinted_sniper/cli.py" = ["C901", "PLR0911"]
++"src/vinted_sniper/cli.py" = ["C901", "PLR0911", "PLR0912"]
+ # One send attempt has several distinct outcomes — delivered, paused, gone, retry, gave
+ # up — and each needs its own early exit. Splitting them would hide the flow, not clarify it.
+ "src/vinted_sniper/deliver/dispatcher.py" = ["C901", "PLR0911"]
+diff --git a/src/vinted_sniper/backup.py b/src/vinted_sniper/backup.py
+new file mode 100644
+index 0000000..cdfe184
+--- /dev/null
++++ b/src/vinted_sniper/backup.py
+@@ -0,0 +1,115 @@
++"""Everything you configured, as one JSON document — and the way back.
++
++The database also holds listings, outbox rows and sessions, none of which you would want
++to carry to another machine. What you would want is the part you typed: searches with
++their filters, destinations with their settings, and which search feeds which
++destination. That is what goes out, and what comes back in — additively, by URL and by
++destination name, so importing the same file twice changes nothing.
++"""
++
++from __future__ import annotations
++
++from decimal import Decimal
++from typing import Any
++
++from vinted_sniper.db.repo import Repo
++
++FORMAT_VERSION = 1
++
++
++async def export_config(repo: Repo) -> dict[str, Any]:
++    destinations = await repo.list_destinations()
++    names_by_id = {d.id: d.name for d in destinations}
++    searches = []
++    for query in await repo.list_queries():
++        routed = await repo.destination_ids_for_query(query.id)
++        searches.append(
++            {
++                "name": query.name,
++                "url": query.url,
++                "poll_interval_s": query.poll_interval_s,
++                "paused": query.paused,
++                "banned_keywords": query.banned_keywords,
++                "max_total_price": (
++                    str(query.max_total_price) if query.max_total_price is not None else None
++                ),
++                "required_keywords": query.required_keywords,
++                "title_pattern": query.title_pattern,
++                "min_seller_rating": query.min_seller_rating,
++                "min_seller_reviews": query.min_seller_reviews,
++                "blocked_sellers": query.blocked_sellers,
++                "destinations": sorted(names_by_id[i] for i in routed if i in names_by_id),
++            }
++        )
++    return {
++        "format": FORMAT_VERSION,
++        "destinations": [
++            {
++                "kind": d.kind,
++                "name": d.name,
++                "config": d.config,
++                "notify_status": d.notify_status,
++                "quiet_hours": d.quiet_hours,
++            }
++            for d in destinations
++            if d.active
++        ],
++        "searches": searches,
++    }
++
++
++async def import_config(repo: Repo, document: dict[str, Any]) -> dict[str, int]:
++    """Merge a document produced by export_config. Returns what was added."""
++    if document.get("format") != FORMAT_VERSION:
++        raise ValueError(f"unsupported backup format {document.get('format')!r}")
++
++    added = {"destinations": 0, "searches": 0, "routes": 0}
++    existing = {d.name: d.id for d in await repo.list_destinations()}
++
++    for entry in document.get("destinations", []):
++        name = str(entry["name"])
++        if name in existing:
++            continue
++        existing[name] = await repo.add_destination(
++            kind=str(entry["kind"]),
++            name=name,
++            config=dict(entry.get("config") or {}),
++            notify_status=bool(entry.get("notify_status", False)),
++            quiet_hours=entry.get("quiet_hours"),
++        )
++        added["destinations"] += 1
++
++    for entry in document.get("searches", []):
++        url = str(entry["url"])
++        query = await repo.find_query_by_url(url)
++        if query is None:
++            from vinted_sniper.vinted import urls  # noqa: PLC0415 - avoids an import cycle
++
++            normalised = urls.normalise_search_url(url)
++            price = entry.get("max_total_price")
++            query_id = await repo.add_query(
++                name=str(entry.get("name") or urls.extract_tld(normalised)),
++                url=normalised,
++                tld=urls.extract_tld(normalised),
++                params=urls.parse_search_params(normalised),
++                poll_interval_s=int(entry.get("poll_interval_s") or 60),
++                banned_keywords=list(entry.get("banned_keywords") or []),
++                max_total_price=Decimal(str(price)) if price is not None else None,
++                required_keywords=list(entry.get("required_keywords") or []),
++                title_pattern=entry.get("title_pattern"),
++                min_seller_rating=entry.get("min_seller_rating"),
++                min_seller_reviews=entry.get("min_seller_reviews"),
++                blocked_sellers=list(entry.get("blocked_sellers") or []),
++            )
++            if entry.get("paused"):
++                await repo.set_paused(query_id, True)
++            added["searches"] += 1
++        else:
++            query_id = query.id
++        routed = set(await repo.destination_ids_for_query(query_id))
++        for name in entry.get("destinations", []):
++            destination_id = existing.get(str(name))
++            if destination_id is not None and destination_id not in routed:
++                await repo.route(query_id, destination_id)
++                added["routes"] += 1
++    return added
+diff --git a/src/vinted_sniper/cli.py b/src/vinted_sniper/cli.py
+index 193063d..12d1c33 100644
+--- a/src/vinted_sniper/cli.py
++++ b/src/vinted_sniper/cli.py
+@@ -4,12 +4,13 @@ from __future__ import annotations
+ 
+ import argparse
+ import asyncio
++import json
+ import sys
+ import time
+ from collections.abc import Sequence
+ from decimal import Decimal, InvalidOperation
+ 
+-from vinted_sniper import __version__, app, log
++from vinted_sniper import __version__, app, backup, log
+ from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
+ from vinted_sniper.db import Database, apply_pending
+ from vinted_sniper.db.repo import Repo
+@@ -34,6 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
+     sub.add_parser("run", help="Start watching. This is what the container runs.")
+     sub.add_parser("migrate", help="Create or update the database, then exit.")
+     sub.add_parser("status", help="Show how each search is doing.")
++
++    sub.add_parser("export", help="Print searches, destinations and routes as JSON.")
++    imp = sub.add_parser("import", help="Add searches, destinations and routes from an export.")
++    imp.add_argument("file", help="Path to a JSON file produced by 'export', or - for stdin.")
+     sub.add_parser("heartbeat", help="Exit 0 if the app is alive. Used by the health check.")
+ 
+     check = sub.add_parser(
+@@ -395,6 +400,35 @@ async def _cmd_heartbeat(settings: Settings) -> int:
+         return 0 if await health.is_alive(Repo(db)) else 1
+ 
+ 
++async def _cmd_export(settings: Settings) -> int:
++    async with Database(settings.db_path) as db:
++        await apply_pending(db)
++        document = await backup.export_config(Repo(db))
++    print(json.dumps(document, indent=2, ensure_ascii=False))
++    return 0
++
++
++async def _cmd_import(settings: Settings, path: str) -> int:
++    raw = sys.stdin.read() if path == "-" else open(path, encoding="utf-8").read()  # noqa: ASYNC230, SIM115
++    try:
++        document = json.loads(raw)
++    except json.JSONDecodeError as exc:
++        print(f"not JSON: {exc}", file=sys.stderr)
++        return 1
++    async with Database(settings.db_path) as db:
++        await apply_pending(db)
++        try:
++            added = await backup.import_config(Repo(db), document)
++        except (ValueError, KeyError, urls.InvalidSearchURLError) as exc:
++            print(f"import failed: {exc}", file=sys.stderr)
++            return 1
++    print(
++        f"Added {added['destinations']} destination(s), {added['searches']} search(es), "
++        f"{added['routes']} route(s). Existing ones were left alone."
++    )
++    return 0
++
++
+ async def _run(args: argparse.Namespace) -> int:
+     settings = Settings()
+     log.configure(level=settings.log_level, fmt=settings.log_format)
+@@ -421,6 +455,10 @@ async def _run(args: argparse.Namespace) -> int:
+             return await _cmd_pair_telegram(settings, args)
+         case "status":
+             return await _cmd_status(settings)
++        case "export":
++            return await _cmd_export(settings)
++        case "import":
++            return await _cmd_import(settings, args.file)
+         case "heartbeat":
+             return await _cmd_heartbeat(settings)
+         case unknown:
+diff --git a/src/vinted_sniper/web/server.py b/src/vinted_sniper/web/server.py
+index 1bb6e09..ec865f2 100644
+--- a/src/vinted_sniper/web/server.py
++++ b/src/vinted_sniper/web/server.py
+@@ -34,6 +34,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+ from fastapi.templating import Jinja2Templates
+ from pydantic import SecretStr
+ 
++from vinted_sniper import backup
+ from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
+ from vinted_sniper.db.repo import Repo
+ from vinted_sniper.engine import filters, health, quiet
+@@ -166,6 +167,19 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+         )
+         return JSONResponse({"ok": True})
+ 
++    @app.get("/api/export")
++    async def api_export(_: None = guard) -> JSONResponse:
++        """Searches, destinations and routes — the part you typed — as one JSON document."""
++        return JSONResponse(await backup.export_config(repo))
++
++    @app.post("/api/import")
++    async def api_import(document: dict[str, Any], _: None = guard) -> JSONResponse:
++        try:
++            added = await backup.import_config(repo, document)
++        except (ValueError, KeyError, urls.InvalidSearchURLError) as exc:
++            raise HTTPException(status_code=422, detail=str(exc)) from exc
++        return JSONResponse({"ok": True, "added": added})
++
+     @app.get("/api/health")
+     async def api_health(_: None = guard) -> JSONResponse:
+         snapshot = await health.snapshot(repo)
+diff --git a/src/vinted_sniper/web/templates/dashboard.html b/src/vinted_sniper/web/templates/dashboard.html
+index a18c2e8..1d75473 100644
+--- a/src/vinted_sniper/web/templates/dashboard.html
++++ b/src/vinted_sniper/web/templates/dashboard.html
+@@ -383,6 +383,13 @@
+   </div>
+ </section>
+ 
++<section>
++  <p class="muted">
++    <a href="/api/export" download="vinted-sniper-config.json">Download searches &amp; destinations as JSON</a>
++    — restore with <code>vinted-sniper import file.json</code>.
++  </p>
++</section>
++
+ <section>
+   <h2>Recently found</h2>
+   {% if not recent %}
+diff --git a/tests/integration/test_backup.py b/tests/integration/test_backup.py
+new file mode 100644
+index 0000000..0eaf07f
+--- /dev/null
++++ b/tests/integration/test_backup.py
+@@ -0,0 +1,67 @@
++"""Export what was typed, import it back, and nothing doubles."""
++
++from __future__ import annotations
++
++from decimal import Decimal
++
++from vinted_sniper import backup
++from vinted_sniper.db.repo import Repo
++
++
++async def test_a_round_trip_reproduces_the_configuration(repo: Repo) -> None:
++    phone = await repo.add_destination(
++        kind="ntfy",
++        name="phone",
++        config={"topic": "t"},
++        notify_status=True,
++        quiet_hours="23:00-07:00",
++    )
++    query_id = await repo.add_query(
++        name="Rab Downpour",
++        url="https://www.vinted.sk/catalog?search_text=rab%20downpour&price_to=60",
++        tld="sk",
++        params={"search_text": "rab downpour", "price_to": "60"},
++        poll_interval_s=300,
++        banned_keywords=["replika"],
++        max_total_price=Decimal("55"),
++        required_keywords=["downpour"],
++        min_seller_rating=0.9,
++        blocked_sellers=["scammer"],
++    )
++    await repo.route(query_id, phone)
++
++    document = await backup.export_config(repo)
++    assert document["format"] == 1
++    assert document["destinations"][0]["quiet_hours"] == "23:00-07:00"
++    assert document["searches"][0]["destinations"] == ["phone"]
++    assert Decimal(document["searches"][0]["max_total_price"]) == Decimal("55")
++
++    # Importing the same thing again is a no-op.
++    assert await backup.import_config(repo, document) == {
++        "destinations": 0,
++        "searches": 0,
++        "routes": 0,
++    }
++
++    # A fresh database gets everything back.
++    await repo.delete_query(query_id)
++    await repo.deactivate_destination(phone, "gone")
++    document["destinations"][0]["name"] = "phone2"
++    document["searches"][0]["destinations"] = ["phone2"]
++    added = await backup.import_config(repo, document)
++    assert added == {"destinations": 1, "searches": 1, "routes": 1}
++
++    (restored,) = await repo.list_queries()
++    assert restored.required_keywords == ["downpour"]
++    assert restored.blocked_sellers == ["scammer"]
++    assert restored.max_total_price == Decimal("55")
++    assert restored.min_seller_rating == 0.9
++
++
++async def test_an_unknown_format_is_refused(repo: Repo) -> None:
++    try:
++        await backup.import_config(repo, {"format": 99})
++    except ValueError as exc:
++        assert "format" in str(exc)
++    else:
++        raise AssertionError("should have refused")
+diff --git a/tests/unit/test_docs_match_code.py b/tests/unit/test_docs_match_code.py
+index 2393ffb..02cf688 100644
+--- a/tests/unit/test_docs_match_code.py
++++ b/tests/unit/test_docs_match_code.py
+@@ -43,7 +43,18 @@ def test_documented_settings_all_exist() -> None:
+ 
+ @pytest.mark.parametrize(
+     "command",
+-    ["run", "check", "watch", "searches", "unwatch", "destination", "status", "heartbeat"],
++    [
++        "run",
++        "check",
++        "watch",
++        "searches",
++        "unwatch",
++        "destination",
++        "status",
++        "heartbeat",
++        "export",
++        "import",
++    ],
+ )
+ def test_commands_named_in_the_docs_exist(command: str) -> None:
+     parser = build_parser()
+-- 
+2.43.0
+

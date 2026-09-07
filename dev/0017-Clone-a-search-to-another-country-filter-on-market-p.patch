@@ -1,0 +1,1695 @@
+From 1fc3dac0a671c2c215d986765ebb1f50810f017d Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 18:24:00 +0000
+Subject: [PATCH 17/25] Clone a search to another country, filter on market
+ position, and a dashboard that explains itself
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Three things, one theme: the person at the keyboard should not need the
+docs.
+
+Clone. Vinted lets a buyer shop across its EU sites, its filter ids are the
+same on every site, and .de or .pl carry many times the listings of .sk —
+yet every search here ran on one domain. The Edit form now offers "Also
+watch this on vinted.xx": the same URL with a new domain, same filters,
+same destinations. A listing shown on several sites is alerted once, since
+the item id is the key.
+
+Market filter. "Only the cheapest N%" compares a new listing with
+everything the search has seen in thirty days (the market table from the
+previous change) and lets it through only if it sits in that share. Unlike a
+fixed price cap it follows the season by itself. Nobody is asked to know
+what a percentile is: the field says "only the cheapest … %", the tooltip
+explains it in a sentence, and the alert states the result in words —
+"cheaper than 88% of 312 similar listings seen this month" — which is also
+stored per listing and sent to the agent. Inactive below ten price points.
+
+Dashboard. Every field and column has a ? tooltip in plain language; the
+searches table has a legend for its states; an explainer under the add
+form says how the filters combine; a Help page carries a glossary, what
+each part of an alert means, and the running settings; every action ends in
+a success notice; delete asks first and says what pausing would keep
+instead; icons are SVG, the nav marks the current page, focus rings show
+for keyboard users, reduced motion is honoured, and the dark theme no
+longer contains hard-coded light colours. Migration 0011.
+---
+ CHANGELOG.md                                  |   3 +
+ docs/configuration.md                         |   4 +-
+ src/vinted_sniper/backup.py                   |   2 +
+ src/vinted_sniper/cli.py                      |   7 +
+ .../db/migrations/0011_market_percentile.sql  |   6 +
+ src/vinted_sniper/db/repo.py                  |  71 +++-
+ src/vinted_sniper/deliver/discord.py          |   6 +
+ src/vinted_sniper/deliver/telegram.py         |   3 +
+ src/vinted_sniper/deliver/webhook.py          |   2 +
+ src/vinted_sniper/engine/poller.py            |  39 +++
+ src/vinted_sniper/vinted/urls.py              |   9 +-
+ src/vinted_sniper/web/server.py               |  83 ++++-
+ src/vinted_sniper/web/templates/base.html     | 184 +++++++---
+ .../web/templates/dashboard.html              | 329 ++++++++++--------
+ src/vinted_sniper/web/templates/help.html     |  86 +++++
+ src/vinted_sniper/web/templates/history.html  |  11 +-
+ src/vinted_sniper/web/templates/login.html    |   4 +-
+ tests/integration/test_poller.py              |  78 +++++
+ tests/integration/test_web.py                 |  47 +++
+ 19 files changed, 771 insertions(+), 203 deletions(-)
+ create mode 100644 src/vinted_sniper/db/migrations/0011_market_percentile.sql
+ create mode 100644 src/vinted_sniper/web/templates/help.html
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6604186..6db5930 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -45,6 +45,9 @@ All notable changes, newest first. Dates are when the change landed on `main`.
+   `enrichment_url`; a verdict posted to `/api/items/{id}/enrichment` (deal score, identified
+   model, retail price, match, risk, one line) is woven into the alert — hot deals headlined,
+   dull ones muted. Late hot verdicts get a short follow-up. See `docs/enrichment.md`.
++- **Clone a search to another country** from its Edit form: same filters and destinations on vinted.de/.pl/.cz/…; a listing shown on several sites is alerted once.
++- **"Only the cheapest N%" filter** (`--cheapest`, or the field in the dashboard): the listing's price against everything the search has seen in 30 days. Alerts say the position in words ("cheaper than 88% of 312 similar listings seen this month").
++- **Dashboard rewritten for people who have not read the docs**: plain-language `?` tooltips on every field and column, a state legend, "how the filters work together" explainers, a Help page with a glossary and the running settings, success notices after every action, confirmations on delete, SVG icons, a sticky nav with the current page marked, keyboard focus rings, reduced-motion support, and dark mode that no longer has hard-coded light colours.
+ - **Delivery history** page (`/history`, `/api/history`): every notification, its kind, where it went, sent/pending/failed with the error, held-until for enrichment — the answer to "did my alert go out?".
+ - Telegram `/pause <id>` alongside `/resume <id>`.
+ - **Market memory**: every listing on a search's page is recorded as a price point (no extra requests). The webhook payload gains `market` (percentiles, the listing's own percentile, median for the same condition, the price under which listings vanish within a day), demand (`favourites_per_hour`), `known_retail` (retail prices earlier verdicts found, cached per search) and `buyer_feedback` (👍/👎 the buyer gave earlier verdicts, via new buttons under Telegram alerts).
+diff --git a/docs/configuration.md b/docs/configuration.md
+index e96cea5..6d21c0c 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -117,9 +117,11 @@ Options for `watch`:
+ | `--min-seller-rating N` | Skip sellers rated below N percent. Sellers with no rating yet are skipped too. |
+ | `--min-seller-reviews N` | Skip sellers with fewer than N reviews. |
+ | `--block-seller a,b` | Skip these seller usernames outright. |
++| `--cheapest N` | Only listings priced in the cheapest N% of what this search has seen in the last 30 days (every listing on the page counts, filters or not). Adapts to the market by itself; inactive until ten price points exist. The alert states the position in words: "cheaper than 88% of 312 similar listings seen this month". |
+ 
+ The same fields are under "More filters" when adding a search in the dashboard, and every
+-search has an **Edit** button there for changing them afterwards — the change takes effect
++search has an **Edit** button there (which also offers **Clone** — the same search, filters
++and destinations on another country site) for changing them afterwards — the change takes effect
+ on the next check, no restart needed. Only the URL is fixed: it is what the search *is*.
+ | `--to 1,2` | Destination ids to notify. Defaults to all active ones. |
+ 
+diff --git a/src/vinted_sniper/backup.py b/src/vinted_sniper/backup.py
+index cdfe184..9574c05 100644
+--- a/src/vinted_sniper/backup.py
++++ b/src/vinted_sniper/backup.py
+@@ -38,6 +38,7 @@ async def export_config(repo: Repo) -> dict[str, Any]:
+                 "min_seller_rating": query.min_seller_rating,
+                 "min_seller_reviews": query.min_seller_reviews,
+                 "blocked_sellers": query.blocked_sellers,
++                "max_market_percentile": query.max_market_percentile,
+                 "destinations": sorted(names_by_id[i] for i in routed if i in names_by_id),
+             }
+         )
+@@ -100,6 +101,7 @@ async def import_config(repo: Repo, document: dict[str, Any]) -> dict[str, int]:
+                 min_seller_rating=entry.get("min_seller_rating"),
+                 min_seller_reviews=entry.get("min_seller_reviews"),
+                 blocked_sellers=list(entry.get("blocked_sellers") or []),
++                max_market_percentile=entry.get("max_market_percentile"),
+             )
+             if entry.get("paused"):
+                 await repo.set_paused(query_id, True)
+diff --git a/src/vinted_sniper/cli.py b/src/vinted_sniper/cli.py
+index 1a7134c..8959278 100644
+--- a/src/vinted_sniper/cli.py
++++ b/src/vinted_sniper/cli.py
+@@ -81,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
+     watch.add_argument(
+         "--block-seller", default="", help="Comma-separated seller usernames to skip."
+     )
++    watch.add_argument(
++        "--cheapest",
++        type=int,
++        default=0,
++        help="Only listings in the cheapest N%% of what this search has seen in 30 days.",
++    )
+     watch.add_argument(
+         "--to",
+         default="",
+@@ -236,6 +242,7 @@ async def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
+             min_seller_rating=min_rating,
+             min_seller_reviews=args.min_seller_reviews or None,
+             blocked_sellers=_csv(args.block_seller),
++            max_market_percentile=args.cheapest or None,
+         )
+ 
+         if args.to.strip():
+diff --git a/src/vinted_sniper/db/migrations/0011_market_percentile.sql b/src/vinted_sniper/db/migrations/0011_market_percentile.sql
+new file mode 100644
+index 0000000..ea244d3
+--- /dev/null
++++ b/src/vinted_sniper/db/migrations/0011_market_percentile.sql
+@@ -0,0 +1,6 @@
++-- A search can now say "only tell me about the cheapest N% of what this search has been
++-- seeing", and every recorded listing remembers where its price sat when it was found,
++-- so the alert can say "cheaper than 88% of the 312 listings seen this month".
++ALTER TABLE queries ADD COLUMN max_market_percentile INTEGER;
++ALTER TABLE items ADD COLUMN market_percentile INTEGER;
++ALTER TABLE items ADD COLUMN market_n INTEGER;
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index 27cc4de..193ae16 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -50,6 +50,8 @@ class Query:
+     min_seller_rating: float | None = None
+     min_seller_reviews: int | None = None
+     blocked_sellers: list[str] = field(default_factory=list)
++    # Only announce listings priced in the cheapest N% of what this search has seen.
++    max_market_percentile: int | None = None
+     # Bumped on every edit; the supervisor restarts a search's task when it changes so
+     # new filters take effect without a process restart.
+     updated_at: int = 0
+@@ -110,6 +112,17 @@ class PendingNotification:
+     kind: str = "new"
+     previous_price: Decimal | None = None
+     enrichment: Enrichment | None = None
++    # Where the price sat among this search's listings when found: (percentile, sample).
++    market_percentile: int | None = None
++    market_n: int | None = None
++
++    def market_line(self) -> str | None:
++        """Plain words for the market position: "cheaper than 88% of 312 listings seen
++        this month". Nobody should need to know what a percentile is."""
++        if self.market_percentile is None or not self.market_n:
++            return None
++        cheaper_than = 100 - self.market_percentile
++        return f"cheaper than {cheaper_than}% of {self.market_n} similar listings seen this month"
+ 
+     @property
+     def is_price_drop(self) -> bool:
+@@ -164,14 +177,15 @@ class Repo:
+         min_seller_rating: float | None = None,
+         min_seller_reviews: int | None = None,
+         blocked_sellers: list[str] | None = None,
++        max_market_percentile: int | None = None,
+     ) -> int:
+         now = int(time.time())
+         query_id = await self._db.insert(
+             "INSERT INTO queries (name, url, tld, params_json, poll_interval_s, "
+             "banned_keywords_json, max_total_price, required_keywords_json, title_pattern, "
+             "min_seller_rating, min_seller_reviews, blocked_sellers_json, "
+-            "created_at, updated_at) "
+-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
++            "max_market_percentile, created_at, updated_at) "
++            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (
+                 name,
+                 url,
+@@ -185,6 +199,7 @@ class Repo:
+                 min_seller_rating,
+                 min_seller_reviews,
+                 json.dumps(blocked_sellers or []),
++                max_market_percentile,
+                 now,
+                 now,
+             ),
+@@ -228,6 +243,7 @@ class Repo:
+         min_seller_rating: float | None,
+         min_seller_reviews: int | None,
+         blocked_sellers: list[str],
++        max_market_percentile: int | None = None,
+     ) -> None:
+         """Change everything about a search except what it searches for.
+ 
+@@ -238,7 +254,7 @@ class Repo:
+             "UPDATE queries SET name = ?, poll_interval_s = ?, banned_keywords_json = ?, "
+             "max_total_price = ?, required_keywords_json = ?, title_pattern = ?, "
+             "min_seller_rating = ?, min_seller_reviews = ?, blocked_sellers_json = ?, "
+-            "updated_at = ? WHERE id = ?",
++            "max_market_percentile = ?, updated_at = ? WHERE id = ?",
+             (
+                 name,
+                 poll_interval_s,
+@@ -249,11 +265,36 @@ class Repo:
+                 min_seller_rating,
+                 min_seller_reviews,
+                 json.dumps(blocked_sellers),
++                max_market_percentile,
+                 int(time.time()),
+                 query_id,
+             ),
+         )
+ 
++    async def clone_query(self, query_id: int, *, url: str, tld: str, name: str) -> int | None:
++        """The same search, filters and routing, on another country's site."""
++        source = await self.get_query(query_id)
++        if source is None:
++            return None
++        new_id = await self.add_query(
++            name=name,
++            url=url,
++            tld=tld,
++            params=source.params,
++            poll_interval_s=source.poll_interval_s,
++            banned_keywords=source.banned_keywords,
++            max_total_price=source.max_total_price,
++            required_keywords=source.required_keywords,
++            title_pattern=source.title_pattern,
++            min_seller_rating=source.min_seller_rating,
++            min_seller_reviews=source.min_seller_reviews,
++            blocked_sellers=source.blocked_sellers,
++            max_market_percentile=source.max_market_percentile,
++        )
++        for destination_id in await self.destination_ids_for_query(query_id):
++            await self.route(new_id, destination_id)
++        return new_id
++
+     async def set_all_intervals(self, poll_interval_s: int) -> int:
+         return await self._db.execute(
+             "UPDATE queries SET poll_interval_s = ?, updated_at = ?",
+@@ -295,6 +336,7 @@ class Repo:
+             min_seller_rating=row["min_seller_rating"],
+             min_seller_reviews=row["min_seller_reviews"],
+             blocked_sellers=_json_list(row["blocked_sellers_json"]) or [],
++            max_market_percentile=row["max_market_percentile"],
+             updated_at=int(row["updated_at"] or 0),
+         )
+ 
+@@ -809,6 +851,27 @@ class Repo:
+             context["this_percentile"] = round(100 * below / len(prices))
+         return context
+ 
++    async def market_prices(self, query_id: int, *, days: int = 30) -> list[float]:
++        """Every total price this search has seen in the window, sorted. The poller uses it
++        to place a fresh listing on the scale without another round trip per listing."""
++        since = int(time.time()) - days * 86_400
++        rows = await self._db.fetch_all(
++            "SELECT COALESCE(total_price, price) AS p FROM market "
++            "WHERE query_id = ? AND last_seen_at >= ? AND COALESCE(total_price, price) IS NOT NULL "
++            "ORDER BY p",
++            (query_id, since),
++        )
++        return [float(row["p"]) for row in rows]
++
++    async def record_market_position(self, positions: dict[int, tuple[int, int]]) -> None:
++        """Remember where each listing sat in its market when it was found."""
++        if not positions:
++            return
++        await self._db.execute_many(
++            "UPDATE items SET market_percentile = ?, market_n = ? WHERE item_id = ?",
++            [(pct, n, item_id) for item_id, (pct, n) in positions.items()],
++        )
++
+     async def prune_market(self, older_than_days: int) -> int:
+         cutoff = int(time.time()) - older_than_days * 86_400
+         return await self._db.execute("DELETE FROM market WHERE last_seen_at < ?", (cutoff,))
+@@ -1029,6 +1092,8 @@ class Repo:
+                     Decimal(str(row["previous_price"])) if row["kind"] == "price_drop" else None
+                 ),
+                 enrichment=Enrichment.from_row(row),
++                market_percentile=row["market_percentile"],
++                market_n=row["market_n"],
+             )
+             for row in rows
+         ]
+diff --git a/src/vinted_sniper/deliver/discord.py b/src/vinted_sniper/deliver/discord.py
+index 44e9117..c9c538d 100644
+--- a/src/vinted_sniper/deliver/discord.py
++++ b/src/vinted_sniper/deliver/discord.py
+@@ -138,6 +138,7 @@ class DiscordSender:
+             if value:
+                 fields.append({"name": name, "value": value[:1024], "inline": True})
+         fields.append({"name": "Location", "value": _location(item.tld), "inline": True})
++        fields.extend(_market_field(notification))
+         if item.seller_rating is not None:
+             fields.append({"name": "Seller rating", "value": _rating(item), "inline": True})
+         if item.seller_login:
+@@ -239,6 +240,11 @@ def _location(tld: str) -> str:
+     return f"{flag} {iso}"
+ 
+ 
++def _market_field(notification: PendingNotification) -> list[dict[str, Any]]:
++    market = notification.market_line()
++    return [{"name": "Market", "value": market[:1024], "inline": False}] if market else []
++
++
+ def _verdict_field(notification: PendingNotification) -> dict[str, Any] | None:
+     verdict = notification.enrichment
+     if verdict is None:
+diff --git a/src/vinted_sniper/deliver/telegram.py b/src/vinted_sniper/deliver/telegram.py
+index bf0c6c4..22d3855 100644
+--- a/src/vinted_sniper/deliver/telegram.py
++++ b/src/vinted_sniper/deliver/telegram.py
+@@ -146,8 +146,11 @@ class TelegramSender:
+         query_id: int | None = None,
+         headline: str | None = None,
+         enrichment: Enrichment | None = None,
++        market_line: str | None = None,
+     ) -> dict[str, Any]:
+         lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line())]
++        if market_line:
++            lines.append(f"📊 {html.escape(market_line)}")
+         if headline:
+             lines.insert(0, f"📉 <b>{html.escape(headline)}</b>")
+         silent = enrichment is not None and enrichment.is_dull(self._silent_below)
+diff --git a/src/vinted_sniper/deliver/webhook.py b/src/vinted_sniper/deliver/webhook.py
+index 3c13e5b..1fdf08e 100644
+--- a/src/vinted_sniper/deliver/webhook.py
++++ b/src/vinted_sniper/deliver/webhook.py
+@@ -147,6 +147,8 @@ def _item_json(notification: PendingNotification, callback_base: str | None) ->
+         "views": item.view_count,
+         "listed_minutes_ago": _minutes_since(item.photo_ts),
+         "favourites_per_hour": _per_hour(item.favourite_count, item.photo_ts),
++        "market_percentile": notification.market_percentile,
++        "market_n": notification.market_n,
+         # Kept for consumers written against version 1. Both used to be Vinted deep links
+         # that no longer resolve; they now point at the listing page, where the buttons are.
+         "links": {
+diff --git a/src/vinted_sniper/engine/poller.py b/src/vinted_sniper/engine/poller.py
+index 07e4f02..da1b53c 100644
+--- a/src/vinted_sniper/engine/poller.py
++++ b/src/vinted_sniper/engine/poller.py
+@@ -9,6 +9,7 @@ connection is not, and hammering it makes it worse.
+ from __future__ import annotations
+ 
+ import asyncio
++import bisect
+ import contextlib
+ import random
+ import time
+@@ -35,6 +36,9 @@ log = get_logger(__name__)
+ # Spread checks out so a dozen searches do not all fire on the same second.
+ _JITTER_FRACTION = 0.15
+ 
++# Below this many price points a percentile is a guess; the market filter waits.
++MIN_MARKET_SAMPLE = 10
++
+ 
+ class Poller:
+     """Checks one saved search, forever, until asked to stop."""
+@@ -152,6 +156,18 @@ class Poller:
+             if filters.check(item, self.query) is None:
+                 candidates.append(item)
+ 
++        # Where does each candidate's price sit among what this search has been seeing?
++        # Used as a filter if the search asks for one, and remembered for the alert either
++        # way ("cheaper than 88% of 312 listings seen this month").
++        positions = await self._market_positions(candidates)
++        if self.query.max_market_percentile is not None:
++            ceiling = self.query.max_market_percentile
++            candidates = [
++                item
++                for item in candidates
++                if item.item_id not in positions or positions[item.item_id][0] <= ceiling
++            ]
++
+         known = await self._repo.known_item_ids([item.item_id for item in candidates])
+         if known and not state.is_first_run:
+             await self._announce_price_drops([c for c in candidates if c.item_id in known])
+@@ -178,6 +194,13 @@ class Poller:
+                 hold_s=hold_s,
+                 never_hold=await self._repo.destination_ids_of_kind("webhook") if hold_s else None,
+             )
++            await self._repo.record_market_position(
++                {
++                    i.item_id: positions[i.item_id]
++                    for i in selection.to_record
++                    if i.item_id in positions
++                }
++            )
+             if selection.to_notify and self._work_available is not None:
+                 self._work_available.set()
+ 
+@@ -207,6 +230,22 @@ class Poller:
+         else:
+             self._log.debug("poll.nothing_new", returned=len(items))
+ 
++    async def _market_positions(self, items: list[Item]) -> dict[int, tuple[int, int]]:
++        """Percentile (share of listings cheaper) and sample size, per listing with a price."""
++        if not items:
++            return {}
++        prices = await self._repo.market_prices(self.query.id)
++        if len(prices) < MIN_MARKET_SAMPLE:
++            return {}
++        positions: dict[int, tuple[int, int]] = {}
++        for item in items:
++            payable = item.total_price if item.total_price is not None else item.price
++            if payable is None:
++                continue
++            below = bisect.bisect_left(prices, float(payable))
++            positions[item.item_id] = (round(100 * below / len(prices)), len(prices))
++        return positions
++
+     async def _announce_price_drops(self, seen_again: list[Item]) -> None:
+         """A listing already recorded, now cheaper. No extra request: it is on the page
+         we just fetched, and the page carries its current price."""
+diff --git a/src/vinted_sniper/vinted/urls.py b/src/vinted_sniper/vinted/urls.py
+index c292947..d988a37 100644
+--- a/src/vinted_sniper/vinted/urls.py
++++ b/src/vinted_sniper/vinted/urls.py
+@@ -10,7 +10,7 @@ from __future__ import annotations
+ 
+ import re
+ from typing import Final
+-from urllib.parse import parse_qsl, urlencode, urlparse
++from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+ 
+ # Vinted runs one site per country. The domain decides the catalog, the currency and the
+ # sellers you see, so it travels with the search from bootstrap through to the link in
+@@ -171,6 +171,13 @@ def site_root(tld: str) -> str:
+     return f"https://www.vinted.{tld}/"
+ 
+ 
++def swap_tld(url: str, tld: str) -> str:
++    """The same URL on another country site. Vinted's catalog, brand, size and status ids
++    are shared across its sites, so nothing but the domain changes."""
++    parsed = urlparse(url if "://" in url else f"https://{url}")
++    return urlunparse(parsed._replace(netloc=f"www.vinted.{tld}"))
++
++
+ def item_url(tld: str, item_id: int) -> str:
+     return f"https://www.vinted.{tld}/items/{item_id}"
+ 
+diff --git a/src/vinted_sniper/web/server.py b/src/vinted_sniper/web/server.py
+index bf56b49..25c326f 100644
+--- a/src/vinted_sniper/web/server.py
++++ b/src/vinted_sniper/web/server.py
+@@ -26,6 +26,7 @@ from collections.abc import Iterator
+ from decimal import Decimal, InvalidOperation
+ from pathlib import Path
+ from typing import Annotated, Any
++from urllib.parse import quote
+ from xml.sax.saxutils import escape as xml_escape
+ 
+ import uvicorn
+@@ -135,9 +136,11 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+             request,
+             "dashboard.html",
+             {
++                "nav": "searches",
+                 "snapshot": snapshot,
+                 "queries": queries,
+                 "destinations": destinations,
++                "first_run_newest": settings.first_run_mode == "newest",
+                 "auth_enabled": token is not None,
+                 "recent": _listing_views(await repo.recent_items(limit=25), now=int(time.time())),
+                 "now": int(time.time()),
+@@ -194,6 +197,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+             request,
+             "history.html",
+             {
++                "nav": "history",
+                 "rows": _history_views(rows, now=int(time.time())),
+                 "queries": await repo.list_queries(),
+                 "selected_search": search,
+@@ -202,6 +206,35 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+             },
+         )
+ 
++    @app.get("/help", response_class=HTMLResponse)
++    async def help_page(
++        request: Request,
++        session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
++    ) -> Response:
++        if not _authorised(session, token):
++            return RedirectResponse("/login", status_code=303)
++        return TEMPLATES.TemplateResponse(
++            request,
++            "help.html",
++            {
++                "nav": "help",
++                "auth_enabled": token is not None,
++                "settings_view": {
++                    "poll_default_interval_s": settings.poll_default_interval_s,
++                    "site_requests_per_minute": settings.site_requests_per_minute,
++                    "price_drop_min_percent": settings.price_drop_min_percent,
++                    "enrichment_wait_s": settings.enrichment_wait_s,
++                    "enrichment_highlight_score": settings.enrichment_highlight_score,
++                    "enrichment_silent_below": settings.enrichment_silent_below,
++                    "timezone": settings.timezone,
++                    "weekly_report": settings.weekly_report,
++                    "outbox_expiry_minutes": settings.outbox_expiry_minutes,
++                    "item_retention_days": settings.item_retention_days,
++                    "telegram": settings.telegram_bot_token is not None,
++                },
++            },
++        )
++
+     @app.get("/api/history")
+     async def api_history(
+         search: int | None = None, status: str | None = None, _: None = guard
+@@ -228,6 +261,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+         min_seller_rating: Annotated[str, Form()] = "",
+         min_seller_reviews: Annotated[str, Form()] = "",
+         blocked_sellers: Annotated[str, Form()] = "",
++        max_market_percentile: Annotated[str, Form()] = "",
+         destination_ids: Annotated[list[int] | None, Form()] = None,
+         _: None = guard,
+     ) -> Response:
+@@ -261,10 +295,36 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+             min_seller_rating=rating,
+             min_seller_reviews=_int_or_none(min_seller_reviews),
+             blocked_sellers=_csv(blocked_sellers),
++            max_market_percentile=_percent_or_none(max_market_percentile),
+         )
+         for destination_id in destination_ids or []:
+             await repo.route(query_id, destination_id)
+-        return RedirectResponse("/", status_code=303)
++        return _redirect_with_notice(
++            "Search added. Its first check records what is already listed without alerting."
++        )
++
++    @app.post("/searches/{query_id}/clone")
++    async def clone_search(query_id: int, tld: Annotated[str, Form()], _: None = guard) -> Response:
++        """The same search on another country's site. Vinted's filter ids are shared across
++        its sites, so the URL only needs a new domain; the routing comes along."""
++        source = await repo.get_query(query_id)
++        if source is None:
++            return _redirect_with_error("that search no longer exists")
++        tld = tld.strip().lower()
++        if tld not in urls.KNOWN_TLDS:
++            return _redirect_with_error(f"vinted.{tld} is not a site I know")
++        if tld == source.tld:
++            return _redirect_with_error(f"that search already runs on vinted.{tld}")
++        target = urls.normalise_search_url(urls.swap_tld(source.url, tld))
++        if await repo.find_query_by_url(target) is not None:
++            return _redirect_with_error(f"this search already exists on vinted.{tld}")
++        base_name = source.name.removesuffix(f" ({source.tld})")
++        new_id = await repo.clone_query(query_id, url=target, tld=tld, name=f"{base_name} ({tld})")
++        if new_id is None:
++            return _redirect_with_error("that search no longer exists")
++        return _redirect_with_notice(
++            f"Cloned to vinted.{tld} with the same filters and destinations."
++        )
+ 
+     @app.post("/searches/{query_id}/edit")
+     async def edit_search(
+@@ -278,6 +338,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+         min_seller_rating: Annotated[str, Form()] = "",
+         min_seller_reviews: Annotated[str, Form()] = "",
+         blocked_sellers: Annotated[str, Form()] = "",
++        max_market_percentile: Annotated[str, Form()] = "",
+         _: None = guard,
+     ) -> Response:
+         query = await repo.get_query(query_id)
+@@ -301,8 +362,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+             min_seller_rating=rating,
+             min_seller_reviews=_int_or_none(min_seller_reviews),
+             blocked_sellers=_csv(blocked_sellers),
++            max_market_percentile=_percent_or_none(max_market_percentile),
+         )
+-        return RedirectResponse("/", status_code=303)
++        return _redirect_with_notice("Saved. The new settings apply from the next check.")
+ 
+     @app.post("/searches/interval")
+     async def set_every_interval(interval: Annotated[int, Form()], _: None = guard) -> Response:
+@@ -467,7 +529,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+ 
+ 
+ def _redirect_with_error(message: str) -> RedirectResponse:
+-    return RedirectResponse(f"/?error={message}", status_code=303)
++    return RedirectResponse(f"/?error={quote(message)}", status_code=303)
+ 
+ 
+ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
+@@ -580,6 +642,21 @@ def _csv(raw: str) -> list[str]:
+     return [part.strip() for part in raw.split(",") if part.strip()]
+ 
+ 
++def _percent_or_none(raw: str) -> int | None:
++    raw = raw.strip().rstrip("%")
++    if not raw:
++        return None
++    try:
++        value = int(float(raw))
++    except ValueError:
++        return None
++    return value if 1 <= value <= 100 else None  # noqa: PLR2004
++
++
++def _redirect_with_notice(message: str) -> Response:
++    return RedirectResponse(f"/?ok={quote(message)}", status_code=303)
++
++
+ def _int_or_none(raw: str) -> int | None:
+     raw = raw.strip()
+     if not raw:
+diff --git a/src/vinted_sniper/web/templates/base.html b/src/vinted_sniper/web/templates/base.html
+index 2b9e8e3..b2d0b7a 100644
+--- a/src/vinted_sniper/web/templates/base.html
++++ b/src/vinted_sniper/web/templates/base.html
+@@ -5,57 +5,144 @@
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>{% block title %}vinted-sniper{% endblock %}</title>
+   <style>
++    /* --- Tokens. Everything below reads from these, so both colour schemes stay in step. */
+     :root {
+-      --bg: #fbfbfa; --panel: #fff; --ink: #1a1a1a; --muted: #6b6b6b;
+-      --line: #e4e4e1; --accent: #09b1ba; --ok: #2e7d32; --warn: #b26a00; --bad: #c62828;
++      --bg: #f6f6f4; --panel: #ffffff; --panel-2: #f0f0ee; --ink: #16181d; --muted: #545b66;
++      --line: #dcdcd7; --accent: #0b8f97; --accent-ink: #ffffff; --accent-soft: #d8f1f2;
++      --ok: #1f7a3a; --warn: #9a5b00; --bad: #b3261e; --info: #2f5fb3;
++      --radius: 10px; --radius-sm: 7px; --shadow: 0 8px 24px rgb(0 0 0 / .10);
++      --focus: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent);
+     }
+     @media (prefers-color-scheme: dark) {
+       :root {
+-        --bg: #17181a; --panel: #1f2023; --ink: #ececea; --muted: #9a9a97;
+-        --line: #313337; --accent: #35c9d1; --ok: #7dc47f; --warn: #e2a44a; --bad: #ef7b7b;
++        --bg: #141518; --panel: #1d1f23; --panel-2: #24272c; --ink: #ecedea; --muted: #a2a7ad;
++        --line: #33373d; --accent: #3fd0d8; --accent-ink: #062627; --accent-soft: #163b3e;
++        --ok: #79c982; --warn: #e5b04e; --bad: #f08a83; --info: #8fb2ee;
++        --shadow: 0 8px 24px rgb(0 0 0 / .45);
+       }
+     }
++    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
++
+     * { box-sizing: border-box; }
++    html { -webkit-text-size-adjust: 100%; }
+     body {
+       margin: 0; background: var(--bg); color: var(--ink);
+       font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+     }
++    a { color: var(--accent); }
++    :focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--radius-sm); }
++    .skip { position: absolute; left: -999px; top: .5rem; background: var(--panel); padding: .4rem .7rem;
++            border-radius: var(--radius-sm); z-index: 100; }
++    .skip:focus { left: .5rem; }
++
++    /* --- Header & navigation ------------------------------------------------------ */
+     header {
+-      display: flex; align-items: baseline; gap: 1rem; padding: 1rem 1.5rem;
+-      border-bottom: 1px solid var(--line); background: var(--panel);
++      display: flex; align-items: center; gap: 1.25rem; padding: .7rem 1.5rem;
++      border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 20;
+     }
+-    header h1 { font-size: 1.05rem; margin: 0; letter-spacing: -0.01em; }
+-    header .status { margin-left: auto; font-size: .85rem; color: var(--muted); }
+-    main { max-width: 60rem; margin: 0 auto; padding: 1.5rem; }
++    .brand a { color: var(--ink); text-decoration: none; font-weight: 700; letter-spacing: -0.01em; }
++    nav { display: flex; gap: .25rem; }
++    nav a { color: var(--muted); text-decoration: none; font-weight: 500; padding: .35rem .7rem;
++            border-radius: var(--radius-sm); transition: color .15s, background .15s; }
++    nav a:hover { color: var(--ink); background: var(--panel-2); }
++    nav a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
++    .header-right { margin-left: auto; display: flex; align-items: center; gap: .75rem; }
++    .status { font-size: .85rem; color: var(--muted); display: inline-flex; gap: .5rem; align-items: center; }
++    .dot { width: .55rem; height: .55rem; border-radius: 999px; background: var(--ok); display: inline-block; }
++    .dot.off { background: var(--bad); }
++
++    main { max-width: 64rem; margin: 0 auto; padding: 1.5rem; }
+     section { margin-bottom: 2.25rem; }
+-    h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .06em;
+-         color: var(--muted); margin: 0 0 .75rem; }
+-    .card { background: var(--panel); border: 1px solid var(--line);
+-            border-radius: 10px; padding: 1rem 1.15rem; margin-bottom: .75rem; }
++    .section-head { display: flex; align-items: baseline; gap: .75rem; margin: 0 0 .6rem; flex-wrap: wrap; }
++    h2 { font-size: 1rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
++    .section-head .lede { color: var(--muted); font-size: .88rem; }
++    h3 { font-size: .9rem; margin: 0 0 .5rem; }
++
++    /* --- Cards, tables ------------------------------------------------------------- */
++    .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
++            padding: 1rem 1.15rem; margin-bottom: .75rem; }
++    .card.subtle { background: var(--panel-2); border-style: dashed; }
++    .table-wrap { overflow-x: auto; }
+     table { width: 100%; border-collapse: collapse; }
+-    th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); }
+-    th { font-weight: 600; font-size: .8rem; color: var(--muted); }
+-    .pill { display: inline-block; padding: .1rem .55rem; border-radius: 999px;
+-            font-size: .75rem; font-weight: 600; }
+-    .pill.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+-    .pill.stale, .pill.starting, .pill.paused {
+-      background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+-    .pill.failing { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
++    th, td { text-align: left; padding: .55rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
++    th { font-weight: 600; font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
++    tr:last-child td { border-bottom: 0; }
++    tr.edit-row td { background: var(--panel-2); }
++    td.actions { white-space: nowrap; }
++    .error-line { max-width: 34rem; }
++
++    /* --- Pills, tags ---------------------------------------------------------------- */
++    .pill { display: inline-flex; align-items: center; gap: .3rem; padding: .1rem .55rem; border-radius: 999px;
++            font-size: .75rem; font-weight: 600; white-space: nowrap; }
++    .pill::before { content: ""; width: .45rem; height: .45rem; border-radius: 999px; background: currentColor; }
++    .pill.ok, .pill.sent { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
++    .pill.stale, .pill.starting, .pill.paused, .pill.pending, .pill.cooling {
++      background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
++    .pill.failing, .pill.failed { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
++    .pill.sending { background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); }
++    .pill.cancelled, .pill.disabled { background: var(--panel-2); color: var(--muted); }
++    .tag { border: 1px solid var(--line); background: var(--panel-2); border-radius: 6px; padding: .02rem .45rem;
++           font-size: .72rem; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++    .tag.brand { color: var(--ink); font-weight: 500; }
++    .tag.drop { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); border-color: transparent; }
++    .tag.score { background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); border-color: transparent; }
++    .tag.score.hot { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); font-weight: 600; }
++    .tag.score.cold { opacity: .65; }
++
++    /* --- Forms ------------------------------------------------------------------------ */
+     form.inline { display: inline; }
+     label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: .2rem; }
+-    input, select, button {
+-      font: inherit; padding: .45rem .6rem; border-radius: 7px;
++    label .help { margin-left: .2rem; }
++    input, select, textarea, button {
++      font: inherit; padding: .48rem .65rem; border-radius: var(--radius-sm);
+       border: 1px solid var(--line); background: var(--bg); color: var(--ink);
++      transition: border-color .15s, background .15s, color .15s;
+     }
+-    input[type=text], input[type=url], input[type=password] { width: 100%; }
+-    button { cursor: pointer; background: var(--accent); color: #06282a;
+-             border-color: transparent; font-weight: 600; }
+-    button.quiet { background: transparent; color: var(--muted); font-weight: 500; }
+-    .grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }
+-    .error { border-left: 3px solid var(--bad); padding-left: .75rem; color: var(--bad); }
+-    .muted { color: var(--muted); font-size: .85rem; }
++    input:hover, select:hover { border-color: color-mix(in srgb, var(--muted) 60%, var(--line)); }
++    input[type=text], input[type=url], input[type=password], input[type=number], select { width: 100%; }
++    input.short { width: 7rem; }
++    .hint { display: block; font-size: .76rem; color: var(--muted); margin-top: .25rem; line-height: 1.4; }
++    button { cursor: pointer; background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
++    button:hover { filter: brightness(1.06); }
++    button.quiet { background: transparent; color: var(--muted); font-weight: 500; border-color: var(--line); }
++    button.quiet:hover { color: var(--ink); background: var(--panel-2); filter: none; }
++    button.danger { background: transparent; color: var(--bad); border-color: var(--line); font-weight: 500; }
++    button.danger:hover { background: color-mix(in srgb, var(--bad) 10%, transparent); filter: none; }
++    button.icon { display: inline-flex; align-items: center; gap: .35rem; }
++    button svg, a svg { width: 1rem; height: 1rem; }
++    .grid { display: grid; gap: .8rem; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
+     .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+-    a { color: var(--accent); }
++    .muted { color: var(--muted); font-size: .85rem; }
++    .flash { border-left: 3px solid var(--info); background: var(--panel); border-radius: var(--radius-sm);
++             padding: .6rem .85rem; margin: 0 0 1rem; }
++    .flash.ok { border-left-color: var(--ok); }
++    .flash.error { border-left-color: var(--bad); color: var(--bad); }
++    .error { border-left: 3px solid var(--bad); padding-left: .75rem; color: var(--bad); }
++
++    /* --- Help: tooltips and explainers ------------------------------------------------ */
++    .help { display: inline-flex; align-items: center; justify-content: center; width: 1.05rem; height: 1.05rem;
++            border-radius: 999px; border: 1px solid var(--muted); color: var(--muted); font-size: .68rem; font-weight: 700;
++            cursor: help; position: relative; vertical-align: middle; background: transparent; padding: 0; }
++    .help:hover, .help:focus-visible { color: var(--accent); border-color: var(--accent); }
++    .help::after { content: attr(data-tip); position: absolute; left: 50%; bottom: calc(100% + .45rem); transform: translateX(-50%);
++                   width: max-content; max-width: 18rem; background: var(--ink); color: var(--bg); font-size: .76rem; font-weight: 400;
++                   line-height: 1.4; padding: .45rem .6rem; border-radius: var(--radius-sm); box-shadow: var(--shadow);
++                   opacity: 0; pointer-events: none; transition: opacity .15s; z-index: 30; white-space: normal; text-align: left; }
++    .help:hover::after, .help:focus-visible::after { opacity: 1; }
++    details.explain { border: 1px dashed var(--line); border-radius: var(--radius-sm); padding: .5rem .85rem; margin: .5rem 0 0; }
++    details.explain summary { cursor: pointer; color: var(--accent); font-size: .85rem; font-weight: 500; list-style: none; }
++    details.explain summary::before { content: "▸ "; }
++    details.explain[open] summary::before { content: "▾ "; }
++    details.explain p, details.explain ul { font-size: .85rem; color: var(--muted); margin: .5rem 0; }
++    kbd, code { font: .85em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--panel-2); padding: .05rem .3rem; border-radius: 4px; }
++    .legend { display: flex; flex-wrap: wrap; gap: .5rem 1rem; font-size: .8rem; color: var(--muted); }
++    .empty { text-align: center; padding: 1.5rem; color: var(--muted); }
++    .empty strong { color: var(--ink); display: block; margin-bottom: .25rem; }
++    .glossary { display: grid; grid-template-columns: minmax(9rem, 14rem) 1fr; gap: .45rem 1rem; margin: 0; }
++    .glossary dt { font-weight: 600; }
++    .glossary dd { margin: 0; color: var(--muted); font-size: .9rem; }
++    @media (max-width: 40rem) { .glossary { grid-template-columns: 1fr; } .glossary dd { margin-bottom: .5rem; } }
++    .history img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; vertical-align: middle; }
+ 
+     /* --- Listing cards ----------------------------------------------------------- */
+     .listing-grid { display: grid; gap: .75rem;
+@@ -144,28 +231,27 @@
+                          border-radius: 0; padding: .4rem .6rem; text-align: left;
+                          font-weight: 400; }
+     .combo-list button:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+-    .pill.cooling { background: #fff3e0; color: #e65100; }
+-    .tag.score { background: #ede7f6; color: #4527a0; }
+-    .tag.score.hot { background: #fbe9e7; color: #bf360c; font-weight: 600; }
+-    .tag.score.cold { opacity: .6; }
+-    .pill.sent { background: #e8f5e9; color: #1b5e20; }
+-    .pill.pending { background: #fff8e1; color: #f57f17; }
+-    .pill.sending { background: #e3f2fd; color: #0d47a1; }
+-    .pill.cancelled { opacity: .6; }
+-    .history img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; vertical-align: middle; }
+-    .tag.drop { background: #e8f5e9; color: #1b5e20; }
+-    tr.edit-row td { background: rgba(0,0,0,.025); }
+-    td.actions { white-space: nowrap; }
+-    .error-line { max-width: 34rem; }
+   </style>
+ </head>
+ <body>
++  <a class="skip" href="#main">Skip to content</a>
+   <header>
+-    <h1><a href="/" style="color:inherit;text-decoration:none">vinted-sniper</a>
+-      <span class="muted" style="font-size:.7em;font-weight:normal;margin-left:.6rem">
+-        <a href="/">searches</a> · <a href="/history">history</a></span></h1>
+-    {% block header_extra %}{% endblock %}
++    <div class="brand"><a href="/">vinted-sniper</a></div>
++    <nav aria-label="Sections">
++      <a href="/" {% if nav == 'searches' %}aria-current="page"{% endif %}>Searches</a>
++      <a href="/history" {% if nav == 'history' %}aria-current="page"{% endif %}>History</a>
++      <a href="/help" {% if nav == 'help' %}aria-current="page"{% endif %}>Help</a>
++    </nav>
++    <div class="header-right">{% block header_extra %}{% endblock %}</div>
+   </header>
+-  <main>{% block content %}{% endblock %}</main>
++  <main id="main">
++    {% if request is defined and request.query_params.get('ok') %}
++      <p class="flash ok" role="status">{{ request.query_params.get('ok') }}</p>
++    {% endif %}
++    {% if request is defined and request.query_params.get('error') %}
++      <p class="flash error" role="alert">{{ request.query_params.get('error') }}</p>
++    {% endif %}
++    {% block content %}{% endblock %}
++  </main>
+ </body>
+ </html>
+diff --git a/src/vinted_sniper/web/templates/dashboard.html b/src/vinted_sniper/web/templates/dashboard.html
+index 1d75473..230196d 100644
+--- a/src/vinted_sniper/web/templates/dashboard.html
++++ b/src/vinted_sniper/web/templates/dashboard.html
+@@ -1,10 +1,21 @@
+ {% extends "base.html" %}
+ {% block title %}vinted-sniper{% endblock %}
++{% macro icon(name) -%}
++{%- if name == 'edit' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
++{%- elif name == 'pause' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
++{%- elif name == 'play' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 4l14 8-14 8Z"/></svg>
++{%- elif name == 'trash' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>
++{%- elif name == 'clone' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
++{%- elif name == 'external' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>
++{%- elif name == 'download' -%}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
++{%- endif -%}
++{%- endmacro %}
++{% macro help(text) -%}<button type="button" class="help" data-tip="{{ text }}" aria-label="{{ text }}">?</button>{%- endmacro %}
+ 
+ {% block header_extra %}
+-  <span class="status">
+-    {% if snapshot.alive %}running{% else %}not responding{% endif %}
+-    · {{ snapshot.queued_notifications }} queued
++  <span class="status"><span class="dot {{ '' if snapshot.alive else 'off' }}" aria-hidden="true"></span>
++    <span data-field="header-status">{% if snapshot.alive %}running{% else %}not responding{% endif %} · {{ snapshot.queued_notifications }} queued</span>
++    {{ help('“queued” = alerts written but not yet delivered: waiting for a destination to be paired, held for an AI verdict, inside quiet hours, or retrying.') }}
+   </span>
+   {% if auth_enabled %}
+   <form method="post" action="/logout" class="inline">
+@@ -14,32 +25,39 @@
+ {% endblock %}
+ 
+ {% block content %}
+-{% if request.query_params.get('error') %}
+-  <p class="error">{{ request.query_params.get('error') }}</p>
+-{% endif %}
+-
+-<section>
+-  <h2>Searches</h2>
++<section id="searches">
++  <div class="section-head">
++    <h2>Searches</h2>
++    <span class="lede">Each row is one Vinted search being checked on a timer. New listings that pass its filters become alerts.</span>
++  </div>
+   {% if not snapshot.searches %}
+-    <div class="card muted">
+-      Nothing being watched yet. Add a search below: open Vinted, set up the search you
+-      want, and copy the address bar once results are showing.
++    <div class="card">
++      <div class="empty">
++        <strong>Nothing is being watched yet.</strong>
++        Open Vinted, set up the search you want, copy the address bar once results are showing, and paste it below.
++        The first check only records what is already listed — you will not be flooded.
++      </div>
+     </div>
+   {% else %}
+   <div class="card">
++    <div class="table-wrap">
+     <table id="searches">
+       <tr>
+-        <th>Search</th><th>Site</th><th>State</th>
+-        <th>Last checked</th><th>Next check</th><th>Newest listing</th><th>Found</th><th></th>
++        <th>Search</th><th>Site</th>
++        <th>State {{ help('ok = checking normally · starting = no check finished yet · cooling = Vinted refused a request, every search on that site waits · stale = no new listing for far longer than usual · failing = the last check errored · paused = you paused it') }}</th>
++        <th>Last checked</th><th>Next check</th>
++        <th>Newest listing {{ help('When the newest listing Vinted returned for this search was posted. If it stops moving while the site is busy, something is wrong.') }}</th>
++        <th>Found {{ help('Listings this search has recorded since it was created, including the first-check seed.') }}</th><th></th>
+       </tr>
+       {% for search in snapshot.searches %}
+       {% set q = queries[search.query_id] %}
+       <tr data-query-id="{{ search.query_id }}">
+         <td>
+-          <span data-field="name">{{ search.name }}</span>
++          <span data-field="name" style="font-weight:600">{{ search.name }}</span>
+           <div class="muted">
+             every {{ q.poll_interval_s }}s
+-            {% if q.max_total_price %}· ≤ {{ q.max_total_price }}{% endif %}
++            {% if q.max_total_price %}· ≤ {{ q.max_total_price }} total{% endif %}
++            {% if q.max_market_percentile %}· cheapest {{ q.max_market_percentile }}% only{% endif %}
+             {% if q.required_keywords %}· needs {{ q.required_keywords | join(', ') }}{% endif %}
+             {% if q.banned_keywords %}· not {{ q.banned_keywords | join(', ') }}{% endif %}
+             {% if q.title_pattern %}· /{{ q.title_pattern }}/{% endif %}
+@@ -54,116 +72,125 @@
+         <td class="muted">vinted.{{ search.tld }}</td>
+         <td><span class="pill {{ search.state }}" data-field="state">{{ search.state }}</span></td>
+         <td class="muted" data-field="last" data-ts="{{ search.last_success_at or '' }}">
+-          {% if search.last_success_at %}{{ now - search.last_success_at }}s ago
+-          {% else %}never{% endif %}
++          {% if search.last_success_at %}{{ now - search.last_success_at }}s ago{% else %}never{% endif %}
+         </td>
+         <td class="muted" data-field="next" data-ts="{{ search.next_check_at or '' }}">
+-          {% if search.next_check_at %}
+-            {% if search.next_check_at > now %}in {{ search.next_check_at - now }}s{% else %}due{% endif %}
+-          {% else %}—{% endif %}
++          {% if search.next_check_at %}{% if search.next_check_at > now %}in {{ search.next_check_at - now }}s{% else %}due{% endif %}{% else %}—{% endif %}
+         </td>
+         <td class="muted" data-field="newest" data-ts="{{ search.newest_listing_at or '' }}">
+-          {% if search.newest_listing_at %}{{ now - search.newest_listing_at }}s ago
+-          {% else %}—{% endif %}
++          {% if search.newest_listing_at %}{{ now - search.newest_listing_at }}s ago{% else %}—{% endif %}
+         </td>
+         <td class="muted" data-field="found">{{ search.items_total }}</td>
+         <td class="actions">
+-          <button class="quiet" type="button" data-edit="{{ search.query_id }}"
+-                  aria-expanded="false">Edit</button>
++          <button class="quiet icon" type="button" data-edit="{{ search.query_id }}" aria-expanded="false" title="Change name, timing and filters">{{ icon('edit') }} Edit</button>
+           <form method="post" action="/searches/{{ search.query_id }}/pause" class="inline">
+             <input type="hidden" name="paused" value="{{ '0' if search.paused else '1' }}">
+-            <button class="quiet" type="submit">{{ 'Resume' if search.paused else 'Pause' }}</button>
++            <button class="quiet icon" type="submit" title="{{ 'Start checking again' if search.paused else 'Stop checking; nothing is deleted' }}">
++              {{ icon('play') if search.paused else icon('pause') }} {{ 'Resume' if search.paused else 'Pause' }}
++            </button>
+           </form>
+           <form method="post" action="/searches/{{ search.query_id }}/delete" class="inline"
+-                onsubmit="return confirm('Delete “{{ search.name }}”? Its recorded listings go too.')">
+-            <button class="quiet" type="submit">Delete</button>
++                onsubmit="return confirm('Delete “{{ search.name }}”?\n\nIts recorded listings and market history go with it. Pausing keeps them.')">
++            <button class="danger icon" type="submit" title="Remove this search and its history">{{ icon('trash') }} Delete</button>
+           </form>
+         </td>
+       </tr>
+       <tr class="edit-row" id="edit-{{ search.query_id }}" hidden>
+         <td colspan="8">
+           <form method="post" action="/searches/{{ search.query_id }}/edit">
++            <h3>Edit “{{ q.name }}”</h3>
+             <div class="grid">
+               <div>
+-                <label>Name</label>
+-                <input type="text" name="name" value="{{ q.name }}">
++                <label for="e-name-{{ q.id }}">Name</label>
++                <input type="text" id="e-name-{{ q.id }}" name="name" value="{{ q.name }}">
++              </div>
++              <div>
++                <label for="e-interval-{{ q.id }}">Check every (seconds) {{ help('How often to ask Vinted. 120–600 is sensible: faster does not find things sooner (Vinted itself lags) and does get the address blocked.') }}</label>
++                <input type="text" id="e-interval-{{ q.id }}" name="interval" value="{{ q.poll_interval_s }}" inputmode="numeric">
+               </div>
+               <div>
+-                <label>Check every (seconds)</label>
+-                <input type="text" name="interval" value="{{ q.poll_interval_s }}" inputmode="numeric">
++                <label for="e-price-{{ q.id }}">Max total price {{ help('The most you will pay including buyer protection. Vinted’s own price filter ignores the protection fee.') }}</label>
++                <input type="text" id="e-price-{{ q.id }}" name="max_total_price" value="{{ q.max_total_price or '' }}" placeholder="e.g. 45">
+               </div>
+               <div>
+-                <label>Max total price</label>
+-                <input type="text" name="max_total_price" value="{{ q.max_total_price or '' }}"
+-                       placeholder="incl. buyer protection">
++                <label for="e-pct-{{ q.id }}">Only the cheapest … % {{ help('Compares each new listing with everything this search has seen in the last 30 days. “25” means: only tell me if it is cheaper than three quarters of them. Adapts to the market by itself; needs 10 listings before it kicks in.') }}</label>
++                <input type="text" id="e-pct-{{ q.id }}" name="max_market_percentile" value="{{ q.max_market_percentile or '' }}" placeholder="e.g. 25" inputmode="numeric">
+               </div>
+               <div>
+-                <label>Exclude words</label>
+-                <input type="text" name="banned_keywords" value="{{ q.banned_keywords | join(', ') }}">
++                <label for="e-req-{{ q.id }}">Title must contain (all) {{ help('Comma-separated words that must all be in the title. Vinted’s text search also matches descriptions, which is where most of the noise comes from.') }}</label>
++                <input type="text" id="e-req-{{ q.id }}" name="required_keywords" value="{{ q.required_keywords | join(', ') }}" placeholder="torrentshell, 3l">
+               </div>
+               <div>
+-                <label>Title must contain (all)</label>
+-                <input type="text" name="required_keywords" value="{{ q.required_keywords | join(', ') }}">
++                <label for="e-ban-{{ q.id }}">Exclude words {{ help('Skip listings whose title contains any of these.') }}</label>
++                <input type="text" id="e-ban-{{ q.id }}" name="banned_keywords" value="{{ q.banned_keywords | join(', ') }}" placeholder="replica, fake, kids">
+               </div>
+               <div>
+-                <label>Title matches regex</label>
+-                <input type="text" name="title_pattern" value="{{ q.title_pattern or '' }}">
++                <label for="e-re-{{ q.id }}">Title matches pattern {{ help('Optional regular expression for the title, case-insensitive. Leave empty unless you know regex. Example: 3L|three layer keeps titles mentioning either spelling.') }}</label>
++                <input type="text" id="e-re-{{ q.id }}" name="title_pattern" value="{{ q.title_pattern or '' }}">
+               </div>
+               <div>
+-                <label>Min. seller rating (%)</label>
+-                <input type="text" name="min_seller_rating" inputmode="numeric"
+-                       value="{{ (q.min_seller_rating * 100) | round | int if q.min_seller_rating else '' }}">
++                <label for="e-rating-{{ q.id }}">Min. seller rating (%) {{ help('Skip sellers rated below this. Sellers with no rating yet are skipped too. 90 is a sensible floor.') }}</label>
++                <input type="text" id="e-rating-{{ q.id }}" name="min_seller_rating" inputmode="numeric" value="{{ (q.min_seller_rating * 100) | round | int if q.min_seller_rating else '' }}">
+               </div>
+               <div>
+-                <label>Min. seller reviews</label>
+-                <input type="text" name="min_seller_reviews" inputmode="numeric"
+-                       value="{{ q.min_seller_reviews or '' }}">
++                <label for="e-reviews-{{ q.id }}">Min. seller reviews {{ help('Skip sellers with fewer reviews than this. A cheap item from a seller with no history is a gamble.') }}</label>
++                <input type="text" id="e-reviews-{{ q.id }}" name="min_seller_reviews" inputmode="numeric" value="{{ q.min_seller_reviews or '' }}">
+               </div>
+               <div>
+-                <label>Skip sellers</label>
+-                <input type="text" name="blocked_sellers" value="{{ q.blocked_sellers | join(', ') }}">
++                <label for="e-block-{{ q.id }}">Skip sellers {{ help('Usernames to ignore, comma-separated. The “Skip seller” button under a Telegram alert adds to this list.') }}</label>
++                <input type="text" id="e-block-{{ q.id }}" name="blocked_sellers" value="{{ q.blocked_sellers | join(', ') }}">
+               </div>
+             </div>
+-            <div class="row" style="margin-top:.6rem">
+-              <button type="submit">Save</button>
++            <div class="row" style="margin-top:.8rem">
++              <button type="submit">Save changes</button>
+               <button type="button" class="quiet" data-edit="{{ search.query_id }}">Cancel</button>
+-              <span class="muted">The URL itself cannot change — that would be a different search.</span>
++              <span class="muted">The URL cannot change — that would be a different search. Add a new one instead.</span>
+             </div>
+           </form>
++          <form method="post" action="/searches/{{ search.query_id }}/clone" class="row" style="margin-top:.9rem;padding-top:.8rem;border-top:1px dashed var(--line)">
++            <label for="clone-{{ q.id }}" style="margin:0">{{ icon('clone') }} Also watch this on</label>
++            <select id="clone-{{ q.id }}" name="tld" style="width:auto">
++              {% for t in known_tlds if t != q.tld %}
++              <option value="{{ t }}" {% if t in ('cz', 'de', 'pl', 'at', 'hu') and loop.first %}{% endif %}>vinted.{{ t }}</option>
++              {% endfor %}
++            </select>
++            <button class="quiet" type="submit">Clone</button>
++            <span class="muted">Same filters and destinations, another country. Vinted lets you buy across EU sites, and the bigger markets (.de, .pl, .cz) have far more listings than .sk. A listing shown on several sites is only alerted once.</span>
++          </form>
+         </td>
+       </tr>
+       {% endfor %}
+     </table>
+-    <div class="row" style="justify-content:space-between;margin-top:.6rem">
+-      <p class="muted" style="margin:0">
+-        “stale” means this search has stopped seeing new listings while others on the same
+-        site keep finding them — usually a session that needs replacing, which happens
+-        automatically. “cooling” means the site refused one search and every search on it
+-        is waiting out the same backoff. This table refreshes itself.
+-      </p>
++    </div>
++    <div class="row" style="justify-content:space-between;margin-top:.8rem">
++      <div class="legend">
++        <span><span class="pill ok">ok</span> checking normally</span>
++        <span><span class="pill cooling">cooling</span> site refused a request, all searches on it wait</span>
++        <span><span class="pill stale">stale</span> quiet far longer than usual</span>
++        <span><span class="pill failing">failing</span> last check errored</span>
++        <span class="muted">Refreshes every 10 s.</span>
++      </div>
+       <form method="post" action="/searches/interval" class="row inline" style="margin:0">
+-        <label style="margin:0">Check all every</label>
+-        <input type="text" name="interval" value="{{ default_interval }}" inputmode="numeric"
+-               size="5" style="width:auto">
++        <label for="all-interval" style="margin:0">Check all every</label>
++        <input type="text" id="all-interval" name="interval" value="{{ default_interval }}" inputmode="numeric" class="short">
+         <span class="muted">s</span>
+-        <button class="quiet" type="submit">Apply to all</button>
++        <button class="quiet" type="submit" title="Sets the interval on every search at once — handy when Vinted is grumpy">Apply to all</button>
+       </form>
+     </div>
+   </div>
+   {% endif %}
+ 
+   <div class="card">
++    <h3>Add a search</h3>
+     <form method="post" action="/searches">
+       <div class="row" style="justify-content:space-between">
+-        <label for="url" style="margin:0">Vinted search URL</label>
++        <label for="url" style="margin:0">Vinted search URL {{ help('On vinted.sk (or any country site) set your filters — brand, size, price, condition — and copy the address bar once results are showing. Tracking parameters are removed automatically.') }}</label>
+         {% if builder_enabled %}
+-        <button type="button" class="quiet" id="builder-toggle" aria-expanded="false">
+-          Build a search instead ▾
+-        </button>
++        <button type="button" class="quiet" id="builder-toggle" aria-expanded="false">Build a search instead ▾</button>
+         {% endif %}
+       </div>
+-      <input type="url" id="url" name="url" required
+-             placeholder="https://www.vinted.fr/catalog?search_text=...">
++      <input type="url" id="url" name="url" required placeholder="https://www.vinted.sk/catalog?search_text=...">
++      <span class="hint">Any country site works: .sk, .cz, .de, .pl, … The site you copied from is the one that will be watched.</span>
+ 
+       {% if builder_enabled %}
+       <div id="builder" hidden>
+@@ -227,175 +254,193 @@
+         <p class="muted" id="b-preview" style="margin:.6rem 0 0"></p>
+       </div>
+       {% endif %}
+-      <div class="grid" style="margin-top:.75rem">
++
++      <div class="grid" style="margin-top:.85rem">
+         <div>
+           <label for="name">Name (optional)</label>
+-          <input type="text" id="name" name="name">
++          <input type="text" id="name" name="name" placeholder="defaults to the search text">
++        </div>
++        <div>
++          <label for="interval">Check every (seconds) {{ help('120–600 is sensible. Faster does not find listings sooner and does get the address blocked.') }}</label>
++          <input type="text" id="interval" name="interval" value="{{ default_interval }}" inputmode="numeric">
+         </div>
+         <div>
+-          <label for="interval">Check every (seconds)</label>
+-          <input type="text" id="interval" name="interval"
+-                 value="{{ default_interval }}" inputmode="numeric">
++          <label for="max_total_price">Max total price {{ help('The most you will pay including buyer protection — Vinted’s own price filter ignores the fee.') }}</label>
++          <input type="text" id="max_total_price" name="max_total_price" placeholder="e.g. 45">
+         </div>
+         <div>
+-          <label for="max_total_price">Max total price</label>
+-          <input type="text" id="max_total_price" name="max_total_price"
+-                 placeholder="incl. buyer protection">
++          <label for="max_market_percentile">Only the cheapest … % {{ help('“25” = only tell me about listings cheaper than three quarters of what this search has seen in the last 30 days. Adapts by itself; needs 10 listings first.') }}</label>
++          <input type="text" id="max_market_percentile" name="max_market_percentile" placeholder="e.g. 25" inputmode="numeric">
+         </div>
+         <div>
+-          <label for="banned_keywords">Exclude words</label>
+-          <input type="text" id="banned_keywords" name="banned_keywords"
+-                 placeholder="fake, replica">
++          <label for="banned_keywords">Exclude words {{ help('Skip listings whose title contains any of these.') }}</label>
++          <input type="text" id="banned_keywords" name="banned_keywords" placeholder="replica, fake, kids">
+         </div>
+       </div>
+-      <details style="margin-top:.75rem">
++      <details class="explain" style="margin-top:.75rem">
+         <summary>More filters — title and seller</summary>
+         <div class="grid" style="margin-top:.5rem">
+           <div>
+-            <label for="required_keywords">Title must contain (all)</label>
+-            <input type="text" id="required_keywords" name="required_keywords"
+-                   placeholder="torrentshell, 3l">
++            <label for="required_keywords">Title must contain (all) {{ help('All of these words must be in the title. Cuts the noise from Vinted matching descriptions.') }}</label>
++            <input type="text" id="required_keywords" name="required_keywords" placeholder="torrentshell, 3l">
+           </div>
+           <div>
+-            <label for="title_pattern">Title matches regex</label>
+-            <input type="text" id="title_pattern" name="title_pattern"
+-                   placeholder="\b(M|L)\b|size 4[0-2]">
++            <label for="title_pattern">Title matches pattern {{ help('Optional regular expression, case-insensitive. Only if you know regex.') }}</label>
++            <input type="text" id="title_pattern" name="title_pattern" placeholder="3L|three layer">
+           </div>
+           <div>
+-            <label for="min_seller_rating">Min. seller rating (%)</label>
+-            <input type="text" id="min_seller_rating" name="min_seller_rating"
+-                   placeholder="90" inputmode="numeric">
++            <label for="min_seller_rating">Min. seller rating (%) {{ help('Skip sellers rated below this; unrated sellers are skipped too.') }}</label>
++            <input type="text" id="min_seller_rating" name="min_seller_rating" placeholder="90" inputmode="numeric">
+           </div>
+           <div>
+-            <label for="min_seller_reviews">Min. seller reviews</label>
+-            <input type="text" id="min_seller_reviews" name="min_seller_reviews"
+-                   placeholder="5" inputmode="numeric">
++            <label for="min_seller_reviews">Min. seller reviews {{ help('Skip sellers with fewer reviews.') }}</label>
++            <input type="text" id="min_seller_reviews" name="min_seller_reviews" placeholder="5" inputmode="numeric">
+           </div>
+           <div>
+-            <label for="blocked_sellers">Skip sellers</label>
+-            <input type="text" id="blocked_sellers" name="blocked_sellers"
+-                   placeholder="usernames, comma-separated">
++            <label for="blocked_sellers">Skip sellers {{ help('Usernames to ignore, comma-separated.') }}</label>
++            <input type="text" id="blocked_sellers" name="blocked_sellers" placeholder="usernames, comma-separated">
+           </div>
+         </div>
+       </details>
+       {% if destinations %}
+-      <div style="margin-top:.75rem">
+-        <label>Send to</label>
++      <div style="margin-top:.85rem">
++        <label>Send alerts to {{ help('Which destinations this search feeds. A search with none selected still records listings, it just tells nobody.') }}</label>
+         <div class="row">
+           {% for destination in destinations if destination.active %}
+-          <label class="row" style="margin:0">
++          <label class="row" style="margin:0;color:var(--ink)">
+             <input type="checkbox" name="destination_ids" value="{{ destination.id }}" checked>
+-            {{ destination.name }}
++            {{ destination.name }} <span class="muted">({{ destination.kind }})</span>
+           </label>
+           {% endfor %}
+         </div>
+       </div>
+       {% endif %}
+-      <p class="muted">
+-        Anything below {{ min_interval }} seconds is ignored — Vinted's own catalog lags
+-        further behind than that, so checking faster finds nothing sooner.
+-      </p>
+-      <button type="submit">Watch this search</button>
++      <div class="row" style="margin-top:1rem">
++        <button type="submit">Add search</button>
++        <span class="muted">The first check records what is already listed and alerts about nothing{% if first_run_newest %} — except one listing, so you can see delivery works{% endif %}.</span>
++      </div>
+     </form>
++    <details class="explain">
++      <summary>How the filters work together</summary>
++      <p>A listing has to pass <em>every</em> filter you set. Vinted’s own filters (brand, size, category, price) are in the URL and Vinted applies them before we see anything. Ours run on what comes back: the total-price cap, the “cheapest … %” market cap, title words, and seller checks.</p>
++      <p><strong>“Only the cheapest … %”</strong> is the one worth understanding. Every check, this search sees up to 96 listings; all of them are remembered for 30 days with their price. When a new listing appears, we count how many remembered ones are cheaper. “25” means: alert only if fewer than 25 % of them are cheaper — i.e. it is in the cheapest quarter of the current market. Unlike a fixed price cap, this follows the season and the market by itself. The alert also tells you, in words: “cheaper than 88 % of 312 similar listings seen this month”.</p>
++    </details>
+   </div>
+ </section>
+-
+-<section>
+-  <h2>Destinations</h2>
++<section id="destinations">
++  <div class="section-head">
++    <h2>Destinations</h2>
++    <span class="lede">Where alerts go. Each search chooses which of these it feeds.</span>
++  </div>
+   {% if destinations %}
+   <div class="card">
++    <div class="table-wrap">
+     <table>
+-      <tr><th>Name</th><th>Type</th><th>State</th><th>Quiet hours</th><th>Health notices</th><th></th></tr>
++      <tr>
++        <th>Name</th><th>Type</th><th>State</th>
++        <th>Quiet hours {{ help('A daily window when nothing is sent, e.g. 23:00-07:00. Listings found meanwhile are kept and arrive together when it ends, instead of being dropped.') }}</th>
++        <th>Health notices {{ help('Also send warnings here: “Vinted is refusing us”, “a search went quiet”, the Monday summary. Turn it on for at least one destination or you will not hear about problems.') }}</th>
++        <th></th>
++      </tr>
+       {% for destination in destinations %}
+       <tr>
+-        <td>{{ destination.name }}</td>
++        <td style="font-weight:600">{{ destination.name }}</td>
+         <td class="muted">{{ destination.kind }}</td>
+         <td>
+           {% if destination.active %}<span class="pill ok">active</span>
+-          {% else %}<span class="pill failing">disabled</span>{% endif %}
++          {% else %}<span class="pill disabled">disabled</span>{% endif %}
+         </td>
+         <td>
+-          <form method="post" action="/destinations/{{ destination.id }}/quiet" class="inline">
+-            <input type="text" name="quiet_hours" value="{{ destination.quiet_hours or '' }}"
+-                   placeholder="23:00-07:00" size="11" style="width:auto">
++          <form method="post" action="/destinations/{{ destination.id }}/quiet" class="row inline" style="margin:0">
++            <input type="text" name="quiet_hours" value="{{ destination.quiet_hours or '' }}" placeholder="23:00-07:00" class="short" aria-label="Quiet hours for {{ destination.name }}">
+             <button class="quiet" type="submit">Set</button>
+           </form>
+         </td>
+         <td>
+           <form method="post" action="/destinations/{{ destination.id }}/status" class="inline">
+             <input type="hidden" name="enabled" value="{{ '0' if destination.notify_status else '1' }}">
+-            <button class="quiet" type="submit">
+-              {{ 'on — turn off' if destination.notify_status else 'off — turn on' }}
++            <button class="quiet" type="submit" aria-pressed="{{ 'true' if destination.notify_status else 'false' }}">
++              {{ 'On — turn off' if destination.notify_status else 'Off — turn on' }}
+             </button>
+           </form>
+         </td>
+-        <td>
++        <td class="actions">
+           {% if destination.active %}
+-          <form method="post" action="/destinations/{{ destination.id }}/delete" class="inline">
+-            <button class="quiet" type="submit">Remove</button>
++          <form method="post" action="/destinations/{{ destination.id }}/delete" class="inline"
++                onsubmit="return confirm('Remove “{{ destination.name }}”? Searches routed to it will stop alerting there.')">
++            <button class="danger icon" type="submit">{{ icon('trash') }} Remove</button>
+           </form>
+           {% endif %}
+         </td>
+       </tr>
+       {% endfor %}
+     </table>
++    </div>
+   </div>
++  {% else %}
++  <div class="card"><div class="empty"><strong>No destination yet.</strong> Searches will record listings but tell nobody. Add one below — Telegram is the easiest: run <code>vinted-sniper pair-telegram</code> and tap the link.</div></div>
+   {% endif %}
+ 
+   <div class="card">
++    <h3>Add a destination</h3>
+     <form method="post" action="/destinations">
+       <div class="grid">
+         <div>
+           <label for="kind">Type</label>
+           <select id="kind" name="kind">
+-            <option value="discord">Discord webhook</option>
+             <option value="telegram">Telegram chat</option>
++            <option value="discord">Discord webhook</option>
+             <option value="ntfy">ntfy topic</option>
+-            <option value="webhook">Plain webhook</option>
++            <option value="webhook">Plain webhook (n8n, Home Assistant, …)</option>
+           </select>
+         </div>
+         <div>
+           <label for="dest_name">Name</label>
+-          <input type="text" id="dest_name" name="name" placeholder="my server">
++          <input type="text" id="dest_name" name="name" placeholder="my phone">
+         </div>
+         <div style="grid-column: 1 / -1">
+-          <label for="target">Webhook URL, chat id, or topic</label>
++          <label for="target">Webhook URL, chat id, or topic {{ help('Telegram: easier to run “vinted-sniper pair-telegram” in the container and tap the link — it finds the chat id for you. Discord: Server settings → Integrations → Webhooks → copy URL. ntfy: any topic name. Webhook: an https URL you control; the payload is documented in docs/configuration.md.') }}</label>
+           <input type="text" id="target" name="target" required>
+         </div>
+         <div>
+-          <label for="quiet_hours">Quiet hours (optional)</label>
++          <label for="quiet_hours">Quiet hours (optional) {{ help('e.g. 23:00-07:00 in your timezone. Alerts found meanwhile arrive as one digest when it ends.') }}</label>
+           <input type="text" id="quiet_hours" name="quiet_hours" placeholder="23:00-07:00">
+         </div>
+         <div>
+-          <label class="row" style="margin-top:1.6rem">
++          <label class="row" style="margin-top:1.6rem;color:var(--ink)">
+             <input type="checkbox" name="notify_status" value="1"> Also send health notices here
+           </label>
+         </div>
+       </div>
+-      <p class="muted">
+-        For Discord: server settings → Integrations → Webhooks → copy the URL. For Telegram,
+-        <code>vinted-sniper pair-telegram</code> gives you a link that sets this up for you.
+-        During quiet hours nothing is sent; what turned up arrives as a digest when they end.
+-        Health notices are the "site is refusing us" and "search went stale" warnings.
+-      </p>
+-      <button type="submit">Add destination</button>
++      <div class="row" style="margin-top:1rem"><button type="submit">Add destination</button></div>
+     </form>
++    <details class="explain">
++      <summary>What a Telegram alert looks like, and what the buttons do</summary>
++      <ul>
++        <li><strong>Top line</strong> — “🔥 HOT DEAL”, “🤖 …” or “💤 …” appears only when an AI agent judged the listing (optional, see Help). 💤 also means the phone will not buzz.</li>
++        <li><strong>📊 cheaper than 88 % of 312 similar listings</strong> — where the price sits among what this search has seen in the last 30 days. Higher is better.</li>
++        <li><strong>📉 Price drop</strong> — a listing you already saw got cheaper.</li>
++        <li><strong>Open listing / Seller profile</strong> — links to Vinted.</li>
++        <li><strong>Skip seller</strong> — never show this seller again for this search. <strong>Pause search</strong> — stop it until you resume (here or with /resume).</li>
++        <li><strong>👍 / 👎</strong> — tell the agent whether it called this one right; it learns your taste.</li>
++      </ul>
++    </details>
+   </div>
+ </section>
+ 
+ <section>
+   <p class="muted">
+-    <a href="/api/export" download="vinted-sniper-config.json">Download searches &amp; destinations as JSON</a>
+-    — restore with <code>vinted-sniper import file.json</code>.
++    <a href="/api/export" download="vinted-sniper-config.json">{{ icon('download') }} Download searches &amp; destinations as JSON</a>
++    — a backup of everything you typed (not the listings). Restore with <code>vinted-sniper import file.json</code>.
+   </p>
+ </section>
+-
+-<section>
+-  <h2>Recently found</h2>
+-  {% if not recent %}
+-  <div class="card">
+-    <p class="muted" style="margin:0">Nothing yet.</p>
++<section id="recent">
++  <div class="section-head">
++    <h2>Recently found</h2>
++    <span class="lede">The last 25 listings any search recorded. Badges: <span class="tag drop">📉 dropped</span> price fell since found · <span class="tag score">🤖 87</span> agent’s deal score (hover for its one-line verdict).</span>
+   </div>
++  {% if not recent %}
++  <div class="card"><div class="empty"><strong>Nothing recorded yet.</strong> The first check of each search will fill this in.</div></div>
+   {% else %}
+   <div class="listing-grid">
+     {% for row in recent %}
+@@ -835,7 +880,7 @@
+   // Live status: the table redraws itself from /api/health, and the relative times tick.
+   const table = document.getElementById("searches");
+   if (!table) return;
+-  const header = document.querySelector("header .status");
++  const header = document.querySelector('[data-field="header-status"]');
+ 
+   function ago(ts, now) {
+     if (!ts) return null;
+@@ -869,6 +914,8 @@
+     if (header) {
+       header.textContent = `${data.alive ? "running" : "not responding"} · ${data.queued_notifications} queued`;
+     }
++    const dot = document.querySelector("header .dot");
++    if (dot) dot.classList.toggle("off", !data.alive);
+     for (const search of data.searches) {
+       const row = table.querySelector(`tr[data-query-id="${search.query_id}"]`);
+       if (!row) continue;  // added since the page loaded; a reload will show it
+diff --git a/src/vinted_sniper/web/templates/help.html b/src/vinted_sniper/web/templates/help.html
+new file mode 100644
+index 0000000..de86d0e
+--- /dev/null
++++ b/src/vinted_sniper/web/templates/help.html
+@@ -0,0 +1,86 @@
++{% extends "base.html" %}
++{% block title %}Help · vinted-sniper{% endblock %}
++
++{% block header_extra %}
++  {% if auth_enabled %}
++  <form method="post" action="/logout" class="inline"><button class="quiet" type="submit">Sign out</button></form>
++  {% endif %}
++{% endblock %}
++
++{% block content %}
++<section>
++  <div class="section-head"><h2>How it works</h2><span class="lede">Two minutes, no jargon.</span></div>
++  <div class="card">
++    <p>You give it a Vinted search — the address bar after you set your filters. Every few minutes it asks Vinted for that search’s newest listings, exactly as a browser would, without logging in. Anything new that passes your filters is sent to your <strong>destinations</strong> (Telegram, Discord, ntfy, a webhook). The first check of a new search only records what is already there, so you are not flooded.</p>
++    <p>Vinted does not like being asked too often. The app paces itself (at most {{ settings_view.site_requests_per_minute }} requests a minute per country site, across all searches), and when Vinted refuses a request every search on that site backs off together — you will see <span class="pill cooling">cooling</span> in the table and get a notice if a destination has health notices on. That is deliberate, not a fault.</p>
++  </div>
++</section>
++
++<section>
++  <div class="section-head"><h2>Words on the Searches page</h2></div>
++  <div class="card">
++    <dl class="glossary">
++      <dt>Total price</dt>
++      <dd>What you actually pay: the asking price plus Vinted’s buyer-protection fee. All price filters and alerts use the total. Vinted’s own price filter does not.</dd>
++      <dt>Only the cheapest … %</dt>
++      <dd>Every check sees up to 96 listings; all of them are remembered for 30 days with their price, filters or not. When a new listing arrives, we count how many remembered ones are cheaper. Set it to 25 and you only hear about listings in the cheapest quarter of the current market. It follows the season by itself — no need to guess a price. It needs 10 remembered listings before it starts filtering, so on a niche search it may take a few days. The alert says it in words: <em>“cheaper than 88 % of 312 similar listings seen this month”</em> — the higher, the better.</dd>
++      <dt>Check every</dt>
++      <dd>Seconds between checks. Vinted’s own listing feed lags by minutes, so checking faster than every 2 minutes finds nothing sooner and gets the address blocked. 120–600 is sensible; the “Apply to all” box changes every search at once.</dd>
++      <dt>States</dt>
++      <dd><span class="pill ok">ok</span> normal · <span class="pill starting">starting</span> no check finished yet · <span class="pill cooling">cooling</span> Vinted refused a request on this site and all searches on it are waiting · <span class="pill stale">stale</span> no new listing for far longer than this search usually goes (only when its page is full and other searches on the site keep moving) · <span class="pill failing">failing</span> the last check errored, the reason is under the name · <span class="pill paused">paused</span> you paused it.</dd>
++      <dt>Newest listing</dt>
++      <dd>When the newest listing Vinted returned was posted. A healthy busy search moves this every few minutes. A niche search may not move it for days — that is fine.</dd>
++      <dt>Found</dt>
++      <dd>How many listings this search has recorded, including the first-check seed.</dd>
++      <dt>Clone</dt>
++      <dd>Runs the same search, filters and destinations on another country site. Vinted lets you buy across EU sites, and .de, .pl or .cz have far more listings than .sk. A listing that shows on several sites is only alerted once.</dd>
++      <dt>Pause vs Delete</dt>
++      <dd>Pause stops checking and keeps everything. Delete removes the search, its recorded listings and its market memory.</dd>
++    </dl>
++  </div>
++</section>
++
++<section>
++  <div class="section-head"><h2>What an alert contains</h2></div>
++  <div class="card">
++    <dl class="glossary">
++      <dt>📊 cheaper than … %</dt><dd>The market position explained above.</dd>
++      <dt>📉 Price drop</dt><dd>A listing you already saw got at least {{ settings_view.price_drop_min_percent }} % cheaper. Costs no extra requests: the listing was on the page anyway.</dd>
++      <dt>🔥 HOT DEAL · 🤖 · 💤</dt><dd>Only if an AI agent is connected (below). 🔥 the agent scored it {{ settings_view.enrichment_highlight_score }} or more; 🤖 a normal verdict; 💤 scored under {{ settings_view.enrichment_silent_below }} or “not the product you searched for” — delivered without a notification sound.</dd>
++      <dt>Skip seller</dt><dd>Adds the seller to that search’s skip list. Undo it in the search’s Edit form.</dd>
++      <dt>Pause search</dt><dd>Same as the Pause button here. <code>/resume &lt;id&gt;</code> in Telegram brings it back; ids are in <code>/status</code>.</dd>
++      <dt>👍 / 👎</dt><dd>Tells the agent whether it called this one right. Your last few answers on a search are shown to it next time, so it learns what <em>you</em> call a deal.</dd>
++      <dt>Quiet hours</dt><dd>Per destination. Nothing is sent inside the window; what turned up arrives together when it ends (Telegram folds more than five into one message). Times are read in <code>{{ settings_view.timezone }}</code>.</dd>
++      <dt>Health notices</dt><dd>Warnings and the Monday summary go only to destinations with this switched on. Have at least one.</dd>
++    </dl>
++  </div>
++</section>
++
++<section>
++  <div class="section-head"><h2>The AI agent (optional)</h2></div>
++  <div class="card">
++    <p>Add a <strong>plain webhook</strong> destination pointing at your agent (the reference is an n8n workflow with an LLM) and route searches to it alongside Telegram. Each new listing goes to the agent at once with its photos, the market position, retail prices found earlier and your 👍/👎 history; the chat alert waits up to <strong>{{ settings_view.enrichment_wait_s }} s</strong> ({{ 'off — set ENRICHMENT_WAIT_S to turn on' if not settings_view.enrichment_wait_s else 'ENRICHMENT_WAIT_S' }}) for the agent to post back a verdict: what product it really is, what it costs new, whether it matches your search, any authenticity worries, a deal score and one sentence. The verdict is woven into the alert. If the agent is silent, the alert goes out as usual — you never lose one.</p>
++    <p class="muted">Contract for building your own agent: <code>docs/enrichment.md</code> in the repository.</p>
++  </div>
++</section>
++
++<section>
++  <div class="section-head"><h2>Current settings</h2><span class="lede">Set with environment variables; restart to change.</span></div>
++  <div class="card">
++    <div class="table-wrap"><table>
++      <tr><th>Setting</th><th>Value</th><th>Meaning</th></tr>
++      <tr><td><code>POLL_DEFAULT_INTERVAL_S</code></td><td>{{ settings_view.poll_default_interval_s }}</td><td>Default seconds between checks for a new search.</td></tr>
++      <tr><td><code>SITE_REQUESTS_PER_MINUTE</code></td><td>{{ settings_view.site_requests_per_minute }}</td><td>Ceiling on requests to one country site from this address, all searches together.</td></tr>
++      <tr><td><code>PRICE_DROP_MIN_PERCENT</code></td><td>{{ settings_view.price_drop_min_percent }}</td><td>A listing is announced again when its total price falls by at least this much.</td></tr>
++      <tr><td><code>ENRICHMENT_WAIT_S</code></td><td>{{ settings_view.enrichment_wait_s }}</td><td>How long chat alerts wait for an agent’s verdict. 0 = no agent.</td></tr>
++      <tr><td><code>ENRICHMENT_HIGHLIGHT_SCORE</code> / <code>SILENT_BELOW</code></td><td>{{ settings_view.enrichment_highlight_score }} / {{ settings_view.enrichment_silent_below }}</td><td>Score for 🔥 · score under which the phone does not buzz.</td></tr>
++      <tr><td><code>OUTBOX_EXPIRY_MINUTES</code></td><td>{{ settings_view.outbox_expiry_minutes }}</td><td>An alert not delivered within this long is dropped (except during quiet hours).</td></tr>
++      <tr><td><code>ITEM_RETENTION_DAYS</code></td><td>{{ settings_view.item_retention_days }}</td><td>How long recorded listings are kept.</td></tr>
++      <tr><td><code>WEEKLY_REPORT</code></td><td>{{ 'on' if settings_view.weekly_report else 'off' }}</td><td>Monday 08:00 summary to destinations with health notices.</td></tr>
++      <tr><td><code>TIMEZONE</code></td><td>{{ settings_view.timezone }}</td><td>For quiet hours and the weekly report.</td></tr>
++      <tr><td>Telegram bot</td><td>{{ 'configured' if settings_view.telegram else 'not configured' }}</td><td><code>TELEGRAM_BOT_TOKEN</code>; pair a chat with <code>vinted-sniper pair-telegram</code>.</td></tr>
++    </table></div>
++    <p class="muted" style="margin-bottom:0">Full reference: <code>docs/configuration.md</code>. Troubleshooting (“listings stop arriving”, “Vinted refuses us”): <code>docs/troubleshooting.md</code>.</p>
++  </div>
++</section>
++{% endblock %}
+diff --git a/src/vinted_sniper/web/templates/history.html b/src/vinted_sniper/web/templates/history.html
+index 140f02d..af7350e 100644
+--- a/src/vinted_sniper/web/templates/history.html
++++ b/src/vinted_sniper/web/templates/history.html
+@@ -11,7 +11,10 @@
+ 
+ {% block content %}
+ <section>
+-  <h2>Delivery history</h2>
++  <div class="section-head">
++    <h2>Delivery history</h2>
++    <span class="lede">Every alert, newest first: what it was, where it went, and whether it got there. The answer to “did my alert go out?”.</span>
++  </div>
+   <div class="card">
+     <form method="get" action="/history" class="row" style="gap:.6rem">
+       <label style="margin:0">Search</label>
+@@ -28,14 +31,15 @@
+         {% endfor %}
+       </select>
+       <button class="quiet" type="submit">Filter</button>
+-      <span class="muted">Last 200 notifications, newest first. “cancelled” means expired before delivery or discarded on purpose.</span>
++      <span class="muted">Last 200. <span class="pill sent">sent</span> delivered · <span class="pill pending">pending</span> waiting (paired? quiet hours? held for a verdict?) · <span class="pill failed">failed</span> gave up, reason shown · <span class="pill cancelled">cancelled</span> expired or discarded on purpose.</span>
+     </form>
+   </div>
+ 
+   {% if not rows %}
+-  <div class="card"><p class="muted" style="margin:0">Nothing has been queued yet.</p></div>
++  <div class="card"><div class="empty"><strong>Nothing has been queued yet.</strong> Alerts appear here the moment a search finds something.</div></div>
+   {% else %}
+   <div class="card history">
++    <div class="table-wrap">
+     <table>
+       <tr><th></th><th>Listing</th><th>Kind</th><th>Search</th><th>To</th><th>Status</th><th>When</th></tr>
+       {% for row in rows %}
+@@ -63,6 +67,7 @@
+       </tr>
+       {% endfor %}
+     </table>
++    </div>
+   </div>
+   {% endif %}
+ </section>
+diff --git a/src/vinted_sniper/web/templates/login.html b/src/vinted_sniper/web/templates/login.html
+index bf079fb..c02ae17 100644
+--- a/src/vinted_sniper/web/templates/login.html
++++ b/src/vinted_sniper/web/templates/login.html
+@@ -2,14 +2,14 @@
+ {% block title %}Sign in · vinted-sniper{% endblock %}
+ {% block content %}
+ <section style="max-width: 24rem; margin: 3rem auto;">
+-  <h2>Sign in</h2>
++  <div class="section-head"><h2>Sign in</h2></div>
+   <div class="card">
+     {% if error %}<p class="error">{{ error }}</p>{% endif %}
+     <form method="post" action="/login">
+       <label for="access_token">Access token</label>
+       <input type="password" id="access_token" name="access_token" autofocus required>
+       <p class="muted" style="margin: .6rem 0 1rem;">
+-        The value of <code>VINTED_SNIPER_WEB_AUTH_TOKEN</code>.
++        The value of <code>VINTED_SNIPER_WEB_AUTH_TOKEN</code> from the container’s environment.
+       </p>
+       <button type="submit">Sign in</button>
+     </form>
+diff --git a/tests/integration/test_poller.py b/tests/integration/test_poller.py
+index cfc6625..4730a4d 100644
+--- a/tests/integration/test_poller.py
++++ b/tests/integration/test_poller.py
+@@ -563,3 +563,81 @@ async def test_a_hold_is_written_down_and_shows_as_cooling(
+     (search,) = snapshot.searches
+     assert search.state == "cooling"
+     assert search.cooling_until is not None and search.cooling_until > time.time()
++
++
++# --- Market percentile filter ----------------------------------------------------------
++
++
++async def test_the_market_filter_keeps_only_the_cheapest_share_once_it_knows_the_market(
++    transport: ScriptedTransport,
++    repo: Repo,
++    settings: Settings,
++    db: Any,
++    make_item: Callable[..., dict[str, Any]],
++) -> None:
++    query_id = await repo.add_query(
++        name="cheap only",
++        url="https://www.vinted.fr/catalog?search_text=x",
++        tld="fr",
++        params={"search_text": "x"},
++        poll_interval_s=60,
++        max_market_percentile=25,
++    )
++    query = await repo.get_query(query_id)
++    assert query is not None
++    poller, _ = poller_for(query, transport, repo, settings, db=db)
++    destination = await repo.add_destination(kind="ntfy", name="t", config={"topic": "t"})
++    await repo.route(query_id, destination)
++    now = int(time.time())
++
++    # First check seeds a market of twenty prices, 10..29 (silent first run).
++    transport.queue_catalog(
++        [make_item(i, photo_ts=now - 600, price=str(10 + i)) for i in range(20)]
++    )
++    await poller.tick()
++    assert await repo.outbox_depth() == 0
++
++    # A listing at 12 is in the cheapest quarter; one at 25 is not.
++    transport.queue_catalog(
++        [
++            make_item(100, photo_ts=now - 5, price="12.0"),
++            make_item(101, photo_ts=now - 4, price="25.0"),
++        ]
++    )
++    await poller.tick()
++
++    (queued,) = await repo.claim_batch(destination, 10)
++    assert queued.item.item_id == 100
++    assert queued.market_percentile is not None and queued.market_percentile <= 25
++    assert queued.market_n == 22
++    assert queued.market_line() is not None and "similar listings" in queued.market_line()
++
++
++async def test_the_market_filter_waits_until_there_is_a_market(
++    transport: ScriptedTransport,
++    repo: Repo,
++    settings: Settings,
++    db: Any,
++    make_item: Callable[..., dict[str, Any]],
++) -> None:
++    query_id = await repo.add_query(
++        name="cheap only",
++        url="https://www.vinted.fr/catalog?search_text=x",
++        tld="fr",
++        params={"search_text": "x"},
++        poll_interval_s=60,
++        max_market_percentile=25,
++    )
++    query = await repo.get_query(query_id)
++    assert query is not None
++    poller, _ = poller_for(query, transport, repo, settings, db=db)
++    destination = await repo.add_destination(kind="ntfy", name="t", config={"topic": "t"})
++    await repo.route(query_id, destination)
++    now = int(time.time())
++
++    transport.queue_catalog([make_item(1, photo_ts=now - 600, price="10.0")])
++    await poller.tick()
++    transport.queue_catalog([make_item(2, photo_ts=now - 5, price="99.0")])
++    await poller.tick()
++
++    assert await repo.outbox_depth() == 1, "too few points to judge, so nothing is withheld"
+diff --git a/tests/integration/test_web.py b/tests/integration/test_web.py
+index a917aed..031f9ee 100644
+--- a/tests/integration/test_web.py
++++ b/tests/integration/test_web.py
+@@ -522,3 +522,50 @@ async def test_the_history_page_shows_what_was_queued_and_where(
+     body = signed_in.get("/api/history", params={"status": "pending"}).json()
+     assert body["deliveries"][0]["title"] == "Nike Air Max 90"
+     assert signed_in.get("/api/history", params={"status": "sent"}).json()["deliveries"] == []
++
++
++async def test_a_search_can_be_cloned_to_another_country_with_its_filters_and_routing(
++    signed_in: TestClient, repo: Repo
++) -> None:
++    destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
++    signed_in.post(
++        "/searches",
++        data={
++            "url": "https://www.vinted.sk/catalog?search_text=rab%20downpour&brand_ids[]=53",
++            "max_total_price": "60",
++            "max_market_percentile": "25",
++            "destination_ids": [str(destination_id)],
++        },
++        follow_redirects=False,
++    )
++    (source,) = await repo.list_queries()
++
++    response = signed_in.post(
++        f"/searches/{source.id}/clone", data={"tld": "de"}, follow_redirects=False
++    )
++    assert "ok=" in response.headers["location"]
++
++    _, clone = await repo.list_queries()
++    assert clone.tld == "de"
++    assert clone.url.startswith("https://www.vinted.de/catalog?")
++    assert clone.params == source.params
++    assert clone.max_total_price == source.max_total_price
++    assert clone.max_market_percentile == 25
++    assert clone.name.endswith("(de)") and "(sk) (de)" not in clone.name
++    assert await repo.destination_ids_for_query(clone.id) == [destination_id]
++
++    again = signed_in.post(
++        f"/searches/{source.id}/clone", data={"tld": "de"}, follow_redirects=False
++    )
++    assert "error=" in again.headers["location"], "cloning twice is refused"
++    same_site = signed_in.post(
++        f"/searches/{source.id}/clone", data={"tld": "sk"}, follow_redirects=False
++    )
++    assert "error=" in same_site.headers["location"]
++
++
++def test_the_help_page_explains_the_words(signed_in: TestClient) -> None:
++    page = signed_in.get("/help")
++    assert page.status_code == 200
++    for phrase in ("Only the cheapest", "Total price", "Quiet hours", "Current settings"):
++        assert phrase in page.text
+-- 
+2.43.0
+

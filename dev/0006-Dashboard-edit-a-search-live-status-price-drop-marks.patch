@@ -1,0 +1,633 @@
+From 710ebb360b1fd79c5fb19a3bcdab6d8f405bf861 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:04:29 +0000
+Subject: [PATCH 06/25] Dashboard: edit a search, live status, price-drop marks
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Searches could be added and deleted but never changed, so fixing a typo in
+an exclude list meant deleting the search and losing its history. Each row
+now has an Edit form for everything but the URL (the URL is what the search
+is; its listings and high-water mark hang off it). Query gains updated_at,
+and the supervisor's restart signature includes it, so an edit reaches the
+running poller on its next check without a process restart. A small form
+sets every search's interval at once, for the "slow everything down while
+the address cools off" moment.
+
+The table now refreshes itself from /api/health every ten seconds — state,
+last check, found count, error line — and shows an estimated next check
+that counts down; nobody should have to reload a page to see whether the
+thing is alive. The health payload gained the interval and last poll time
+to support that. Listings whose price dropped are marked in the gallery
+and sort by the time of the drop.
+---
+ docs/configuration.md                         |   4 +-
+ src/vinted_sniper/app.py                      |   6 +-
+ src/vinted_sniper/db/repo.py                  |  51 ++++-
+ src/vinted_sniper/engine/health.py            |  15 ++
+ src/vinted_sniper/web/server.py               |  46 +++++
+ src/vinted_sniper/web/templates/base.html     |   4 +
+ .../web/templates/dashboard.html              | 194 ++++++++++++++++--
+ tests/integration/test_web.py                 |  86 ++++++++
+ 8 files changed, 383 insertions(+), 23 deletions(-)
+
+diff --git a/docs/configuration.md b/docs/configuration.md
+index af62bf6..af8739b 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -111,7 +111,9 @@ Options for `watch`:
+ | `--min-seller-reviews N` | Skip sellers with fewer than N reviews. |
+ | `--block-seller a,b` | Skip these seller usernames outright. |
+ 
+-The same fields are under "More filters" when adding a search in the dashboard.
++The same fields are under "More filters" when adding a search in the dashboard, and every
++search has an **Edit** button there for changing them afterwards — the change takes effect
++on the next check, no restart needed. Only the URL is fixed: it is what the search *is*.
+ | `--to 1,2` | Destination ids to notify. Defaults to all active ones. |
+ 
+ ## Adding a search
+diff --git a/src/vinted_sniper/app.py b/src/vinted_sniper/app.py
+index 7d033e1..89e9160 100644
+--- a/src/vinted_sniper/app.py
++++ b/src/vinted_sniper/app.py
+@@ -52,7 +52,7 @@ class Application:
+         self._stop = asyncio.Event()
+         self._work_available = asyncio.Event()
+         self._poller_tasks: dict[int, asyncio.Task[None]] = {}
+-        self._poller_signatures: dict[int, tuple[str, int]] = {}
++        self._poller_signatures: dict[int, tuple[str, int, int]] = {}
+ 
+     def request_stop(self) -> None:
+         self._stop.set()
+@@ -213,9 +213,9 @@ class Application:
+             )
+ 
+     @staticmethod
+-    def _signature(query: Query) -> tuple[str, int]:
++    def _signature(query: Query) -> tuple[str, int, int]:
+         """What about a search would make its running task out of date."""
+-        return (query.url, query.poll_interval_s)
++        return (query.url, query.poll_interval_s, query.updated_at)
+ 
+     async def _guard(self, poller: Poller) -> None:
+         """Run a search's loop so that its failure cannot take the others down with it."""
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index a479ed9..2299c09 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -41,6 +41,9 @@ class Query:
+     min_seller_rating: float | None = None
+     min_seller_reviews: int | None = None
+     blocked_sellers: list[str] = field(default_factory=list)
++    # Bumped on every edit; the supervisor restarts a search's task when it changes so
++    # new filters take effect without a process restart.
++    updated_at: int = 0
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -195,6 +198,51 @@ class Repo:
+     async def delete_query(self, query_id: int) -> None:
+         await self._db.execute("DELETE FROM queries WHERE id = ?", (query_id,))
+ 
++    async def update_query(
++        self,
++        query_id: int,
++        *,
++        name: str,
++        poll_interval_s: int,
++        banned_keywords: list[str],
++        max_total_price: Decimal | None,
++        required_keywords: list[str],
++        title_pattern: str | None,
++        min_seller_rating: float | None,
++        min_seller_reviews: int | None,
++        blocked_sellers: list[str],
++    ) -> None:
++        """Change everything about a search except what it searches for.
++
++        The URL is the search's identity — its high-water mark and its recorded listings
++        hang off it — so changing that means a new search, not an edit.
++        """
++        await self._db.execute(
++            "UPDATE queries SET name = ?, poll_interval_s = ?, banned_keywords_json = ?, "
++            "max_total_price = ?, required_keywords_json = ?, title_pattern = ?, "
++            "min_seller_rating = ?, min_seller_reviews = ?, blocked_sellers_json = ?, "
++            "updated_at = ? WHERE id = ?",
++            (
++                name,
++                poll_interval_s,
++                json.dumps(banned_keywords),
++                float(max_total_price) if max_total_price is not None else None,
++                json.dumps(required_keywords),
++                title_pattern or None,
++                min_seller_rating,
++                min_seller_reviews,
++                json.dumps(blocked_sellers),
++                int(time.time()),
++                query_id,
++            ),
++        )
++
++    async def set_all_intervals(self, poll_interval_s: int) -> int:
++        return await self._db.execute(
++            "UPDATE queries SET poll_interval_s = ?, updated_at = ?",
++            (poll_interval_s, int(time.time())),
++        )
++
+     async def block_seller(self, query_id: int, seller_login: str) -> bool:
+         """Add a seller to a search's skip list. Returns False if already there or unknown."""
+         query = await self.get_query(query_id)
+@@ -230,6 +278,7 @@ class Repo:
+             min_seller_rating=row["min_seller_rating"],
+             min_seller_reviews=row["min_seller_reviews"],
+             blocked_sellers=_json_list(row["blocked_sellers_json"]) or [],
++            updated_at=int(row["updated_at"] or 0),
+         )
+ 
+     # --- Search state --------------------------------------------------------------
+@@ -568,7 +617,7 @@ class Repo:
+         return await self._db.fetch_all(
+             "SELECT i.*, q.name AS query_name FROM items i "
+             "LEFT JOIN queries q ON q.id = i.query_id "
+-            "ORDER BY i.first_seen_at DESC LIMIT ?",
++            "ORDER BY COALESCE(i.price_changed_at, i.first_seen_at) DESC LIMIT ?",
+             (limit,),
+         )
+ 
+diff --git a/src/vinted_sniper/engine/health.py b/src/vinted_sniper/engine/health.py
+index 21c4fb0..46deac5 100644
+--- a/src/vinted_sniper/engine/health.py
++++ b/src/vinted_sniper/engine/health.py
+@@ -39,6 +39,15 @@ class SearchHealth:
+     items_total: int
+     blocks: int
+     rate_limits: int
++    poll_interval_s: int = 0
++    last_polled_at: int | None = None
++
++    @property
++    def next_check_at(self) -> int | None:
++        """A rough estimate: the real schedule adds jitter and backoff."""
++        if self.paused or self.last_polled_at is None or not self.poll_interval_s:
++            return None
++        return self.last_polled_at + self.poll_interval_s
+ 
+     @property
+     def state(self) -> str:
+@@ -67,6 +76,10 @@ class SearchHealth:
+             "items_total": self.items_total,
+             "blocks": self.blocks,
+             "rate_limits": self.rate_limits,
++            "paused": self.paused,
++            "poll_interval_s": self.poll_interval_s,
++            "last_polled_at": self.last_polled_at,
++            "next_check_at": self.next_check_at,
+         }
+ 
+ 
+@@ -117,6 +130,8 @@ async def snapshot(repo: Repo) -> Snapshot:
+                 items_total=state.items_seen_total if state else 0,
+                 blocks=state.count_403 if state else 0,
+                 rate_limits=state.count_429 if state else 0,
++                poll_interval_s=query.poll_interval_s,
++                last_polled_at=state.last_polled_at if state else None,
+             )
+         )
+ 
+diff --git a/src/vinted_sniper/web/server.py b/src/vinted_sniper/web/server.py
+index 0ca215c..c5e3964 100644
+--- a/src/vinted_sniper/web/server.py
++++ b/src/vinted_sniper/web/server.py
+@@ -123,12 +123,14 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+ 
+         snapshot = await health.snapshot(repo)
+         destinations = await repo.list_destinations()
++        queries = {query.id: query for query in await repo.list_queries()}
+         watched_tlds = [search.tld for search in snapshot.searches]
+         return TEMPLATES.TemplateResponse(
+             request,
+             "dashboard.html",
+             {
+                 "snapshot": snapshot,
++                "queries": queries,
+                 "destinations": destinations,
+                 "auth_enabled": token is not None,
+                 "recent": _listing_views(await repo.recent_items(limit=25), now=int(time.time())),
+@@ -201,6 +203,49 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+             await repo.route(query_id, destination_id)
+         return RedirectResponse("/", status_code=303)
+ 
++    @app.post("/searches/{query_id}/edit")
++    async def edit_search(
++        query_id: int,
++        name: Annotated[str, Form()] = "",
++        interval: Annotated[int, Form()] = 0,
++        max_total_price: Annotated[str, Form()] = "",
++        banned_keywords: Annotated[str, Form()] = "",
++        required_keywords: Annotated[str, Form()] = "",
++        title_pattern: Annotated[str, Form()] = "",
++        min_seller_rating: Annotated[str, Form()] = "",
++        min_seller_reviews: Annotated[str, Form()] = "",
++        blocked_sellers: Annotated[str, Form()] = "",
++        _: None = guard,
++    ) -> Response:
++        query = await repo.get_query(query_id)
++        if query is None:
++            return _redirect_with_error("that search no longer exists")
++        title_pattern = title_pattern.strip()
++        if title_pattern and (problem := filters.validate_pattern(title_pattern)):
++            return _redirect_with_error(f"title pattern does not compile: {problem}")
++        rating = _rating_or_none(min_seller_rating)
++        if min_seller_rating.strip() and rating is None:
++            return _redirect_with_error("minimum seller rating must be between 0 and 100")
++
++        await repo.update_query(
++            query_id,
++            name=name.strip() or query.name,
++            poll_interval_s=max(interval or query.poll_interval_s, MIN_POLL_INTERVAL_S),
++            banned_keywords=_csv(banned_keywords),
++            max_total_price=_decimal_or_none(max_total_price),
++            required_keywords=_csv(required_keywords),
++            title_pattern=title_pattern or None,
++            min_seller_rating=rating,
++            min_seller_reviews=_int_or_none(min_seller_reviews),
++            blocked_sellers=_csv(blocked_sellers),
++        )
++        return RedirectResponse("/", status_code=303)
++
++    @app.post("/searches/interval")
++    async def set_every_interval(interval: Annotated[int, Form()], _: None = guard) -> Response:
++        await repo.set_all_intervals(max(interval, MIN_POLL_INTERVAL_S))
++        return RedirectResponse("/", status_code=303)
++
+     @app.post("/searches/{query_id}/pause")
+     async def pause_search(
+         query_id: int, paused: Annotated[str, Form()], _: None = guard
+@@ -403,6 +448,7 @@ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
+                 "seller_stars": f"{stars:.1f}" if stars is not None else None,
+                 "seller_feedback_count": row["seller_feedback_count"],
+                 "favourite_count": row["favourite_count"] or 0,
++                "price_dropped": bool(row["price_changed_at"]),
+                 "query_name": row["query_name"],
+                 "age": _age(now - row["first_seen_at"]),
+             }
+diff --git a/src/vinted_sniper/web/templates/base.html b/src/vinted_sniper/web/templates/base.html
+index 6a98e33..e95f2c0 100644
+--- a/src/vinted_sniper/web/templates/base.html
++++ b/src/vinted_sniper/web/templates/base.html
+@@ -144,6 +144,10 @@
+                          border-radius: 0; padding: .4rem .6rem; text-align: left;
+                          font-weight: 400; }
+     .combo-list button:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
++    .tag.drop { background: #e8f5e9; color: #1b5e20; }
++    tr.edit-row td { background: rgba(0,0,0,.025); }
++    td.actions { white-space: nowrap; }
++    .error-line { max-width: 34rem; }
+   </style>
+ </head>
+ <body>
+diff --git a/src/vinted_sniper/web/templates/dashboard.html b/src/vinted_sniper/web/templates/dashboard.html
+index 0dce442..6b7ee52 100644
+--- a/src/vinted_sniper/web/templates/dashboard.html
++++ b/src/vinted_sniper/web/templates/dashboard.html
+@@ -27,47 +27,127 @@
+     </div>
+   {% else %}
+   <div class="card">
+-    <table>
++    <table id="searches">
+       <tr>
+         <th>Search</th><th>Site</th><th>State</th>
+-        <th>Last checked</th><th>Newest listing</th><th>Found</th><th></th>
++        <th>Last checked</th><th>Next check</th><th>Newest listing</th><th>Found</th><th></th>
+       </tr>
+       {% for search in snapshot.searches %}
+-      <tr>
++      {% set q = queries[search.query_id] %}
++      <tr data-query-id="{{ search.query_id }}">
+         <td>
+-          {{ search.name }}
+-          {% if search.last_error %}
+-            <div class="muted">{{ search.last_error[:110] }}</div>
+-          {% endif %}
++          <span data-field="name">{{ search.name }}</span>
++          <div class="muted">
++            every {{ q.poll_interval_s }}s
++            {% if q.max_total_price %}· ≤ {{ q.max_total_price }}{% endif %}
++            {% if q.required_keywords %}· needs {{ q.required_keywords | join(', ') }}{% endif %}
++            {% if q.banned_keywords %}· not {{ q.banned_keywords | join(', ') }}{% endif %}
++            {% if q.title_pattern %}· /{{ q.title_pattern }}/{% endif %}
++            {% if q.min_seller_rating %}· seller ≥ {{ (q.min_seller_rating * 100) | round | int }}%{% endif %}
++            {% if q.min_seller_reviews %}· ≥ {{ q.min_seller_reviews }} reviews{% endif %}
++            {% if q.blocked_sellers %}· skips {{ q.blocked_sellers | length }} seller{{ 's' if q.blocked_sellers | length != 1 }}{% endif %}
++          </div>
++          <div class="muted error-line" data-field="error" {% if not search.last_error %}hidden{% endif %}>
++            {{ (search.last_error or '')[:110] }}
++          </div>
+         </td>
+         <td class="muted">vinted.{{ search.tld }}</td>
+-        <td><span class="pill {{ search.state }}">{{ search.state }}</span></td>
+-        <td class="muted">
++        <td><span class="pill {{ search.state }}" data-field="state">{{ search.state }}</span></td>
++        <td class="muted" data-field="last" data-ts="{{ search.last_success_at or '' }}">
+           {% if search.last_success_at %}{{ now - search.last_success_at }}s ago
+           {% else %}never{% endif %}
+         </td>
+-        <td class="muted">
++        <td class="muted" data-field="next" data-ts="{{ search.next_check_at or '' }}">
++          {% if search.next_check_at %}
++            {% if search.next_check_at > now %}in {{ search.next_check_at - now }}s{% else %}due{% endif %}
++          {% else %}—{% endif %}
++        </td>
++        <td class="muted" data-field="newest" data-ts="{{ search.newest_listing_at or '' }}">
+           {% if search.newest_listing_at %}{{ now - search.newest_listing_at }}s ago
+           {% else %}—{% endif %}
+         </td>
+-        <td class="muted">{{ search.items_total }}</td>
+-        <td>
++        <td class="muted" data-field="found">{{ search.items_total }}</td>
++        <td class="actions">
++          <button class="quiet" type="button" data-edit="{{ search.query_id }}"
++                  aria-expanded="false">Edit</button>
+           <form method="post" action="/searches/{{ search.query_id }}/pause" class="inline">
+             <input type="hidden" name="paused" value="{{ '0' if search.paused else '1' }}">
+             <button class="quiet" type="submit">{{ 'Resume' if search.paused else 'Pause' }}</button>
+           </form>
+-          <form method="post" action="/searches/{{ search.query_id }}/delete" class="inline">
++          <form method="post" action="/searches/{{ search.query_id }}/delete" class="inline"
++                onsubmit="return confirm('Delete “{{ search.name }}”? Its recorded listings go too.')">
+             <button class="quiet" type="submit">Delete</button>
+           </form>
+         </td>
+       </tr>
++      <tr class="edit-row" id="edit-{{ search.query_id }}" hidden>
++        <td colspan="8">
++          <form method="post" action="/searches/{{ search.query_id }}/edit">
++            <div class="grid">
++              <div>
++                <label>Name</label>
++                <input type="text" name="name" value="{{ q.name }}">
++              </div>
++              <div>
++                <label>Check every (seconds)</label>
++                <input type="text" name="interval" value="{{ q.poll_interval_s }}" inputmode="numeric">
++              </div>
++              <div>
++                <label>Max total price</label>
++                <input type="text" name="max_total_price" value="{{ q.max_total_price or '' }}"
++                       placeholder="incl. buyer protection">
++              </div>
++              <div>
++                <label>Exclude words</label>
++                <input type="text" name="banned_keywords" value="{{ q.banned_keywords | join(', ') }}">
++              </div>
++              <div>
++                <label>Title must contain (all)</label>
++                <input type="text" name="required_keywords" value="{{ q.required_keywords | join(', ') }}">
++              </div>
++              <div>
++                <label>Title matches regex</label>
++                <input type="text" name="title_pattern" value="{{ q.title_pattern or '' }}">
++              </div>
++              <div>
++                <label>Min. seller rating (%)</label>
++                <input type="text" name="min_seller_rating" inputmode="numeric"
++                       value="{{ (q.min_seller_rating * 100) | round | int if q.min_seller_rating else '' }}">
++              </div>
++              <div>
++                <label>Min. seller reviews</label>
++                <input type="text" name="min_seller_reviews" inputmode="numeric"
++                       value="{{ q.min_seller_reviews or '' }}">
++              </div>
++              <div>
++                <label>Skip sellers</label>
++                <input type="text" name="blocked_sellers" value="{{ q.blocked_sellers | join(', ') }}">
++              </div>
++            </div>
++            <div class="row" style="margin-top:.6rem">
++              <button type="submit">Save</button>
++              <button type="button" class="quiet" data-edit="{{ search.query_id }}">Cancel</button>
++              <span class="muted">The URL itself cannot change — that would be a different search.</span>
++            </div>
++          </form>
++        </td>
++      </tr>
+       {% endfor %}
+     </table>
+-    <p class="muted" style="margin-bottom:0">
+-      “stale” means this search has stopped seeing new listings while others on the same
+-      site keep finding them — usually a session that needs replacing, which happens
+-      automatically.
+-    </p>
++    <div class="row" style="justify-content:space-between;margin-top:.6rem">
++      <p class="muted" style="margin:0">
++        “stale” means this search has stopped seeing new listings while others on the same
++        site keep finding them — usually a session that needs replacing, which happens
++        automatically. This table refreshes itself.
++      </p>
++      <form method="post" action="/searches/interval" class="row inline" style="margin:0">
++        <label style="margin:0">Check all every</label>
++        <input type="text" name="interval" value="{{ default_interval }}" inputmode="numeric"
++               size="5" style="width:auto">
++        <span class="muted">s</span>
++        <button class="quiet" type="submit">Apply to all</button>
++      </form>
++    </div>
+   </div>
+   {% endif %}
+ 
+@@ -329,6 +409,7 @@
+         <div class="price">
+           <strong>{{ row.price or '—' }}</strong>
+           {% if row.total_price %}<span class="muted">{{ row.total_price }} total</span>{% endif %}
++          {% if row.price_dropped %}<span class="tag drop">📉 dropped</span>{% endif %}
+         </div>
+         {% if row.brand or row.size or row.condition %}
+         <div class="tags">
+@@ -722,4 +803,81 @@
+ })();
+ </script>
+ {% endif %}
++
++<script>
++(() => {
++  "use strict";
++  // Edit rows.
++  for (const button of document.querySelectorAll("[data-edit]")) {
++    button.addEventListener("click", () => {
++      const row = document.getElementById(`edit-${button.dataset.edit}`);
++      if (!row) return;
++      row.hidden = !row.hidden;
++      for (const b of document.querySelectorAll(`[data-edit="${button.dataset.edit}"]`)) {
++        b.setAttribute("aria-expanded", String(!row.hidden));
++      }
++      if (!row.hidden) row.querySelector("input")?.focus();
++    });
++  }
++
++  // Live status: the table redraws itself from /api/health, and the relative times tick.
++  const table = document.getElementById("searches");
++  if (!table) return;
++  const header = document.querySelector("header .status");
++
++  function ago(ts, now) {
++    if (!ts) return null;
++    const s = Math.max(0, now - ts);
++    if (s < 90) return `${s}s ago`;
++    if (s < 5400) return `${Math.round(s / 60)}m ago`;
++    if (s < 172800) return `${Math.round(s / 3600)}h ago`;
++    return `${Math.round(s / 86400)}d ago`;
++  }
++
++  function tick() {
++    const now = Math.floor(Date.now() / 1000);
++    for (const cell of table.querySelectorAll("[data-ts]")) {
++      const ts = Number(cell.dataset.ts);
++      if (!ts) continue;
++      if (cell.dataset.field === "next") {
++        cell.textContent = ts > now ? `in ${ts - now}s` : "due";
++      } else {
++        cell.textContent = ago(ts, now);
++      }
++    }
++  }
++
++  async function refresh() {
++    let data;
++    try {
++      const res = await fetch("/api/health", { headers: { Accept: "application/json" } });
++      if (!res.ok) return;
++      data = await res.json();
++    } catch { return; }
++    if (header) {
++      header.textContent = `${data.alive ? "running" : "not responding"} · ${data.queued_notifications} queued`;
++    }
++    for (const search of data.searches) {
++      const row = table.querySelector(`tr[data-query-id="${search.query_id}"]`);
++      if (!row) continue;  // added since the page loaded; a reload will show it
++      const state = row.querySelector('[data-field="state"]');
++      if (state && state.textContent !== search.state) {
++        state.textContent = search.state;
++        state.className = `pill ${search.state}`;
++      }
++      row.querySelector('[data-field="found"]').textContent = search.items_total;
++      row.querySelector('[data-field="last"]').dataset.ts = search.last_success_at || "";
++      row.querySelector('[data-field="next"]').dataset.ts = search.next_check_at || "";
++      row.querySelector('[data-field="newest"]').dataset.ts = search.newest_listing_at || "";
++      const err = row.querySelector('[data-field="error"]');
++      err.hidden = !search.last_error;
++      err.textContent = (search.last_error || "").slice(0, 110);
++    }
++    tick();
++  }
++
++  setInterval(tick, 1000);
++  setInterval(refresh, 10000);
++})();
++</script>
+ {% endblock %}
+diff --git a/tests/integration/test_web.py b/tests/integration/test_web.py
+index 52594c5..488e77e 100644
+--- a/tests/integration/test_web.py
++++ b/tests/integration/test_web.py
+@@ -8,6 +8,7 @@ from __future__ import annotations
+ 
+ import json
+ from collections.abc import Callable, Iterator
++from decimal import Decimal
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -400,3 +401,88 @@ def test_a_refusal_from_vinted_surfaces_as_a_502_with_the_reason(
+ 
+     assert response.status_code == 502
+     assert "error" in response.json()
++
++
++async def test_a_search_can_be_edited_and_the_change_marks_it_for_restart(
++    signed_in: TestClient, repo: Repo
++) -> None:
++    signed_in.post(
++        "/searches",
++        data={"url": "https://www.vinted.fr/catalog?search_text=nike", "interval": "60"},
++        follow_redirects=False,
++    )
++    (query,) = await repo.list_queries()
++    before = query.updated_at
++
++    response = signed_in.post(
++        f"/searches/{query.id}/edit",
++        data={
++            "name": "Nike, cheap",
++            "interval": "300",
++            "max_total_price": "25",
++            "required_keywords": "air max, 90",
++            "title_pattern": r"\b4[0-2]\b",
++            "min_seller_rating": "90",
++            "min_seller_reviews": "5",
++            "blocked_sellers": "scammer",
++        },
++        follow_redirects=False,
++    )
++    assert response.status_code == 303 and "error=" not in response.headers["location"]
++
++    edited = await repo.get_query(query.id)
++    assert edited is not None
++    assert edited.name == "Nike, cheap"
++    assert edited.poll_interval_s == 300
++    assert edited.max_total_price == Decimal("25")
++    assert edited.required_keywords == ["air max", "90"]
++    assert edited.title_pattern == r"\b4[0-2]\b"
++    assert edited.min_seller_rating == 0.9
++    assert edited.min_seller_reviews == 5
++    assert edited.blocked_sellers == ["scammer"]
++    assert edited.url == query.url, "the URL is the search's identity and stays put"
++    assert edited.updated_at >= before
++
++
++async def test_an_edit_with_a_broken_regex_is_refused_without_touching_the_search(
++    signed_in: TestClient, repo: Repo
++) -> None:
++    signed_in.post(
++        "/searches",
++        data={"url": "https://www.vinted.fr/catalog?search_text=nike"},
++        follow_redirects=False,
++    )
++    (query,) = await repo.list_queries()
++
++    response = signed_in.post(
++        f"/searches/{query.id}/edit", data={"title_pattern": "("}, follow_redirects=False
++    )
++
++    assert "error=" in response.headers["location"]
++    same = await repo.get_query(query.id)
++    assert same is not None and same.title_pattern is None
++
++
++async def test_every_interval_can_be_changed_at_once(signed_in: TestClient, repo: Repo) -> None:
++    for text in ("a", "b", "c"):
++        signed_in.post(
++            "/searches",
++            data={"url": f"https://www.vinted.fr/catalog?search_text={text}"},
++            follow_redirects=False,
++        )
++
++    signed_in.post("/searches/interval", data={"interval": "240"}, follow_redirects=False)
++
++    assert {q.poll_interval_s for q in await repo.list_queries()} == {240}
++
++
++def test_the_health_feed_carries_what_the_live_table_needs(signed_in: TestClient) -> None:
++    signed_in.post(
++        "/searches",
++        data={"url": "https://www.vinted.fr/catalog?search_text=nike"},
++        follow_redirects=False,
++    )
++    body = signed_in.get("/api/health").json()
++    (search,) = body["searches"]
++    for key in ("state", "items_total", "last_success_at", "next_check_at", "poll_interval_s"):
++        assert key in search
+-- 
+2.43.0
+

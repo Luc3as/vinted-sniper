@@ -1,0 +1,1782 @@
+From 76f184529a31f00fdda695a03c0b39a9d992c76c Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 19:53:33 +0000
+Subject: [PATCH 18/25] Alerts, bot replies and notices in the reader's
+ language
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A Telegram chat in Slovak and a Discord server in English can share one
+instance, so the language belongs to the destination, not the process: a
+new `language` column (migration 0012), `--lang` on `destination`, a
+selector per row in the dashboard, carried by export/import and by the
+pairing so the bot answers in the chat's own language.
+
+The machinery is gettext-shaped and deliberately not gettext: one JSON
+catalog per language in `locales/`, `gettext`/`ngettext` with `{name}`
+placeholders, English as the msgid so an untranslated string is never a
+blank, and Slovak's three plural forms (1 / 2-4 / 5+) handled. No .po/.mo
+compile step, nothing extra in the image, and Jinja's i18n extension can
+take the same two callables when the UI follows.
+
+Everything a destination reads is covered: listing alerts (price line,
+market line, seller, buttons), price drops, verdict headlines and follow-
+ups, digests, bot replies and /status, the block and stale notices, and
+the Monday report. Status notices are now rendered per destination — the
+dispatcher accepts a callable of the translator. Tests check that every
+Slovak string keeps its placeholders and still corresponds to a string in
+the code.
+
+Found and fixed on the way: the 📊 market line added in 0017 was built but
+never passed to the Telegram payload; it now is.
+---
+ CHANGELOG.md                                  |   1 +
+ README.md                                     |   1 +
+ docs/configuration.md                         |   4 +
+ src/vinted_sniper/backup.py                   |   2 +
+ src/vinted_sniper/botctl/telegram_bot.py      | 120 +++++++++++++-----
+ src/vinted_sniper/cli.py                      |   7 +
+ .../migrations/0012_destination_language.sql  |   3 +
+ src/vinted_sniper/db/repo.py                  |  47 +++++--
+ src/vinted_sniper/deliver/discord.py          |  53 ++++----
+ src/vinted_sniper/deliver/dispatcher.py       |  22 +++-
+ src/vinted_sniper/deliver/ntfy.py             |   7 +-
+ src/vinted_sniper/deliver/telegram.py         |  74 +++++++----
+ src/vinted_sniper/engine/poller.py            |  18 ++-
+ src/vinted_sniper/engine/report.py            |  62 ++++++---
+ src/vinted_sniper/engine/watchdog.py          |  14 +-
+ src/vinted_sniper/enrichment.py               |  23 ++--
+ src/vinted_sniper/i18n.py                     |  79 ++++++++++++
+ src/vinted_sniper/locales/sk.json             |  79 ++++++++++++
+ src/vinted_sniper/vinted/models.py            |  13 +-
+ src/vinted_sniper/web/server.py               |  16 ++-
+ .../web/templates/dashboard.html              |  16 +++
+ tests/integration/test_delivery.py            |  34 +++++
+ tests/integration/test_poller.py              |   8 +-
+ tests/integration/test_report.py              |  14 +-
+ .../integration/test_watchdog_and_storage.py  |   5 +-
+ tests/unit/test_i18n.py                       |  72 +++++++++++
+ tests/unit/test_senders.py                    |  36 ++++++
+ 27 files changed, 688 insertions(+), 142 deletions(-)
+ create mode 100644 src/vinted_sniper/db/migrations/0012_destination_language.sql
+ create mode 100644 src/vinted_sniper/i18n.py
+ create mode 100644 src/vinted_sniper/locales/sk.json
+ create mode 100644 tests/unit/test_i18n.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6db5930..9f9205c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -45,6 +45,7 @@ All notable changes, newest first. Dates are when the change landed on `main`.
+   `enrichment_url`; a verdict posted to `/api/items/{id}/enrichment` (deal score, identified
+   model, retail price, match, risk, one line) is woven into the alert — hot deals headlined,
+   dull ones muted. Late hot verdicts get a short follow-up. See `docs/enrichment.md`.
++- **Languages for alerts**: each destination has a language (`--lang en|sk`, selector in the dashboard); alerts, bot replies, health notices and the weekly report are rendered in it, with Slovak plural forms. A JSON catalog per language in `locales/`, no gettext toolchain. The dashboard stays English for now.
+ - **Clone a search to another country** from its Edit form: same filters and destinations on vinted.de/.pl/.cz/…; a listing shown on several sites is alerted once.
+ - **"Only the cheapest N%" filter** (`--cheapest`, or the field in the dashboard): the listing's price against everything the search has seen in 30 days. Alerts say the position in words ("cheaper than 88% of 312 similar listings seen this month").
+ - **Dashboard rewritten for people who have not read the docs**: plain-language `?` tooltips on every field and column, a state legend, "how the filters work together" explainers, a Help page with a glossary and the running settings, success notices after every action, confirmations on delete, SVG icons, a sticky nav with the current page marked, keyboard focus rings, reduced-motion support, and dark mode that no longer has hard-coded light colours.
+diff --git a/README.md b/README.md
+index 1fa5e66..3c16979 100644
+--- a/README.md
++++ b/README.md
+@@ -50,6 +50,7 @@ Raspberry Pi, NAS or cheap VPS: see [the self-hosting guide](docs/self-hosting.m
+ - **Filters on what you actually pay**, buyer protection included. Vinted's own price filter ignores it.
+ - **Room for a brain**: hand each listing to your own agent (n8n + an LLM, say) for a verdict — is it the real model, what does it cost new, how good is the deal — and get it woven into the alert. See [docs/enrichment.md](docs/enrichment.md).
+ - **Price drops**: a listing you already saw comes back when its price falls, at no extra requests.
++- **Alerts in your language** — English or Slovak per destination; a Slovak Telegram chat and an English Discord server can share one instance.
+ - **A Monday-morning summary** to the destinations that get health notices, and `export`/`import` of everything you configured as one JSON file.
+ - **Quiet hours per destination**: nothing at 03:00, a digest of the night at 07:00.
+ - **Filters Vinted's search cannot express**: words the title must contain, a title regex, a floor on seller rating and review count, and sellers to skip.
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 6d21c0c..8646fee 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -156,6 +156,10 @@ page, which the app fetches anyway, carries every listing's current price, so a
+ tracked for as long as it stays on that page (on a quiet search, indefinitely). Webhook
+ consumers see `"event": "price_drop"` and `"previous_total_price"` on such items.
+ 
++A destination has a **language** (`--lang en|sk`, or the selector in the dashboard): its alerts,
++bot replies and health notices are rendered in it. A Slovak Telegram chat and an English
++Discord server can share one instance. The dashboard itself is English for now.
++
+ A destination can have **quiet hours** — `--quiet 23:00-07:00` on the command line, or the
+ field next to it in the dashboard — during which nothing is sent. Alerts found meanwhile are
+ kept (they are exempt from `OUTBOX_EXPIRY_MINUTES`) and go out together when the window
+diff --git a/src/vinted_sniper/backup.py b/src/vinted_sniper/backup.py
+index 9574c05..c5ba523 100644
+--- a/src/vinted_sniper/backup.py
++++ b/src/vinted_sniper/backup.py
+@@ -51,6 +51,7 @@ async def export_config(repo: Repo) -> dict[str, Any]:
+                 "config": d.config,
+                 "notify_status": d.notify_status,
+                 "quiet_hours": d.quiet_hours,
++                "language": d.language,
+             }
+             for d in destinations
+             if d.active
+@@ -77,6 +78,7 @@ async def import_config(repo: Repo, document: dict[str, Any]) -> dict[str, int]:
+             config=dict(entry.get("config") or {}),
+             notify_status=bool(entry.get("notify_status", False)),
+             quiet_hours=entry.get("quiet_hours"),
++            language=str(entry.get("language") or "en"),
+         )
+         added["destinations"] += 1
+ 
+diff --git a/src/vinted_sniper/botctl/telegram_bot.py b/src/vinted_sniper/botctl/telegram_bot.py
+index 4a6fa8f..9b809b8 100644
+--- a/src/vinted_sniper/botctl/telegram_bot.py
++++ b/src/vinted_sniper/botctl/telegram_bot.py
+@@ -26,6 +26,7 @@ from aiogram import Bot, Dispatcher, F
+ from aiogram.filters import Command, CommandObject
+ from aiogram.types import CallbackQuery, Message
+ 
++from vinted_sniper import i18n
+ from vinted_sniper.db.repo import Repo
+ from vinted_sniper.deliver.telegram import (
+     CALLBACK_BLOCK_SELLER,
+@@ -33,6 +34,7 @@ from vinted_sniper.deliver.telegram import (
+     CALLBACK_PAUSE_SEARCH,
+ )
+ from vinted_sniper.engine import health
++from vinted_sniper.i18n import Translator
+ from vinted_sniper.log import get_logger
+ 
+ log = get_logger(__name__)
+@@ -130,83 +132,106 @@ def build_dispatcher(repo: Repo) -> Dispatcher:
+             return
+ 
+         log.info("telegram.paired", destination_id=destination_id, chat_id=message.chat.id)
++        t = await _translator(repo, message.chat.id)
+         await message.answer(
+-            "Connected. Matching listings will arrive here.\n"
+-            "Send /status any time to check that everything is still running."
++            t(
++                "Connected. Matching listings will arrive here.\n"
++                "Send /status any time to check that everything is still running."
++            )
+         )
+ 
+     @dispatcher.message(Command("help"))
+     async def handle_help(message: Message) -> None:
++        t = await _translator(repo, message.chat.id)
+         await message.answer(
+-            "/status — is everything still running\n"
+-            "/pause <id>, /resume <id> — pause or resume a search\n"
+-            "/start <code> — connect this chat to vinted-sniper\n\n"
+-            "Under each alert: skip that seller for the search, or pause the search.\n"
+-            "Everything else is managed in vinted-sniper itself."
++            t(
++                "/status — is everything still running\n"
++                "/pause <id>, /resume <id> — pause or resume a search\n"
++                "/start <code> — connect this chat to vinted-sniper\n\n"
++                "Under each alert: skip that seller for the search, or pause the search.\n"
++                "Everything else is managed in vinted-sniper itself."
++            )
+         )
+ 
+     @dispatcher.message(Command("status"))
+     async def handle_status(message: Message) -> None:
+-        await message.answer(await _status_text(repo), parse_mode="HTML")
++        await message.answer(
++            await _status_text(repo, await _translator(repo, message.chat.id)), parse_mode="HTML"
++        )
+ 
+     @dispatcher.callback_query(F.data.startswith(f"{CALLBACK_BLOCK_SELLER}:"))
+     async def handle_block_seller(callback: CallbackQuery) -> None:
++        t = await _callback_translator(repo, callback)
+         if not await _from_paired_chat(repo, callback):
+-            await callback.answer("This chat is not connected to vinted-sniper.", show_alert=True)
++            await callback.answer(
++                t("This chat is not connected to vinted-sniper."), show_alert=True
++            )
+             return
+         _, _, rest = (callback.data or "").partition(":")
+         raw_id, _, login = rest.partition(":")
+         query_id = _int_or_none(raw_id)
+         if query_id is None or not login:
+-            await callback.answer("That button is out of date.")
++            await callback.answer(t("That button is out of date."))
+             return
+         if await repo.block_seller(query_id, login):
+             log.info("telegram.seller_blocked", query_id=query_id, seller=login)
+-            await callback.answer(f"Skipping {login} for this search from now on.")
++            await callback.answer(t("Skipping {login} for this search from now on.", login=login))
+         else:
+-            await callback.answer(f"{login} is already skipped (or the search is gone).")
++            await callback.answer(
++                t("{login} is already skipped (or the search is gone).", login=login)
++            )
+ 
+     @dispatcher.callback_query(F.data.startswith(f"{CALLBACK_PAUSE_SEARCH}:"))
+     async def handle_pause_search(callback: CallbackQuery) -> None:
++        t = await _callback_translator(repo, callback)
+         if not await _from_paired_chat(repo, callback):
+-            await callback.answer("This chat is not connected to vinted-sniper.", show_alert=True)
++            await callback.answer(
++                t("This chat is not connected to vinted-sniper."), show_alert=True
++            )
+             return
+         query_id = _int_or_none((callback.data or "").partition(":")[2])
+         query = await repo.get_query(query_id) if query_id is not None else None
+         if query is None:
+-            await callback.answer("That search no longer exists.")
++            await callback.answer(t("That search no longer exists."))
+             return
+         if query.paused:
+-            await callback.answer(f"“{query.name}” is already paused.")
++            await callback.answer(t("“{name}” is already paused.", name=query.name))
+             return
+         await repo.set_paused(query.id, True)
+         log.info("telegram.search_paused", query_id=query.id)
+         await callback.answer(
+-            f"Paused “{query.name}”. Resume it from the dashboard or /resume {query.id}.",
++            t(
++                "Paused “{name}”. Resume it from the dashboard or /resume {id}.",
++                name=query.name,
++                id=query.id,
++            ),
+             show_alert=True,
+         )
+ 
+     @dispatcher.callback_query(F.data.startswith(f"{CALLBACK_FEEDBACK}:"))
+     async def handle_feedback(callback: CallbackQuery) -> None:
++        t = await _callback_translator(repo, callback)
+         if not await _from_paired_chat(repo, callback):
+-            await callback.answer("This chat is not connected to vinted-sniper.", show_alert=True)
++            await callback.answer(
++                t("This chat is not connected to vinted-sniper."), show_alert=True
++            )
+             return
+         _, _, rest = (callback.data or "").partition(":")
+         raw_id, _, raw_rating = rest.partition(":")
+         item_id = _int_or_none(raw_id)
+         rating = _int_or_none(raw_rating)
+         if item_id is None or rating not in (1, -1):
+-            await callback.answer("That button is out of date.")
++            await callback.answer(t("That button is out of date."))
+             return
+         if await repo.rate_verdict(item_id, rating):
+             log.info("telegram.verdict_rated", item_id=item_id, rating=rating)
+             await callback.answer(
+-                "Noted — the agent will see this next time."
++                t("Noted — the agent will see this next time.")
+                 if rating > 0
+-                else "Noted. Fewer of these."
++                else t("Noted. Fewer of these.")
+             )
+         else:
+-            await callback.answer("That listing is no longer stored.")
++            await callback.answer(t("That listing is no longer stored."))
+ 
+     @dispatcher.message(Command("resume"))
+     async def handle_resume(message: Message, command: CommandObject) -> None:
+@@ -218,7 +243,8 @@ def build_dispatcher(repo: Repo) -> Dispatcher:
+ 
+     @dispatcher.message(F.text)
+     async def handle_anything_else(message: Message) -> None:
+-        await message.answer("I understand /status, /pause, /resume and /help.")
++        t = await _translator(repo, message.chat.id)
++        await message.answer(t("I understand /status, /pause, /resume and /help."))
+ 
+     return dispatcher
+ 
+@@ -227,16 +253,21 @@ async def _set_paused_from_chat(
+     repo: Repo, message: Message, command: CommandObject, *, paused: bool
+ ) -> None:
+     verb = "pause" if paused else "resume"
++    t = await _translator(repo, message.chat.id)
+     if not await _chat_is_paired(repo, message.chat.id):
+-        await message.answer("This chat is not connected to vinted-sniper.")
++        await message.answer(t("This chat is not connected to vinted-sniper."))
+         return
+     query_id = _int_or_none((command.args or "").strip())
+     query = await repo.get_query(query_id) if query_id is not None else None
+     if query is None:
+-        await message.answer(f"Usage: /{verb} <search id> — ids are in /status.")
++        await message.answer(t("Usage: /{verb} <search id> — ids are in /status.", verb=verb))
+         return
+     await repo.set_paused(query.id, paused)
+-    await message.answer(f"{'Paused' if paused else 'Resumed'} “{query.name}”.")
++    await message.answer(
++        t("Paused “{name}”.", name=query.name)
++        if paused
++        else t("Resumed “{name}”.", name=query.name)
++    )
+ 
+ 
+ def _int_or_none(raw: str) -> int | None:
+@@ -261,30 +292,53 @@ async def _from_paired_chat(repo: Repo, callback: CallbackQuery) -> bool:
+     return await _chat_is_paired(repo, message.chat.id)
+ 
+ 
+-async def _status_text(repo: Repo) -> str:
++async def _status_text(repo: Repo, t: Translator = i18n.EN) -> str:
+     snapshot = await health.snapshot(repo)
+     if not snapshot.searches:
+-        return "No searches set up yet."
++        return t("No searches set up yet.")
+ 
+-    lines = ["<b>vinted-sniper</b>", "Running." if snapshot.alive else "⚠️ Not responding."]
++    lines = ["<b>vinted-sniper</b>", t("Running.") if snapshot.alive else t("⚠️ Not responding.")]
+     for search in snapshot.searches:
+         last = (
+-            f"{int(time.time() - search.last_success_at)}s ago"
++            t("{n}s ago", n=int(time.time() - search.last_success_at))
+             if search.last_success_at
+-            else "never"
++            else t("never")
++        )
++        line = t(
++            "• {name} (id {id}) — {state}, last checked {last}",
++            name=search.name,
++            id=search.query_id,
++            state=search.state,
++            last=last,
+         )
+-        line = f"• {search.name} (id {search.query_id}) — {search.state}, last checked {last}"
+         if search.state == "cooling" and search.cooling_until:
+-            line += f" (site held for {max(0, search.cooling_until - int(time.time())) // 60} min)"
++            minutes = max(0, search.cooling_until - int(time.time())) // 60
++            line += t(" (site held for {minutes} min)", minutes=minutes)
+         if search.state == "failing" and search.last_error:
+             line += f"\n  {search.last_error[:120]}"
+         lines.append(line)
+ 
+     if snapshot.queued_notifications:
+-        lines.append(f"{snapshot.queued_notifications} notification(s) waiting to send.")
++        n = snapshot.queued_notifications
++        lines.append(
++            t.ngettext(
++                "{n} notification(s) waiting to send.", "{n} notification(s) waiting to send.", n
++            )
++        )
+     return "\n".join(lines)
+ 
+ 
++async def _translator(repo: Repo, chat_id: int) -> Translator:
++    return i18n.get(await repo.chat_language(chat_id))
++
++
++async def _callback_translator(repo: Repo, callback: CallbackQuery) -> Translator:
++    message = callback.message
++    if message is None:
++        return i18n.EN
++    return await _translator(repo, message.chat.id)
++
++
+ async def run_bot(token: str, *, repo: Repo, stop: asyncio.Event) -> None:
+     """Poll Telegram for commands until the app shuts down."""
+     bot = Bot(token=token)
+diff --git a/src/vinted_sniper/cli.py b/src/vinted_sniper/cli.py
+index 8959278..f7309b4 100644
+--- a/src/vinted_sniper/cli.py
++++ b/src/vinted_sniper/cli.py
+@@ -107,6 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
+     destination.add_argument(
+         "--status", action="store_true", help="Also send health warnings here."
+     )
++    destination.add_argument(
++        "--lang",
++        default="en",
++        choices=["en", "sk"],
++        help="Language of alerts, bot replies and notices sent here.",
++    )
+     destination.add_argument(
+         "--quiet",
+         default="",
+@@ -331,6 +337,7 @@ async def _cmd_destination(settings: Settings, args: argparse.Namespace) -> int:
+             config=config,
+             notify_status=args.status,
+             quiet_hours=args.quiet.strip() or None,
++            language=args.lang,
+         )
+     print(f"Added {args.kind} destination (id {destination_id}).")
+     print("Route a search to it with: vinted-sniper watch <url> --to " + str(destination_id))
+diff --git a/src/vinted_sniper/db/migrations/0012_destination_language.sql b/src/vinted_sniper/db/migrations/0012_destination_language.sql
+new file mode 100644
+index 0000000..cec113d
+--- /dev/null
++++ b/src/vinted_sniper/db/migrations/0012_destination_language.sql
+@@ -0,0 +1,3 @@
++-- The language a destination reads its alerts, bot replies and health notices in.
++-- A Telegram chat in Slovak and a Discord server in English can share one instance.
++ALTER TABLE destinations ADD COLUMN language TEXT NOT NULL DEFAULT 'en';
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index 193ae16..a2c86f0 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -15,8 +15,10 @@ from typing import Any
+ 
+ import aiosqlite
+ 
++from vinted_sniper import i18n
+ from vinted_sniper.db.connection import Database
+ from vinted_sniper.enrichment import Enrichment, EnrichmentIn
++from vinted_sniper.i18n import Translator
+ from vinted_sniper.vinted.models import Item
+ 
+ # --- Row types ---------------------------------------------------------------------
+@@ -93,6 +95,8 @@ class Destination:
+     failure_count: int = 0
+     # "HH:MM-HH:MM" in the app's timezone, or None. See engine/quiet.py.
+     quiet_hours: str | None = None
++    # Language code for everything this destination reads; see i18n.py.
++    language: str = "en"
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -116,13 +120,16 @@ class PendingNotification:
+     market_percentile: int | None = None
+     market_n: int | None = None
+ 
+-    def market_line(self) -> str | None:
++    def market_line(self, t: Translator = i18n.EN) -> str | None:
+         """Plain words for the market position: "cheaper than 88% of 312 listings seen
+         this month". Nobody should need to know what a percentile is."""
+         if self.market_percentile is None or not self.market_n:
+             return None
+-        cheaper_than = 100 - self.market_percentile
+-        return f"cheaper than {cheaper_than}% of {self.market_n} similar listings seen this month"
++        return t(
++            "cheaper than {pct}% of {n} similar listings seen this month",
++            pct=100 - self.market_percentile,
++            n=self.market_n,
++        )
+ 
+     @property
+     def is_price_drop(self) -> bool:
+@@ -132,19 +139,25 @@ class PendingNotification:
+     def is_verdict(self) -> bool:
+         return self.kind == "verdict"
+ 
+-    def headline(self) -> str:
++    def headline(self, t: Translator = i18n.EN) -> str:
+         """What kind of news this is, for the top of a message."""
+         if self.is_verdict:
+-            return "Verdict is in"
++            return t("Verdict is in")
+         if not self.is_price_drop:
+-            return "New match"
++            return t("New match")
+         item = self.item
+         now_payable = item.total_price if item.total_price is not None else item.price
+         currency = f" {item.currency}" if item.currency else ""
+         if self.previous_price is not None and now_payable is not None:
+             fall = round((self.previous_price - now_payable) / self.previous_price * 100)
+-            return f"Price drop -{fall}%: {self.previous_price}{currency} → {now_payable}{currency}"
+-        return "Price drop"
++            return t(
++                "Price drop -{fall}%: {before}{currency} → {now}{currency}",
++                fall=fall,
++                before=self.previous_price,
++                now=now_payable,
++                currency=currency,
++            )
++        return t("Price drop")
+ 
+ 
+ def _json_list(raw: str | None) -> list[str] | None:
+@@ -423,20 +436,35 @@ class Repo:
+         config: dict[str, Any],
+         notify_status: bool = False,
+         quiet_hours: str | None = None,
++        language: str = "en",
+     ) -> int:
+         return await self._db.insert(
+             "INSERT INTO destinations (kind, name, config_json, notify_status, quiet_hours, "
+-            "created_at) VALUES (?, ?, ?, ?, ?, ?)",
++            "language, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (
+                 kind,
+                 name,
+                 json.dumps(config),
+                 int(notify_status),
+                 quiet_hours or None,
++                i18n.normalise(language),
+                 int(time.time()),
+             ),
+         )
+ 
++    async def set_language(self, destination_id: int, language: str) -> None:
++        await self._db.execute(
++            "UPDATE destinations SET language = ? WHERE id = ?",
++            (i18n.normalise(language), destination_id),
++        )
++
++    async def chat_language(self, chat_id: int) -> str | None:
++        """The language of the Telegram destination paired to a chat, if any."""
++        for destination in await self.list_destinations():
++            if destination.kind == "telegram" and destination.config.get("chat_id") == str(chat_id):
++                return destination.language
++        return None
++
+     async def set_quiet_hours(self, destination_id: int, quiet_hours: str | None) -> None:
+         await self._db.execute(
+             "UPDATE destinations SET quiet_hours = ? WHERE id = ?",
+@@ -503,6 +531,7 @@ class Repo:
+             notify_status=bool(row["notify_status"]),
+             failure_count=row["failure_count"],
+             quiet_hours=row["quiet_hours"],
++            language=row["language"] or "en",
+         )
+ 
+     # --- Routing -------------------------------------------------------------------
+diff --git a/src/vinted_sniper/deliver/discord.py b/src/vinted_sniper/deliver/discord.py
+index c9c538d..335c704 100644
+--- a/src/vinted_sniper/deliver/discord.py
++++ b/src/vinted_sniper/deliver/discord.py
+@@ -25,9 +25,11 @@ from typing import Any
+ 
+ import httpx
+ 
++from vinted_sniper import i18n
+ from vinted_sniper.db.repo import PendingNotification
+ from vinted_sniper.deliver.base import SendResult, require
+ from vinted_sniper.deliver.ratelimit import TokenBucket
++from vinted_sniper.i18n import Translator
+ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted.models import Item
+ 
+@@ -68,7 +70,9 @@ class DiscordSender:
+         dashboard_url: str | None = None,
+         client: httpx.AsyncClient | None = None,
+         bucket: TokenBucket | None = None,
++        language: str = "en",
+     ) -> None:
++        self._t = i18n.get(language)
+         self._url = require(config, "webhook_url", self.kind)
+         self._dashboard_url = dashboard_url
+         self._client = client or httpx.AsyncClient(timeout=20.0)
+@@ -118,40 +122,41 @@ class DiscordSender:
+         return {"username": BOT_NAME, "avatar_url": ICON_URL, "embeds": embeds}
+ 
+     def _embed(self, notification: PendingNotification) -> dict[str, Any]:
++        t = self._t
+         item = notification.item
+         detected = notification.detected_at or int(time.time())
+ 
+-        links = [f"**[View item]({item.url})**"]
++        links = [f"**[{t('View item')}]({item.url})**"]
+         if self._dashboard_url:
+-            links.append(f"[Dashboard]({self._dashboard_url})")
++            links.append(f"[{t('Dashboard')}]({self._dashboard_url})")
+         if item.seller_url:
+-            links.append(f"[Seller]({item.seller_url})")
++            links.append(f"[{t('Seller')}]({item.seller_url})")
+ 
+         fields: list[dict[str, Any]] = []
+         if item.price is not None:
+-            fields.append({"name": "Price", "value": _price_value(item), "inline": True})
++            fields.append({"name": t("Price"), "value": _price_value(item, t), "inline": True})
+         for name, value in (
+-            ("Size", item.size),
+-            ("Condition", item.condition),
+-            ("Brand", item.brand),
++            (t("Size"), item.size),
++            (t("Condition"), item.condition),
++            (t("Brand"), item.brand),
+         ):
+             if value:
+                 fields.append({"name": name, "value": value[:1024], "inline": True})
+-        fields.append({"name": "Location", "value": _location(item.tld), "inline": True})
+-        fields.extend(_market_field(notification))
++        fields.append({"name": t("Location"), "value": _location(item.tld), "inline": True})
++        fields.extend(_market_field(notification, t))
+         if item.seller_rating is not None:
+-            fields.append({"name": "Seller rating", "value": _rating(item), "inline": True})
++            fields.append({"name": t("Seller rating"), "value": _rating(item), "inline": True})
+         if item.seller_login:
+             fields.append(
+-                {"name": "Seller", "value": f"@{item.seller_login}"[:1024], "inline": True}
++                {"name": t("Seller"), "value": f"@{item.seller_login}"[:1024], "inline": True}
+             )
+         # Discord renders this in the reader's own timezone, as "2 minutes ago".
+-        fields.append({"name": "Detected", "value": f"<t:{detected}:R>", "inline": True})
+-        if (field := _verdict_field(notification)) is not None:
++        fields.append({"name": t("Detected"), "value": f"<t:{detected}:R>", "inline": True})
++        if (field := _verdict_field(notification, t)) is not None:
+             fields.append(field)
+ 
+         embed: dict[str, Any] = {
+-            "author": {"name": f"{notification.headline()} • {notification.query_name}"[:256]},
++            "author": {"name": f"{notification.headline(t)} • {notification.query_name}"[:256]},
+             "title": item.title[:256],
+             # Distinct per listing on purpose: Discord folds together embeds that share
+             # a URL.
+@@ -220,7 +225,7 @@ class DiscordSender:
+             await self._client.aclose()
+ 
+ 
+-def _price_value(item: Item) -> str:
++def _price_value(item: Item, t: Translator = i18n.EN) -> str:
+     """The asking price in bold, with the real total under it when the two differ.
+ 
+     The total — buyer protection included — is the number a buying decision compares, so
+@@ -229,7 +234,7 @@ def _price_value(item: Item) -> str:
+     currency = f" {item.currency}" if item.currency else ""
+     value = f"**{item.price}{currency}**"
+     if item.total_price is not None and item.total_price != item.price:
+-        value += f"\n{item.total_price}{currency} total"
++        value += "\n" + t("{n} total", n=f"{item.total_price}{currency}")
+     return value
+ 
+ 
+@@ -240,22 +245,26 @@ def _location(tld: str) -> str:
+     return f"{flag} {iso}"
+ 
+ 
+-def _market_field(notification: PendingNotification) -> list[dict[str, Any]]:
+-    market = notification.market_line()
+-    return [{"name": "Market", "value": market[:1024], "inline": False}] if market else []
++def _market_field(
++    notification: PendingNotification, t: Translator = i18n.EN
++) -> list[dict[str, Any]]:
++    market = notification.market_line(t)
++    return [{"name": t("Market"), "value": market[:1024], "inline": False}] if market else []
+ 
+ 
+-def _verdict_field(notification: PendingNotification) -> dict[str, Any] | None:
++def _verdict_field(
++    notification: PendingNotification, t: Translator = i18n.EN
++) -> dict[str, Any] | None:
+     verdict = notification.enrichment
+     if verdict is None:
+         return None
+     item = notification.item
+     payable = item.total_price if item.total_price is not None else item.price
+-    summary, details = verdict.lines(payable, item.currency)
++    summary, details = verdict.lines(payable, item.currency, t)
+     text = "\n".join(part for part in [summary, *details] if part)
+     if not text:
+         return None
+-    return {"name": "🤖 Verdict", "value": text[:1024], "inline": False}
++    return {"name": f"🤖 {t('Verdict')}", "value": text[:1024], "inline": False}
+ 
+ 
+ def _rating(item: Item) -> str:
+diff --git a/src/vinted_sniper/deliver/dispatcher.py b/src/vinted_sniper/deliver/dispatcher.py
+index dfec754..153c1ac 100644
+--- a/src/vinted_sniper/deliver/dispatcher.py
++++ b/src/vinted_sniper/deliver/dispatcher.py
+@@ -15,12 +15,14 @@ from __future__ import annotations
+ import asyncio
+ import contextlib
+ import json
++from collections.abc import Callable
+ from datetime import datetime
+ from typing import Any
+ from zoneinfo import ZoneInfo
+ 
+ import httpx
+ 
++from vinted_sniper import i18n
+ from vinted_sniper.config import Settings
+ from vinted_sniper.db.repo import Destination, PendingNotification, Repo
+ from vinted_sniper.deliver.base import Sender, SenderConfigError
+@@ -30,6 +32,7 @@ from vinted_sniper.deliver.ratelimit import Gate, TokenBucket
+ from vinted_sniper.deliver.telegram import TelegramSender
+ from vinted_sniper.deliver.webhook import WebhookSender
+ from vinted_sniper.engine import quiet
++from vinted_sniper.i18n import Translator
+ from vinted_sniper.log import get_logger
+ 
+ log = get_logger(__name__)
+@@ -233,15 +236,20 @@ class Dispatcher:
+             "buyer_feedback": await self._repo.feedback_examples(notification.query_id),
+         }
+ 
+-    async def notify_status(self, message: str) -> None:
+-        """Send an operational notice to whichever destinations asked for them."""
++    async def notify_status(self, message: str | Callable[[Translator], str]) -> None:
++        """Send an operational notice to whichever destinations asked for them.
++
++        Pass a callable taking a translator to have the notice rendered in each
++        destination's own language; a plain string goes out as is.
++        """
+         for destination_id in await self._repo.status_destination_ids():
+             destination = await self._repo.get_destination(destination_id)
+             if destination is None:
+                 continue
++            text = message if isinstance(message, str) else message(i18n.get(destination.language))
+             with contextlib.suppress(Exception):
+                 sender = await self._sender_for(destination)
+-                await sender.send_status(message)
++                await sender.send_status(text)
+ 
+     async def _sender_for(self, destination: Destination) -> Sender:
+         # Keyed on the settings too: pairing a Telegram chat rewrites them, and a sender
+@@ -263,7 +271,10 @@ class Dispatcher:
+         match destination.kind:
+             case "discord":
+                 return DiscordSender(
+-                    config, dashboard_url=self._settings.dashboard_url, client=self._client
++                    config,
++                    dashboard_url=self._settings.dashboard_url,
++                    client=self._client,
++                    language=destination.language,
+                 )
+             case "telegram":
+                 token = self._settings.telegram_bot_token
+@@ -278,6 +289,7 @@ class Dispatcher:
+                     client=self._client,
+                     highlight_score=self._settings.enrichment_highlight_score,
+                     silent_below=self._settings.enrichment_silent_below,
++                    language=destination.language,
+                 )
+             case "webhook":
+                 return WebhookSender(
+@@ -287,7 +299,7 @@ class Dispatcher:
+                     context=self._agent_context,
+                 )
+             case "ntfy":
+-                return NtfySender(config, client=self._client)
++                return NtfySender(config, client=self._client, language=destination.language)
+             case unknown:
+                 raise SenderConfigError(f"unknown destination type {unknown!r}")
+ 
+diff --git a/src/vinted_sniper/deliver/ntfy.py b/src/vinted_sniper/deliver/ntfy.py
+index 3a96f0f..8a20465 100644
+--- a/src/vinted_sniper/deliver/ntfy.py
++++ b/src/vinted_sniper/deliver/ntfy.py
+@@ -12,6 +12,7 @@ from typing import Any
+ 
+ import httpx
+ 
++from vinted_sniper import i18n
+ from vinted_sniper.db.repo import PendingNotification
+ from vinted_sniper.deliver.base import SendResult, require
+ from vinted_sniper.deliver.ratelimit import TokenBucket
+@@ -30,7 +31,9 @@ class NtfySender:
+         *,
+         client: httpx.AsyncClient | None = None,
+         bucket: TokenBucket | None = None,
++        language: str = "en",
+     ) -> None:
++        self._t = i18n.get(language)
+         self._topic = require(config, "topic", self.kind)
+         self._server = str(config.get("server") or DEFAULT_SERVER).rstrip("/")
+         self._token = config.get("token")
+@@ -50,7 +53,7 @@ class NtfySender:
+             item = notification.item
+             headers = {
+                 "Title": (
+-                    f"{notification.headline()} — {item.title}"
++                    f"{notification.headline(self._t)} — {item.title}"
+                     if notification.is_price_drop or notification.is_verdict
+                     else item.title
+                 )[:200],
+@@ -68,7 +71,7 @@ class NtfySender:
+             try:
+                 response = await self._client.post(
+                     f"{self._server}/{self._topic}",
+-                    content=item.price_line().encode(),
++                    content=item.price_line(self._t).encode(),
+                     headers=headers,
+                 )
+             except httpx.HTTPError as exc:
+diff --git a/src/vinted_sniper/deliver/telegram.py b/src/vinted_sniper/deliver/telegram.py
+index 22d3855..6d70da4 100644
+--- a/src/vinted_sniper/deliver/telegram.py
++++ b/src/vinted_sniper/deliver/telegram.py
+@@ -16,10 +16,12 @@ from typing import Any
+ 
+ import httpx
+ 
++from vinted_sniper import i18n
+ from vinted_sniper.db.repo import PendingNotification
+ from vinted_sniper.deliver.base import SendResult, require
+ from vinted_sniper.deliver.ratelimit import TokenBucket
+ from vinted_sniper.enrichment import Enrichment
++from vinted_sniper.i18n import Translator
+ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted.models import Item
+ 
+@@ -58,6 +60,7 @@ class TelegramSender:
+         bot_token: str,
+         highlight_score: int = 75,
+         silent_below: int = 40,
++        language: str = "en",
+         client: httpx.AsyncClient | None = None,
+         bucket: TokenBucket | None = None,
+     ) -> None:
+@@ -71,6 +74,7 @@ class TelegramSender:
+         self._bucket = bucket or TokenBucket(MESSAGES_PER_S, capacity=2)
+         self._highlight_score = highlight_score
+         self._silent_below = silent_below
++        self._t = i18n.get(language)
+ 
+     @property
+     def max_batch(self) -> int:
+@@ -92,8 +96,11 @@ class TelegramSender:
+                 else self._listing_payload(
+                     notification.item,
+                     query_id=notification.query_id,
+-                    headline=notification.headline() if notification.is_price_drop else None,
++                    headline=(
++                        notification.headline(self._t) if notification.is_price_drop else None
++                    ),
+                     enrichment=notification.enrichment,
++                    market_line=notification.market_line(self._t),
+                 ),
+                 [notification.outbox_id],
+             )
+@@ -148,7 +155,8 @@ class TelegramSender:
+         enrichment: Enrichment | None = None,
+         market_line: str | None = None,
+     ) -> dict[str, Any]:
+-        lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line())]
++        t = self._t
++        lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line(t))]
+         if market_line:
+             lines.append(f"📊 {html.escape(market_line)}")
+         if headline:
+@@ -166,14 +174,14 @@ class TelegramSender:
+             seller = html.escape(item.seller_login)
+             if item.seller_rating is not None:
+                 seller += f" ({item.seller_rating:.0%})"
+-            lines.append(f"Seller: {seller}")
++            lines.append(t("Seller: {seller}", seller=seller))
+         if item.listed_at:
+-            lines.append(f"Listed {item.listed_at.strftime('%H:%M UTC')}")
++            lines.append(t("Listed {time} UTC", time=item.listed_at.strftime("%H:%M")))
+ 
+-        keyboard: list[list[dict[str, str]]] = [_link_row(item)]
++        keyboard: list[list[dict[str, str]]] = [_link_row(item, t)]
+         # A second row of actions the bot handles itself: the two things people most
+         # often want to do from the alert without opening the dashboard.
+-        keyboard.extend(_action_rows(item, query_id, enrichment))
++        keyboard.extend(_action_rows(item, query_id, enrichment, t))
+ 
+         payload = self._base_payload() | {
+             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
+@@ -196,11 +204,14 @@ class TelegramSender:
+     def _verdict_payload(self, notification: PendingNotification) -> dict[str, Any]:
+         """A follow-up for a verdict that arrived after the alert: short, and only sent
+         when the deal is hot, so it earns its buzz."""
++        t = self._t
+         item = notification.item
+         payable = item.total_price if item.total_price is not None else item.price
+-        lines = [f"🔥 <b>Verdict is in: hot deal</b> · {html.escape(item.title)}"]
++        lines = [
++            f"🔥 <b>{html.escape(t('Verdict is in: hot deal'))}</b> · {html.escape(item.title)}"
++        ]
+         if notification.enrichment is not None:
+-            summary, details = notification.enrichment.lines(payable, item.currency)
++            summary, details = notification.enrichment.lines(payable, item.currency, t)
+             if summary:
+                 lines.append(html.escape(summary))
+             lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
+@@ -208,8 +219,8 @@ class TelegramSender:
+             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
+             "reply_markup": {
+                 "inline_keyboard": [
+-                    [{"text": "Open listing", "url": item.url}],
+-                    feedback_buttons(item.item_id),
++                    [{"text": t("Open listing"), "url": item.url}],
++                    feedback_buttons(item.item_id, t),
+                 ]
+             },
+             "link_preview_options": {"is_disabled": True},
+@@ -218,22 +229,29 @@ class TelegramSender:
+     def _weave_verdict(
+         self, lines: list[str], item: Item, verdict: Enrichment, *, silent: bool
+     ) -> None:
++        t = self._t
+         payable = item.total_price if item.total_price is not None else item.price
+-        summary, details = verdict.lines(payable, item.currency)
++        summary, details = verdict.lines(payable, item.currency, t)
+         if summary:
+             hot = verdict.is_hot(self._highlight_score)
+-            marker = "🔥 <b>HOT DEAL</b> · " if hot else ("💤 " if silent else "🤖 ")
++            marker = (
++                f"🔥 <b>{html.escape(t('HOT DEAL'))}</b> · "
++                if hot
++                else ("💤 " if silent else "🤖 ")
++            )
+             lines.insert(0, f"{marker}{html.escape(summary)}")
+         lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
+ 
+     def _digest_payload(self, batch: list[PendingNotification]) -> dict[str, Any]:
+-        lines = [f"<b>{len(batch)} more matches</b>"]
++        t = self._t
++        more = t.ngettext("{n} more matches", "{n} more matches", len(batch))
++        lines = [f"<b>{html.escape(more)}</b>"]
+         for index, notification in enumerate(batch, start=1):
+             item = notification.item
+             marker = "📉 " if notification.is_price_drop else ""
+             lines.append(
+                 f'{index}. {marker}<a href="{html.escape(item.url, quote=True)}">'
+-                f"{html.escape(item.title[:80])}</a> — {html.escape(item.price_line())}"
++                f"{html.escape(item.title[:80])}</a> — {html.escape(item.price_line(t))}"
+             )
+         return self._base_payload() | {
+             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
+@@ -285,37 +303,39 @@ CALLBACK_PAUSE_SEARCH = "ps"
+ CALLBACK_FEEDBACK = "fb"
+ 
+ 
+-def feedback_buttons(item_id: int) -> list[dict[str, str]]:
++def feedback_buttons(item_id: int, t: Translator = i18n.EN) -> list[dict[str, str]]:
+     """Thumbs on a verdict. What the buyer says here is fed back to the agent as examples
+     of what this particular buyer calls a deal."""
+     return [
+-        {"text": "👍 Good call", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:1"},
+-        {"text": "👎 Not for me", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:-1"},
++        {"text": f"👍 {t('Good call')}", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:1"},
++        {"text": f"👎 {t('Not for me')}", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:-1"},
+     ]
+ 
+ 
+ def _action_rows(
+-    item: Item, query_id: int | None, enrichment: Enrichment | None
++    item: Item, query_id: int | None, enrichment: Enrichment | None, t: Translator = i18n.EN
+ ) -> list[list[dict[str, str]]]:
+     rows: list[list[dict[str, str]]] = []
+-    if actions := inline_actions(query_id, item.seller_login):
++    if actions := inline_actions(query_id, item.seller_login, t):
+         rows.append(actions)
+     if enrichment is not None:
+-        rows.append(feedback_buttons(item.item_id))
++        rows.append(feedback_buttons(item.item_id, t))
+     return rows
+ 
+ 
+-def _link_row(item: Item) -> list[dict[str, str]]:
++def _link_row(item: Item, t: Translator = i18n.EN) -> list[dict[str, str]]:
+     """Only links that resolve. Vinted's old deep links to the message screen and to
+     checkout answer "page not found" since the site was rebuilt; both actions now live on
+     the listing page itself, so one button covers them."""
+-    row = [{"text": "Open listing", "url": item.url}]
++    row = [{"text": t("Open listing"), "url": item.url}]
+     if item.seller_url:
+-        row.append({"text": "Seller profile", "url": item.seller_url})
++        row.append({"text": t("Seller profile"), "url": item.seller_url})
+     return row
+ 
+ 
+-def inline_actions(query_id: int | None, seller_login: str | None) -> list[dict[str, str]]:
++def inline_actions(
++    query_id: int | None, seller_login: str | None, t: Translator = i18n.EN
++) -> list[dict[str, str]]:
+     """Callback buttons the bot in botctl answers. Empty when there is no search to act on."""
+     if query_id is None:
+         return []
+@@ -323,8 +343,10 @@ def inline_actions(query_id: int | None, seller_login: str | None) -> list[dict[
+     if seller_login:
+         data = f"{CALLBACK_BLOCK_SELLER}:{query_id}:{seller_login}"
+         if len(data.encode()) <= _CALLBACK_LIMIT:
+-            row.append({"text": "🚫 Skip seller", "callback_data": data})
+-    row.append({"text": "⏸ Pause search", "callback_data": f"{CALLBACK_PAUSE_SEARCH}:{query_id}"})
++            row.append({"text": f"🚫 {t('Skip seller')}", "callback_data": data})
++    row.append(
++        {"text": f"⏸ {t('Pause search')}", "callback_data": f"{CALLBACK_PAUSE_SEARCH}:{query_id}"}
++    )
+     return row
+ 
+ 
+diff --git a/src/vinted_sniper/engine/poller.py b/src/vinted_sniper/engine/poller.py
+index da1b53c..638b62a 100644
+--- a/src/vinted_sniper/engine/poller.py
++++ b/src/vinted_sniper/engine/poller.py
+@@ -19,6 +19,7 @@ from decimal import Decimal
+ from vinted_sniper.config import MAX_BACKOFF_S, Settings
+ from vinted_sniper.db.repo import Query, Repo
+ from vinted_sniper.engine import dedup, filters
++from vinted_sniper.i18n import Translator
+ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted.client import VintedClient
+ from vinted_sniper.vinted.errors import (
+@@ -55,7 +56,7 @@ class Poller:
+         work_available: asyncio.Event | None = None,
+         rng: random.Random | None = None,
+         initial_delay_s: float = 0.0,
+-        announce: Callable[[str], Awaitable[None]] | None = None,
++        announce: Callable[[str | Callable[[Translator], str]], Awaitable[None]] | None = None,
+     ) -> None:
+         self.query = query
+         self._repo = repo
+@@ -114,12 +115,19 @@ class Poller:
+             )
+             self._log.warning("poll.blocked", error=str(exc), retry_in_s=round(delay))
+             if first_on_site and self._announce is not None:
++                tld, name, minutes = self.query.tld, self.query.name, round(delay / 60)
+                 with contextlib.suppress(Exception):
+                     await self._announce(
+-                        f"vinted.{self.query.tld} is refusing requests from this address "
+-                        f"(\u201c{self.query.name}\u201d was the first to notice). Holding "
+-                        f"every search on that site for about {round(delay / 60)} min. "
+-                        "If this keeps happening, see the troubleshooting guide."
++                        lambda t: t(
++                            "vinted.{tld} is refusing requests from this address "
++                            "(“{name}” was the first to notice). Holding every search "
++                            "on that site for "
++                            "about {minutes} min. If this keeps happening, see the "
++                            "troubleshooting guide.",
++                            tld=tld,
++                            name=name,
++                            minutes=minutes,
++                        )
+                     )
+             return delay
+         except RateLimitedError as exc:
+diff --git a/src/vinted_sniper/engine/report.py b/src/vinted_sniper/engine/report.py
+index e06c67f..3a35e39 100644
+--- a/src/vinted_sniper/engine/report.py
++++ b/src/vinted_sniper/engine/report.py
+@@ -12,9 +12,12 @@ import asyncio
+ import contextlib
+ from collections.abc import Awaitable, Callable
+ from datetime import datetime, timedelta
++from typing import Any
+ from zoneinfo import ZoneInfo
+ 
++from vinted_sniper import i18n
+ from vinted_sniper.db.repo import Repo
++from vinted_sniper.i18n import Translator
+ from vinted_sniper.log import get_logger
+ 
+ log = get_logger(__name__)
+@@ -32,7 +35,7 @@ class WeeklyReport:
+         repo: Repo,
+         zone: ZoneInfo,
+         stop: asyncio.Event,
+-        announce: Callable[[str], Awaitable[None]],
++        announce: Callable[[str | Callable[[Translator], str]], Awaitable[None]],
+         now: Callable[[], datetime] | None = None,
+     ) -> None:
+         self._repo = repo
+@@ -56,7 +59,8 @@ class WeeklyReport:
+         last = await self._repo.get_state_value("weekly_report_sent_at")
+         if last and int(last) >= int(due.timestamp()):
+             return False
+-        await self._announce(await self.compose(int(due.timestamp()) - _LOOKBACK_S))
++        figures = await self._repo.weekly_figures(int(due.timestamp()) - _LOOKBACK_S)
++        await self._announce(lambda t: self.render(figures, t))
+         await self._repo.set_state_value("weekly_report_sent_at", str(int(due.timestamp())))
+         log.info("report.sent", slot=due.isoformat())
+         return True
+@@ -70,33 +74,61 @@ class WeeklyReport:
+             slot -= timedelta(days=7)
+         return slot
+ 
+-    async def compose(self, since: int) -> str:
+-        f = await self._repo.weekly_figures(since)
++    async def compose(self, since: int, t: Translator = i18n.EN) -> str:
++        return self.render(await self._repo.weekly_figures(since), t)
++
++    @staticmethod
++    def render(f: dict[str, Any], t: Translator = i18n.EN) -> str:
+         if f["found"] == 0 and f["drops"] == 0:
+-            return (
++            return t(
+                 "Weekly: nothing new turned up on any search. Either the market is quiet "
+                 "or the searches are too narrow."
+             )
+         lines = [
+-            f"Weekly: {f['found']} new listing{'s' if f['found'] != 1 else ''} across "
+-            f"{f['searches']} search{'es' if f['searches'] != 1 else ''}, "
+-            f"{f['sent']} alert{'s' if f['sent'] != 1 else ''} sent, "
+-            f"{f['drops']} price drop{'s' if f['drops'] != 1 else ''}."
++            t(
++                "Weekly: {found} across {searches}, {sent}, {drops}.",
++                found=t.ngettext("{n} new listing", "{n} new listings", f["found"]),
++                searches=t.ngettext("{n} search", "{n} searches", f["searches"]),
++                sent=t.ngettext("{n} alert sent", "{n} alerts sent", f["sent"]),
++                drops=t.ngettext("{n} price drop", "{n} price drops", f["drops"]),
++            )
+         ]
+         if f["judged"]:
+-            avg = f" (avg score {f['avg_score']:.0f})" if f["avg_score"] is not None else ""
+-            lines.append(f"{f['judged']} judged by the agent{avg}.")
++            avg = (
++                t(" (avg score {score})", score=f"{f['avg_score']:.0f}")
++                if f["avg_score"] is not None
++                else ""
++            )
++            lines.append(
++                t.ngettext(
++                    "{n} judged by the agent{avg}.",
++                    "{n} judged by the agent{avg}.",
++                    f["judged"],
++                    avg=avg,
++                )
++            )
+         if f["hot"]:
+             best = f["hot"][0]
+             price = (
+-                f" at {best['total_price']:.0f} {best['currency'] or ''}".rstrip()
++                t(
++                    " at {price} {currency}",
++                    price=f"{best['total_price']:.0f}",
++                    currency=best["currency"] or "",
++                ).rstrip()
+                 if best["total_price"] is not None
+                 else ""
+             )
+-            lines.append(f"Best verdict: {best['enrich_score']}/100 — {best['title'][:60]}{price}.")
++            lines.append(
++                t(
++                    "Best verdict: {score}/100 — {title}{price}.",
++                    score=best["enrich_score"],
++                    title=best["title"][:60],
++                    price=price,
++                )
++            )
+         if f["busiest"]:
+             top = ", ".join(f"{row['name']} ({row['n']})" for row in f["busiest"])
+-            lines.append(f"Busiest: {top}.")
++            lines.append(t("Busiest: {list}.", list=top))
+         if f["blocks_total"]:
+-            lines.append(f"Refusals from Vinted so far: {f['blocks_total']}.")
++            lines.append(t("Refusals from Vinted so far: {n}.", n=f["blocks_total"]))
+         return "\n".join(lines)
+diff --git a/src/vinted_sniper/engine/watchdog.py b/src/vinted_sniper/engine/watchdog.py
+index ce3aa0b..a950927 100644
+--- a/src/vinted_sniper/engine/watchdog.py
++++ b/src/vinted_sniper/engine/watchdog.py
+@@ -28,6 +28,7 @@ from dataclasses import dataclass
+ 
+ from vinted_sniper.config import Settings
+ from vinted_sniper.db.repo import Repo
++from vinted_sniper.i18n import Translator
+ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted.client import PER_PAGE
+ from vinted_sniper.vinted.errors import BlockedError, NetworkError
+@@ -63,7 +64,7 @@ class Watchdog:
+         sessions: SessionManager,
+         settings: Settings,
+         stop: asyncio.Event,
+-        announce: Callable[[str], Awaitable[None]] | None = None,
++        announce: Callable[[str | Callable[[Translator], str]], Awaitable[None]] | None = None,
+     ) -> None:
+         self._repo = repo
+         self._sessions = sessions
+@@ -169,7 +170,12 @@ class Watchdog:
+ 
+         if self._announce is not None:
+             await self._announce(
+-                f"“{search.name}” has seen nothing new for {search.stale_cycles} checks "
+-                f"while other vinted.{search.tld} searches keep finding listings. "
+-                "Started a fresh session; if it stays quiet, see the troubleshooting guide."
++                lambda t: t(
++                    "“{name}” has seen nothing new for {cycles} checks while other vinted.{tld} "
++                    "searches keep finding listings. Started a fresh session; if it stays quiet, "
++                    "see the troubleshooting guide.",
++                    name=search.name,
++                    cycles=search.stale_cycles,
++                    tld=search.tld,
++                )
+             )
+diff --git a/src/vinted_sniper/enrichment.py b/src/vinted_sniper/enrichment.py
+index 555e6e5..84854f5 100644
+--- a/src/vinted_sniper/enrichment.py
++++ b/src/vinted_sniper/enrichment.py
+@@ -20,6 +20,9 @@ from typing import Any
+ 
+ from pydantic import BaseModel, Field
+ 
++from vinted_sniper import i18n
++from vinted_sniper.i18n import Translator
++
+ 
+ class EnrichmentIn(BaseModel):
+     """What the callback accepts. Everything optional: a partial verdict beats none."""
+@@ -77,28 +80,32 @@ class Enrichment:
+         """Not worth a buzz: scored below the line, or not the product searched for."""
+         return (self.score is not None and self.score < threshold) or self.matches_query is False
+ 
+-    def lines(self, payable: Decimal | None, currency: str | None) -> tuple[str, list[str]]:
++    def lines(
++        self, payable: Decimal | None, currency: str | None, t: Translator = i18n.EN
++    ) -> tuple[str, list[str]]:
+         """The top line (may be empty) and the detail lines a message appends."""
+         details: list[str] = []
+         if self.model:
+-            details.append(f"Looks like: {self.model}")
++            details.append(t("Looks like: {model}", model=self.model))
+         if self.verdict:
+             details.append(self.verdict)
+-        return self.summary(payable, currency), details
++        return self.summary(payable, currency, t), details
+ 
+-    def summary(self, payable: Decimal | None, currency: str | None) -> str:
++    def summary(
++        self, payable: Decimal | None, currency: str | None, t: Translator = i18n.EN
++    ) -> str:
+         """The compact line that goes at the top of a message."""
+         parts: list[str] = []
+         if self.score is not None:
+-            parts.append(f"deal {self.score}/100")
++            parts.append(t("deal {score}/100", score=self.score))
+         if self.retail_price is not None:
+             unit = f" {currency}" if currency else ""
+-            piece = f"retail ~{self.retail_price:.0f}{unit}"
++            piece = t("retail ~{price}{currency}", price=f"{self.retail_price:.0f}", currency=unit)
+             if (off := self.discount_percent(payable)) is not None:
+                 piece += f" · -{off}%"
+             parts.append(piece)
+         if self.matches_query is False:
+-            parts.append("not the model searched for")
++            parts.append(t("not the model searched for"))
+         if self.risk:
+-            parts.append(f"risk: {self.risk}")
++            parts.append(t("risk: {risk}", risk=self.risk))
+         return " · ".join(parts)
+diff --git a/src/vinted_sniper/i18n.py b/src/vinted_sniper/i18n.py
+new file mode 100644
+index 0000000..0e3f9b9
+--- /dev/null
++++ b/src/vinted_sniper/i18n.py
+@@ -0,0 +1,79 @@
++"""Messages in the reader's language.
++
++Alerts, bot replies and health notices can be read in more than one language — a Telegram
++chat in Slovak, a Discord server in English — so the language belongs to the destination,
++not to the process. Each catalog is one JSON file in `locales/`: msgid → text, or a list of
++plural forms. English is the msgid itself, so an untranslated string is never a blank.
++
++This is deliberately gettext-shaped (``gettext`` / ``ngettext`` with ``{name}`` placeholders)
++and deliberately not gettext: no .po/.mo compile step, nothing to install in the image, and
++Jinja's i18n extension can take these two callables directly when the UI follows.
++"""
++
++from __future__ import annotations
++
++import json
++from collections.abc import Callable
++from functools import cache
++from pathlib import Path
++from typing import Any
++
++LOCALES_DIR = Path(__file__).with_name("locales")
++DEFAULT_LANGUAGE = "en"
++LANGUAGES: dict[str, str] = {"en": "English", "sk": "Slovenčina"}
++
++# How many plural forms a language has and which one a count picks.
++_PLURAL_RULES: dict[str, Callable[[int], int]] = {
++    "en": lambda n: 0 if n == 1 else 1,
++    # Slovak: 1 / 2-4 / 0 and 5+ (and anything fractional).
++    "sk": lambda n: 0 if n == 1 else (1 if 2 <= n <= 4 else 2),  # noqa: PLR2004
++}
++
++
++class Translator:
++    """Renders msgids for one language. Missing strings fall back to English."""
++
++    def __init__(self, language: str, catalog: dict[str, Any]) -> None:
++        self.language = language
++        self._catalog = catalog
++        self._plural = _PLURAL_RULES.get(language, _PLURAL_RULES["en"])
++
++    def gettext(self, msgid: str, /, **kwargs: Any) -> str:
++        text = self._catalog.get(msgid)
++        if not isinstance(text, str):
++            text = msgid
++        return text.format(**kwargs) if kwargs else text
++
++    def ngettext(self, singular: str, plural: str, n: int, /, **kwargs: Any) -> str:
++        forms = self._catalog.get(singular)
++        if isinstance(forms, list) and forms:
++            text = str(forms[min(self._plural(n), len(forms) - 1)])
++        else:
++            text = singular if n == 1 else plural
++        return text.format(n=n, **kwargs)
++
++    # Short aliases, the way templates and senders like to read.
++    __call__ = gettext
++
++
++@cache
++def get(language: str | None) -> Translator:
++    """The translator for a language code; English for anything unknown."""
++    code = (language or DEFAULT_LANGUAGE).lower()
++    if code == DEFAULT_LANGUAGE or code not in LANGUAGES:
++        return Translator(DEFAULT_LANGUAGE, {})
++    path = LOCALES_DIR / f"{code}.json"
++    try:
++        catalog = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return Translator(DEFAULT_LANGUAGE, {})
++    return Translator(code, catalog)
++
++
++def normalise(language: str | None) -> str:
++    """A language code we support, or the default."""
++    code = (language or "").strip().lower()
++    return code if code in LANGUAGES else DEFAULT_LANGUAGE
++
++
++EN = get(DEFAULT_LANGUAGE)
+diff --git a/src/vinted_sniper/locales/sk.json b/src/vinted_sniper/locales/sk.json
+new file mode 100644
+index 0000000..39f49f0
+--- /dev/null
++++ b/src/vinted_sniper/locales/sk.json
+@@ -0,0 +1,79 @@
++{
++  "New match": "Nový nález",
++  "Verdict is in": "Verdikt je tu",
++  "Price drop": "Zľava",
++  "Price drop -{fall}%: {before}{currency} → {now}{currency}": "Zľava −{fall} %: {before}{currency} → {now}{currency}",
++  "price unknown": "cena neznáma",
++  "{price}{currency} ({total}{currency} with protection)": "{price}{currency} ({total}{currency} s ochranou kupujúceho)",
++  "cheaper than {pct}% of {n} similar listings seen this month": "lacnejší ako {pct} % z {n} podobných inzerátov za tento mesiac",
++  "Seller: {seller}": "Predajca: {seller}",
++  "Listed {time} UTC": "Pridané {time} UTC",
++  "Looks like: {model}": "Vyzerá to na: {model}",
++  "HOT DEAL": "TOP PONUKA",
++  "deal {score}/100": "skóre {score}/100",
++  "retail ~{price}{currency}": "v obchode ~{price}{currency}",
++  "not the model searched for": "nie je to hľadaný model",
++  "risk: {risk}": "riziko: {risk}",
++  "Verdict is in: hot deal": "Verdikt je tu: top ponuka",
++  "{n} more matches": ["{n} ďalší nález", "{n} ďalšie nálezy", "{n} ďalších nálezov"],
++  "Open listing": "Otvoriť inzerát",
++  "Seller profile": "Profil predajcu",
++  "Skip seller": "Preskočiť predajcu",
++  "Pause search": "Pozastaviť hľadanie",
++  "Good call": "Trafil sa",
++  "Not for me": "Nie pre mňa",
++  "Price": "Cena",
++  "Size": "Veľkosť",
++  "Condition": "Stav",
++  "Brand": "Značka",
++  "Location": "Krajina",
++  "Seller rating": "Hodnotenie predajcu",
++  "Seller": "Predajca",
++  "Detected": "Nájdené",
++  "Market": "Trh",
++  "Verdict": "Verdikt",
++  "View item": "Zobraziť inzerát",
++  "Dashboard": "Prehľad",
++  "{n} total": "{n} spolu",
++
++  "This chat is not connected to vinted-sniper.": "Tento chat nie je pripojený k vinted-sniperu.",
++  "That button is out of date.": "Toto tlačidlo už nie je platné.",
++  "Skipping {login} for this search from now on.": "Predajcu {login} v tomto hľadaní odteraz preskakujem.",
++  "{login} is already skipped (or the search is gone).": "{login} je už preskočený (alebo hľadanie zaniklo).",
++  "That search no longer exists.": "Toto hľadanie už neexistuje.",
++  "“{name}” is already paused.": "„{name}“ je už pozastavené.",
++  "Paused “{name}”. Resume it from the dashboard or /resume {id}.": "Pozastavené „{name}“. Obnovíš ho v prehľade alebo cez /resume {id}.",
++  "Usage: /{verb} <search id> — ids are in /status.": "Použitie: /{verb} <id hľadania> — id nájdeš v /status.",
++  "Paused “{name}”.": "Pozastavené „{name}“.",
++  "Resumed “{name}”.": "Obnovené „{name}“.",
++  "Noted — the agent will see this next time.": "Zapísané — agent to nabudúce uvidí.",
++  "Noted. Fewer of these.": "Zapísané. Takýchto menej.",
++  "That listing is no longer stored.": "Tento inzerát už nie je uložený.",
++  "I understand /status, /pause, /resume and /help.": "Rozumiem /status, /pause, /resume a /help.",
++  "No searches set up yet.": "Zatiaľ žiadne hľadania.",
++  "Running.": "Beží.",
++  "⚠️ Not responding.": "⚠️ Neodpovedá.",
++  "{n}s ago": "pred {n} s",
++  "never": "nikdy",
++  "• {name} (id {id}) — {state}, last checked {last}": "• {name} (id {id}) — {state}, naposledy {last}",
++  " (site held for {minutes} min)": " (stránka pozastavená na {minutes} min)",
++  "{n} notification(s) waiting to send.": ["{n} notifikácia čaká na odoslanie.", "{n} notifikácie čakajú na odoslanie.", "{n} notifikácií čaká na odoslanie."],
++  "/status — is everything still running\n/pause <id>, /resume <id> — pause or resume a search\n/start <code> — connect this chat to vinted-sniper\n\nUnder each alert: skip that seller for the search, or pause the search.\nEverything else is managed in vinted-sniper itself.": "/status — beží všetko?\n/pause <id>, /resume <id> — pozastaviť alebo obnoviť hľadanie\n/start <kód> — pripojiť tento chat k vinted-sniperu\n\nPod každým alertom: preskočiť predajcu v tomto hľadaní alebo pozastaviť hľadanie.\nVšetko ostatné sa nastavuje vo vinted-sniperi.",
++  "Connected. Matching listings will arrive here.\nSend /status any time to check that everything is still running.": "Pripojené. Nálezy budú chodiť sem.\nPošli /status kedykoľvek, ak chceš skontrolovať, že všetko beží.",
++
++  "vinted.{tld} is refusing requests from this address (“{name}” was the first to notice). Holding every search on that site for about {minutes} min. If this keeps happening, see the troubleshooting guide.": "vinted.{tld} odmieta požiadavky z tejto adresy (prvé si to všimlo „{name}“). Všetky hľadania na tejto stránke pozastavujem asi na {minutes} min. Ak sa to opakuje, pozri troubleshooting.",
++  "“{name}” has seen nothing new for {cycles} checks while other vinted.{tld} searches keep finding listings. Started a fresh session; if it stays quiet, see the troubleshooting guide.": "„{name}“ nenašlo nič nové {cycles} kontrol po sebe, kým ostatné hľadania na vinted.{tld} nálezy majú. Založil som novú session; ak zostane ticho, pozri troubleshooting.",
++
++  "Weekly: nothing new turned up on any search. Either the market is quiet or the searches are too narrow.": "Týždeň: na žiadnom hľadaní sa nič nové neobjavilo. Buď je trh tichý, alebo sú hľadania príliš úzke.",
++  "Weekly: {found} across {searches}, {sent}, {drops}.": "Týždeň: {found} v {searches}, {sent}, {drops}.",
++  "{n} new listing": ["{n} nový inzerát", "{n} nové inzeráty", "{n} nových inzerátov"],
++  "{n} search": ["{n} hľadaní", "{n} hľadaniach", "{n} hľadaniach"],
++  "{n} alert sent": ["{n} odoslaný alert", "{n} odoslané alerty", "{n} odoslaných alertov"],
++  "{n} price drop": ["{n} zľava", "{n} zľavy", "{n} zliav"],
++  "{n} judged by the agent{avg}.": ["{n} posúdil agent{avg}.", "{n} posúdil agent{avg}.", "{n} posúdil agent{avg}."],
++  " (avg score {score})": " (priem. skóre {score})",
++  "Best verdict: {score}/100 — {title}{price}.": "Najlepší verdikt: {score}/100 — {title}{price}.",
++  " at {price} {currency}": " za {price} {currency}",
++  "Busiest: {list}.": "Najrušnejšie: {list}.",
++  "Refusals from Vinted so far: {n}.": "Odmietnutí od Vintedu doteraz: {n}."
++}
+diff --git a/src/vinted_sniper/vinted/models.py b/src/vinted_sniper/vinted/models.py
+index d96b237..9499017 100644
+--- a/src/vinted_sniper/vinted/models.py
++++ b/src/vinted_sniper/vinted/models.py
+@@ -13,6 +13,8 @@ from typing import Any
+ 
+ from pydantic import BaseModel, ConfigDict
+ 
++from vinted_sniper import i18n
++from vinted_sniper.i18n import Translator
+ from vinted_sniper.vinted import urls
+ 
+ 
+@@ -83,13 +85,18 @@ class Item(BaseModel):
+             return None
+         return urls.member_url(self.tld, self.seller_id)
+ 
+-    def price_line(self) -> str:
++    def price_line(self, t: Translator = i18n.EN) -> str:
+         """Price as a human reads it, showing the total when it differs from the ask."""
+         if self.price is None:
+-            return "price unknown"
++            return t("price unknown")
+         currency = f" {self.currency}" if self.currency else ""
+         if self.total_price is not None and self.total_price != self.price:
+-            return f"{self.price}{currency} ({self.total_price}{currency} with protection)"
++            return t(
++                "{price}{currency} ({total}{currency} with protection)",
++                price=self.price,
++                total=self.total_price,
++                currency=currency,
++            )
+         return f"{self.price}{currency}"
+ 
+ 
+diff --git a/src/vinted_sniper/web/server.py b/src/vinted_sniper/web/server.py
+index 25c326f..3c23ac7 100644
+--- a/src/vinted_sniper/web/server.py
++++ b/src/vinted_sniper/web/server.py
+@@ -35,7 +35,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+ from fastapi.templating import Jinja2Templates
+ from pydantic import SecretStr
+ 
+-from vinted_sniper import backup
++from vinted_sniper import backup, i18n
+ from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
+ from vinted_sniper.db.repo import Repo
+ from vinted_sniper.engine import filters, health, quiet
+@@ -140,6 +140,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+                 "snapshot": snapshot,
+                 "queries": queries,
+                 "destinations": destinations,
++                "languages": i18n.LANGUAGES,
+                 "first_run_newest": settings.first_run_mode == "newest",
+                 "auth_enabled": token is not None,
+                 "recent": _listing_views(await repo.recent_items(limit=25), now=int(time.time())),
+@@ -442,6 +443,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+         target: Annotated[str, Form()] = "",
+         quiet_hours: Annotated[str, Form()] = "",
+         notify_status: Annotated[str, Form()] = "",
++        language: Annotated[str, Form()] = "en",
+         _: None = guard,
+     ) -> Response:
+         target = target.strip()
+@@ -473,8 +475,18 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+             config=config,
+             notify_status=notify_status == "1",
+             quiet_hours=quiet_hours or None,
++            language=language,
++        )
++        return _redirect_with_notice("Destination added.")
++
++    @app.post("/destinations/{destination_id}/language")
++    async def set_destination_language(
++        destination_id: int, language: Annotated[str, Form()], _: None = guard
++    ) -> Response:
++        await repo.set_language(destination_id, language)
++        return _redirect_with_notice(
++            f"Alerts to this destination will be in {i18n.LANGUAGES[i18n.normalise(language)]}."
+         )
+-        return RedirectResponse("/", status_code=303)
+ 
+     @app.post("/destinations/{destination_id}/quiet")
+     async def set_destination_quiet(
+diff --git a/src/vinted_sniper/web/templates/dashboard.html b/src/vinted_sniper/web/templates/dashboard.html
+index 230196d..4006b9b 100644
+--- a/src/vinted_sniper/web/templates/dashboard.html
++++ b/src/vinted_sniper/web/templates/dashboard.html
+@@ -338,6 +338,7 @@
+     <table>
+       <tr>
+         <th>Name</th><th>Type</th><th>State</th>
++        <th>Language {{ help('The language of alerts, bot replies and health notices sent here. Each destination can differ.') }}</th>
+         <th>Quiet hours {{ help('A daily window when nothing is sent, e.g. 23:00-07:00. Listings found meanwhile are kept and arrive together when it ends, instead of being dropped.') }}</th>
+         <th>Health notices {{ help('Also send warnings here: “Vinted is refusing us”, “a search went quiet”, the Monday summary. Turn it on for at least one destination or you will not hear about problems.') }}</th>
+         <th></th>
+@@ -350,6 +351,15 @@
+           {% if destination.active %}<span class="pill ok">active</span>
+           {% else %}<span class="pill disabled">disabled</span>{% endif %}
+         </td>
++        <td>
++          <form method="post" action="/destinations/{{ destination.id }}/language" class="row inline" style="margin:0">
++            <select name="language" style="width:auto" aria-label="Language for {{ destination.name }}" onchange="this.form.requestSubmit()">
++              {% for code, label in languages.items() %}
++              <option value="{{ code }}" {% if destination.language == code %}selected{% endif %}>{{ label }}</option>
++              {% endfor %}
++            </select>
++          </form>
++        </td>
+         <td>
+           <form method="post" action="/destinations/{{ destination.id }}/quiet" class="row inline" style="margin:0">
+             <input type="text" name="quiet_hours" value="{{ destination.quiet_hours or '' }}" placeholder="23:00-07:00" class="short" aria-label="Quiet hours for {{ destination.name }}">
+@@ -406,6 +416,12 @@
+           <label for="quiet_hours">Quiet hours (optional) {{ help('e.g. 23:00-07:00 in your timezone. Alerts found meanwhile arrive as one digest when it ends.') }}</label>
+           <input type="text" id="quiet_hours" name="quiet_hours" placeholder="23:00-07:00">
+         </div>
++        <div>
++          <label for="language">Language {{ help('Alerts, bot replies and health notices to this destination will be in this language.') }}</label>
++          <select id="language" name="language">
++            {% for code, label in languages.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
++          </select>
++        </div>
+         <div>
+           <label class="row" style="margin-top:1.6rem;color:var(--ink)">
+             <input type="checkbox" name="notify_status" value="1"> Also send health notices here
+diff --git a/tests/integration/test_delivery.py b/tests/integration/test_delivery.py
+index 1e6be1c..aed3702 100644
+--- a/tests/integration/test_delivery.py
++++ b/tests/integration/test_delivery.py
+@@ -546,3 +546,37 @@ async def test_market_context_is_withheld_until_there_is_enough_of_it(repo: Repo
+     query = await a_search(repo)
+     await repo.observe_market(query.id, [listing(1), listing(2)])
+     assert await repo.market_context(query.id, Decimal("11.70"), None) is None
++
++
++async def test_a_destination_language_travels_with_the_pairing(repo: Repo) -> None:
++    destination_id, code = await create_pairing(repo, "Telefón")
++    await repo.set_language(destination_id, "sk")
++    await claim_pairing(repo, code, chat_id=4242, thread_id=None)
++
++    assert await repo.chat_language(4242) == "sk"
++    assert await repo.chat_language(1) is None
++    (destination,) = [d for d in await repo.list_destinations() if d.id == destination_id]
++    assert destination.language == "sk"
++
++
++async def test_status_notices_are_rendered_per_destination_language(
++    repo: Repo, settings: Settings
++) -> None:
++    en = await repo.add_destination(
++        kind="webhook", name="en", config={"url": "https://example.test/en"}, notify_status=True
++    )
++    sk = await repo.add_destination(
++        kind="webhook",
++        name="sk",
++        config={"url": "https://example.test/sk"},
++        notify_status=True,
++        language="sk",
++    )
++    endpoint = FakeEndpoint()
++    dispatcher = make_dispatcher(repo, settings, endpoint)
++
++    await dispatcher.notify_status(lambda t: t("Running."))
++
++    bodies = {json.loads(r.content)["status"] for r in endpoint.requests}
++    assert bodies == {"Running.", "Beží."}
++    assert en != sk
+diff --git a/tests/integration/test_poller.py b/tests/integration/test_poller.py
+index 4730a4d..c8a893b 100644
+--- a/tests/integration/test_poller.py
++++ b/tests/integration/test_poller.py
+@@ -16,6 +16,7 @@ from typing import Any
+ import pytest
+ 
+ from tests.conftest import ScriptedTransport
++from vinted_sniper import i18n
+ from vinted_sniper.config import Settings
+ from vinted_sniper.db.repo import Repo
+ from vinted_sniper.engine import health
+@@ -302,8 +303,11 @@ async def test_the_first_refusal_on_a_site_is_announced_once(
+     clock = FakeClock()
+     announcements: list[str] = []
+ 
+-    async def announce(message: str) -> None:
+-        announcements.append(message)
++    async def announce(message: Any) -> None:
++        # The dispatcher renders per destination language; here, English and Slovak.
++        announcements.append(message(i18n.get("en")) if callable(message) else message)
++        if callable(message):
++            assert "odmieta požiadavky" in message(i18n.get("sk"))
+ 
+     poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock, announce=announce)
+ 
+diff --git a/tests/integration/test_report.py b/tests/integration/test_report.py
+index 9907ab0..cad98a2 100644
+--- a/tests/integration/test_report.py
++++ b/tests/integration/test_report.py
+@@ -5,8 +5,10 @@ from __future__ import annotations
+ import asyncio
+ import time
+ from datetime import datetime
++from typing import Any
+ from zoneinfo import ZoneInfo
+ 
++from vinted_sniper import i18n
+ from vinted_sniper.db.repo import Repo
+ from vinted_sniper.engine.report import WeeklyReport
+ from vinted_sniper.enrichment import EnrichmentIn
+@@ -27,8 +29,8 @@ def test_the_slot_is_the_most_recent_monday_morning() -> None:
+ async def test_the_report_goes_out_once_per_slot(repo: Repo) -> None:
+     sent: list[str] = []
+ 
+-    async def announce(message: str) -> None:
+-        sent.append(message)
++    async def announce(message: Any) -> None:
++        sent.append(message(i18n.get("en")) if callable(message) else message)
+ 
+     clock = {"now": datetime(2026, 9, 7, 9, 0, tzinfo=ZONE)}
+     report = WeeklyReport(
+@@ -69,13 +71,17 @@ async def test_the_report_reads_like_a_summary(repo: Repo) -> None:
+     await repo.record_new_items(query, items, [])
+     await repo.store_enrichment(2, EnrichmentIn(score=91, verdict="Berte."))
+ 
+-    async def announce(_: str) -> None:
++    async def announce(_: Any) -> None:
+         return None
+ 
+     report = WeeklyReport(repo=repo, zone=ZONE, stop=asyncio.Event(), announce=announce)
+     text = await report.compose(now - 3600)
+ 
+-    assert text.startswith("Weekly: 3 new listings across 1 search")
++    assert text.startswith("Weekly: 3 new listings across 1 search, 0 alerts sent, 0 price drops.")
+     assert "1 judged by the agent (avg score 91)" in text
+     assert "Best verdict: 91/100 — Bunda 2 at 45 EUR" in text
+     assert "Busiest: Torrentshell (3)" in text
++
++    slovak = await report.compose(now - 3600, i18n.get("sk"))
++    assert slovak.startswith("Týždeň: 3 nové inzeráty v 1 hľadaní, 0 odoslaných alertov, 0 zliav.")
++    assert "Najlepší verdikt: 91/100 — Bunda 2 za 45 EUR" in slovak
+diff --git a/tests/integration/test_watchdog_and_storage.py b/tests/integration/test_watchdog_and_storage.py
+index fdfda39..170571a 100644
+--- a/tests/integration/test_watchdog_and_storage.py
++++ b/tests/integration/test_watchdog_and_storage.py
+@@ -7,6 +7,7 @@ import time
+ from typing import Any
+ 
+ from tests.conftest import ScriptedTransport
++from vinted_sniper import i18n
+ from vinted_sniper.config import Settings
+ from vinted_sniper.db.connection import Database
+ from vinted_sniper.db.repo import Repo
+@@ -39,8 +40,8 @@ def make_watchdog(
+ ) -> tuple[Watchdog, list[str]]:
+     announcements: list[str] = []
+ 
+-    async def announce(message: str) -> None:
+-        announcements.append(message)
++    async def announce(message: Any) -> None:
++        announcements.append(message(i18n.get("en")) if callable(message) else message)
+ 
+     watchdog = Watchdog(
+         repo=repo,
+diff --git a/tests/unit/test_i18n.py b/tests/unit/test_i18n.py
+new file mode 100644
+index 0000000..dd659ff
+--- /dev/null
++++ b/tests/unit/test_i18n.py
+@@ -0,0 +1,72 @@
++"""Messages in the reader's language: catalogs stay in step with the code, plurals bend."""
++
++from __future__ import annotations
++
++import json
++import re
++from pathlib import Path
++
++import pytest
++
++from vinted_sniper import i18n
++
++SRC = Path(__file__).resolve().parents[2] / "src" / "vinted_sniper"
++CATALOG = json.loads((i18n.LOCALES_DIR / "sk.json").read_text(encoding="utf-8"))
++
++_PLACEHOLDER = re.compile(r"\{(\w+)\}")
++MIN_CHUNK = 6
++
++
++def test_english_is_the_identity() -> None:
++    t = i18n.get("en")
++    assert t("Open listing") == "Open listing"
++    assert t("Seller: {seller}", seller="bob") == "Seller: bob"
++    assert t.ngettext("{n} more matches", "{n} more matches", 1) == "1 more matches"
++
++
++def test_unknown_languages_fall_back_to_english() -> None:
++    assert i18n.get("xx").language == "en"
++    assert i18n.get(None).language == "en"
++    assert i18n.normalise("SK") == "sk"
++    assert i18n.normalise("klingon") == "en"
++
++
++@pytest.mark.parametrize(
++    ("n", "expected"),
++    [
++        (1, "1 nový inzerát"),
++        (2, "2 nové inzeráty"),
++        (4, "4 nové inzeráty"),
++        (5, "5 nových inzerátov"),
++        (0, "0 nových inzerátov"),
++    ],
++)
++def test_slovak_has_three_plural_forms(n: int, expected: str) -> None:
++    assert i18n.get("sk").ngettext("{n} new listing", "{n} new listings", n) == expected
++
++
++def test_a_missing_slovak_string_falls_back_to_english_rather_than_blank() -> None:
++    assert i18n.get("sk")("Something nobody translated") == "Something nobody translated"
++
++
++@pytest.mark.parametrize("msgid", sorted(CATALOG))
++def test_every_slovak_string_keeps_its_placeholders(msgid: str) -> None:
++    value = CATALOG[msgid]
++    forms = value if isinstance(value, list) else [value]
++    wanted = set(_PLACEHOLDER.findall(msgid)) | ({"n"} if isinstance(value, list) else set())
++    for form in forms:
++        assert set(_PLACEHOLDER.findall(form)) <= wanted, f"{msgid!r} → {form!r}"
++
++
++@pytest.mark.parametrize("msgid", sorted(CATALOG))
++def test_every_slovak_string_is_still_used_by_the_code(msgid: str) -> None:
++    """A translation for a string that no longer exists is dead weight and a sign the
++    English changed without the catalog following."""
++    first_line = msgid.split("\n", maxsplit=1)[0]
++    chunks = [c.strip() for c in _PLACEHOLDER.split(first_line) if len(c.strip()) >= MIN_CHUNK]
++    if not chunks:
++        pytest.skip("too short to locate")
++    # The code may wrap a long string across lines, so a short chunk is enough.
++    needle = max(chunks, key=len)[:24].rstrip(" (")
++    haystack = "\n".join(p.read_text(encoding="utf-8") for p in SRC.rglob("*.py"))
++    assert needle in haystack, f"{msgid!r} is translated but not found in the code"
+diff --git a/tests/unit/test_senders.py b/tests/unit/test_senders.py
+index c667ed3..7f681c7 100644
+--- a/tests/unit/test_senders.py
++++ b/tests/unit/test_senders.py
+@@ -440,3 +440,39 @@ async def test_telegram_headlines_a_hot_deal_and_mutes_a_dull_one() -> None:
+     assert second["disable_notification"] is True
+     assert "not the model searched for" in second["text"]
+     assert "risk: stock photos only" in second["text"]
++
++
++async def test_a_slovak_destination_gets_a_slovak_alert() -> None:
++    recorder = Recorder(httpx.Response(200, json={"ok": True}))
++    sender = TelegramSender(
++        {"chat_id": "123"},
++        bot_token="t",
++        client=recorder.client(),
++        bucket=fast_bucket(),
++        language="sk",
++    )
++    hot = Enrichment(
++        score=91,
++        model="Nike Air Max 90",
++        retail_price=Decimal("140"),
++        retail_source="nike.com",
++        matches_query=True,
++        risk=None,
++        verdict="Berte.",
++        enriched_at=1,
++    )
++    pending = replace(notification(1), enrichment=hot, market_percentile=12, market_n=312)
++
++    await sender.send([pending])
++
++    payload = recorder.payload(0)
++    text = payload["text"]
++    assert text.startswith("🔥 <b>TOP PONUKA</b> · skóre 91/100 · v obchode ~140 EUR")
++    assert "s ochranou kupujúceho" in text
++    assert "lacnejší ako 88 % z 312 podobných inzerátov" in text
++    assert "Predajca: sneakerfan" in text
++    assert "Vyzerá to na: Nike Air Max 90" in text
++    buttons = [b["text"] for row in payload["reply_markup"]["inline_keyboard"] for b in row]
++    assert "Otvoriť inzerát" in buttons
++    assert "🚫 Preskočiť predajcu" in buttons
++    assert "👍 Trafil sa" in buttons
+-- 
+2.43.0
+

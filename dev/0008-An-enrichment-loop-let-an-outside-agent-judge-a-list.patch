@@ -1,0 +1,953 @@
+From b470f3deb0084881f211dba4ebffbb58417ff2ce Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:14:06 +0000
+Subject: [PATCH 08/25] An enrichment loop: let an outside agent judge a
+ listing before it is sent
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The app knows what the catalog says. Whether the jacket in the photos is the
+model that was searched for, what it costs new, and whether the price is a
+bargain or a warning sign are questions for something that can look at
+pictures and search the web — an n8n workflow with an LLM, say — and that
+should not live inside a polling bot.
+
+So: the webhook destination fires at once and its payload now carries an
+"enrichment_url" for each listing (plus every photo URL and the seller's
+review count); chat notifications are held for ENRICHMENT_WAIT_S; a verdict
+posted to that URL — deal score, identified model, retail price, whether it
+matches the search, authenticity risk, one line for a human — is stored on
+the listing and releases the held alert immediately, carrying the verdict.
+If nothing arrives, the alert goes out as before: the agent's silence costs
+a delay, never an alert.
+
+Telegram headlines a hot deal, mutes a dull one (no notification sound below
+ENRICHMENT_SILENT_BELOW, or when the agent says it is not the product
+searched for), and appends the model and verdict. Discord gets a field, the
+dashboard a score badge. The callback accepts the dashboard's token as a
+bearer, so a machine can use the same secret a browser does. The loop is
+off by default; docs/enrichment.md is the contract for whoever builds the
+agent side.
+---
+ .env.example                                  |   7 ++
+ README.md                                     |   1 +
+ docs/configuration.md                         |   3 +
+ docs/enrichment.md                            |  99 +++++++++++++++++
+ src/vinted_sniper/config.py                   |  24 ++++
+ .../db/migrations/0007_enrichment.sql         |  11 ++
+ src/vinted_sniper/db/repo.py                  |  56 +++++++++-
+ src/vinted_sniper/deliver/discord.py          |  28 ++++-
+ src/vinted_sniper/deliver/dispatcher.py       |  10 +-
+ src/vinted_sniper/deliver/telegram.py         |  31 +++++-
+ src/vinted_sniper/deliver/webhook.py          |  14 ++-
+ src/vinted_sniper/engine/poller.py            |   3 +
+ src/vinted_sniper/enrichment.py               | 104 ++++++++++++++++++
+ src/vinted_sniper/web/server.py               |  24 +++-
+ src/vinted_sniper/web/templates/base.html     |   3 +
+ .../web/templates/dashboard.html              |   4 +
+ tests/integration/test_delivery.py            |  52 +++++++++
+ tests/unit/test_senders.py                    |  39 +++++++
+ 18 files changed, 499 insertions(+), 14 deletions(-)
+ create mode 100644 docs/enrichment.md
+ create mode 100644 src/vinted_sniper/db/migrations/0007_enrichment.sql
+ create mode 100644 src/vinted_sniper/enrichment.py
+
+diff --git a/.env.example b/.env.example
+index 8a1ec6a..133f78f 100644
+--- a/.env.example
++++ b/.env.example
+@@ -78,6 +78,13 @@
+ # VINTED_SNIPER_REQUEST_TIMEOUT_S=15
+ 
+ 
++# --- Letting an outside agent judge listings (see docs/enrichment.md) -----------------
++# Hold chat alerts this long so an n8n/LLM agent fed by a webhook destination can post
++# its verdict first. 0 = off.
++# VINTED_SNIPER_ENRICHMENT_WAIT_S=0
++# VINTED_SNIPER_ENRICHMENT_HIGHLIGHT_SCORE=75
++# VINTED_SNIPER_ENRICHMENT_SILENT_BELOW=40
++
+ # --- Noticing when something is wrong -------------------------------------------------
+ # How many checks with no new listing before a search is treated as stuck. It is only
+ # treated as stuck if other searches on the same site are still finding things.
+diff --git a/README.md b/README.md
+index 8398e91..fedd7ec 100644
+--- a/README.md
++++ b/README.md
+@@ -48,6 +48,7 @@ Raspberry Pi, NAS or cheap VPS: see [the self-hosting guide](docs/self-hosting.m
+ ## Features
+ 
+ - **Filters on what you actually pay**, buyer protection included. Vinted's own price filter ignores it.
++- **Room for a brain**: hand each listing to your own agent (n8n + an LLM, say) for a verdict — is it the real model, what does it cost new, how good is the deal — and get it woven into the alert. See [docs/enrichment.md](docs/enrichment.md).
+ - **Price drops**: a listing you already saw comes back when its price falls, at no extra requests.
+ - **Quiet hours per destination**: nothing at 03:00, a digest of the night at 07:00.
+ - **Filters Vinted's search cannot express**: words the title must contain, a title regex, a floor on seller rating and review count, and sellers to skip.
+diff --git a/docs/configuration.md b/docs/configuration.md
+index af8739b..3b6e0f9 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -53,6 +53,9 @@ was found, so you can see the real delay yourself.
+ |---|---|---|
+ | `WATCHDOG_STALE_CYCLES` | `10` | Checks with no new listing before a search is treated as stuck — but only if other searches on the same site are still finding things. |
+ | `WATCHDOG_ACTION` | `rotate` | `warn` logs it; `rotate` also starts a fresh session. |
++| `ENRICHMENT_WAIT_S` | `0` | Hold chat notifications this many seconds so an outside agent can post a verdict to `/api/items/{id}/enrichment` first. Webhook destinations fire at once regardless. `0` turns the loop off. See [enrichment.md](enrichment.md). |
++| `ENRICHMENT_HIGHLIGHT_SCORE` | `75` | Deal scores at or above this are headlined as a hot deal. |
++| `ENRICHMENT_SILENT_BELOW` | `40` | Deal scores below this, or a verdict that the listing is not what was searched for, are delivered without a notification sound (Telegram). |
+ | `OUTBOX_EXPIRY_MINUTES` | `60` | Discard notifications that could not be delivered within this window. |
+ 
+ ### Telegram
+diff --git a/docs/enrichment.md b/docs/enrichment.md
+new file mode 100644
+index 0000000..f445c89
+--- /dev/null
++++ b/docs/enrichment.md
+@@ -0,0 +1,99 @@
++# Enrichment: letting an agent judge a listing before you see it
++
++vinted-sniper knows what the catalog says — title, price, photos, seller. It does not know
++whether the jacket in the photos is the model you searched for, what it costs new, or
++whether the price is a bargain or a warning sign. Those are questions for something that
++can look at pictures and search the web. This page describes the loop that lets you plug
++one in — an n8n workflow with an LLM agent is the reference setup — without moving
++delivery out of vinted-sniper: the alert still arrives in Telegram with its buttons, quiet
++hours and digests, just with a verdict woven in.
++
++## How the loop works
++
++```
++poller finds a listing
++  ├─ webhook destination      → fires at once, payload carries "enrichment_url"
++  └─ chat destinations        → held for ENRICHMENT_WAIT_S seconds
++
++agent looks at photos, identifies the product, checks the retail price, scores the deal
++  └─ POST enrichment_url      → stored on the listing; the held alert is released now
++
++nothing posted in time?       → the alert goes out as it always did
++```
++
++Silence from the agent costs a delay, never an alert. If the verdict arrives after the
++alert went out, it is stored (the dashboard shows it) but not re-sent.
++
++## Setting it up
++
++1. Add a webhook destination pointing at your agent (n8n: a Webhook node's production URL).
++   Route the searches you want judged to it, alongside your Telegram destination.
++2. Set `VINTED_SNIPER_ENRICHMENT_WAIT_S=90` (or however long your agent usually takes) and
++   restart. Set `VINTED_SNIPER_WEB_AUTH_TOKEN` if it is not already — the callback needs it.
++3. Have the agent `POST` its verdict to `enrichment_url` with
++   `Authorization: Bearer <WEB_AUTH_TOKEN>`.
++
++## What the agent receives
++
++The webhook payload from [configuration.md](configuration.md), with these fields the agent
++cares about:
++
++| Field | Meaning |
++|---|---|
++| `search`, `search_id` | The search's name and id. The name is usually the text searched for. |
++| `items[].title`, `brand`, `size`, `condition` | What the seller wrote. |
++| `items[].price`, `total_price`, `currency` | Asking price and what the buyer actually pays. |
++| `items[].photo_urls` | Every photo, full size. Two or three are usually enough to identify a product. |
++| `items[].seller`, `seller_rating`, `seller_reviews` | Who is selling, 0–1 rating, review count. |
++| `items[].enrichment_url` | Where to post the verdict. `null` while the dashboard is off. |
++
++## What the agent posts back
++
++`POST {enrichment_url}` with a JSON body. Every field is optional; a partial verdict is
++better than none.
++
++```json
++{
++  "score": 87,
++  "model": "Patagonia Torrentshell 3L Jacket (men's, 2022)",
++  "retail_price": 160,
++  "retail_source": "patagonia.com",
++  "matches_query": true,
++  "risk": null,
++  "verdict": "Genuine 3L model, current season, ~60% under retail for 'very good' condition."
++}
++```
++
++| Field | Type | Meaning |
++|---|---|---|
++| `score` | 0–100 | How good a deal this is, all things considered. |
++| `model` | text | What product this actually is. |
++| `retail_price` | number | What it costs new, in the listing's currency. |
++| `retail_source` | text | Where that price came from. |
++| `matches_query` | bool | Is it what the search was after, or a lookalike that mentions it? |
++| `risk` | text | Authenticity worries: stock photos, missing labels, a price far too low, a seller with no history. |
++| `verdict` | text | One sentence for a human. |
++
++Responses: `200 {"ok": true}`, `401` for a missing or wrong token, `404` for a listing that
++is no longer stored (pruned after `ITEM_RETENTION_DAYS`), `422` for a body that does not
++fit.
++
++## How the verdict shows
++
++**Telegram.** A top line: `🔥 HOT DEAL · deal 87/100 · retail ~160 EUR · -60%` when the score
++is at least `ENRICHMENT_HIGHLIGHT_SCORE`; `🤖 …` otherwise; `💤 …` and no notification sound
++when the score is below `ENRICHMENT_SILENT_BELOW` or `matches_query` is false. Then the
++listing as usual, then "Looks like: …" and the verdict in italics.
++
++**Discord.** A "🤖 Verdict" field on the embed.
++
++**Dashboard.** A score badge on the listing card, the verdict as its tooltip.
++
++## Scoring guidance for the agent
++
++The score is yours to define, but the one the reference workflow uses weighs, in order:
++discount against retail (total price, buyer protection included); whether it is the product
++searched for at all; condition; seller history; and authenticity risk, which caps the score
++rather than merely lowering it — a suspiciously cheap "genuine" item is a 30, not an 85.
++A reverse image search is rarely needed: brand, title and one clear photo identify most
++products, and a text search for the retail price is a fraction of the cost.
+diff --git a/src/vinted_sniper/config.py b/src/vinted_sniper/config.py
+index f0e7b42..38234e7 100644
+--- a/src/vinted_sniper/config.py
++++ b/src/vinted_sniper/config.py
+@@ -131,6 +131,30 @@ class Settings(BaseSettings):
+         description="What to do about a stale search: log a warning, or also force a new session.",
+     )
+ 
++    # --- Enrichment ----------------------------------------------------------------
++    enrichment_wait_s: int = Field(
++        default=0,
++        ge=0,
++        le=600,
++        description="Hold a listing's chat notifications this long so an outside agent "
++        "(fed by a webhook destination) can post a verdict to /api/items/{id}/enrichment "
++        "first. 0 turns the loop off. Webhook destinations are never held.",
++    )
++    enrichment_highlight_score: int = Field(
++        default=75,
++        ge=0,
++        le=100,
++        description="A deal score at or above this is headlined as a hot deal.",
++    )
++    enrichment_silent_below: int = Field(
++        default=40,
++        ge=0,
++        le=100,
++        description="A deal score below this, or a verdict that the listing is not the "
++        "product searched for, is delivered without a notification sound where the "
++        "platform allows it (Telegram).",
++    )
++
+     # --- Delivery ------------------------------------------------------------------
+     outbox_expiry_minutes: int = Field(
+         default=60,
+diff --git a/src/vinted_sniper/db/migrations/0007_enrichment.sql b/src/vinted_sniper/db/migrations/0007_enrichment.sql
+new file mode 100644
+index 0000000..9ff3da9
+--- /dev/null
++++ b/src/vinted_sniper/db/migrations/0007_enrichment.sql
+@@ -0,0 +1,11 @@
++-- What an outside brain (an n8n agent, say) concluded about a listing: which product it
++-- really is, what it costs new, whether it is what the search was after, how good the
++-- deal is. Filled in through POST /api/items/{id}/enrichment; NULL until then.
++ALTER TABLE items ADD COLUMN enrich_score         INTEGER;
++ALTER TABLE items ADD COLUMN enrich_model         TEXT;
++ALTER TABLE items ADD COLUMN enrich_retail_price  REAL;
++ALTER TABLE items ADD COLUMN enrich_retail_source TEXT;
++ALTER TABLE items ADD COLUMN enrich_matches_query INTEGER;
++ALTER TABLE items ADD COLUMN enrich_risk          TEXT;
++ALTER TABLE items ADD COLUMN enrich_verdict       TEXT;
++ALTER TABLE items ADD COLUMN enriched_at          INTEGER;
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index 2299c09..7ee6e40 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -15,6 +15,7 @@ from typing import Any
+ import aiosqlite
+ 
+ from vinted_sniper.db.connection import Database
++from vinted_sniper.enrichment import Enrichment, EnrichmentIn
+ from vinted_sniper.vinted.models import Item
+ 
+ # --- Row types ---------------------------------------------------------------------
+@@ -99,6 +100,7 @@ class PendingNotification:
+     # "new" or "price_drop"; for a drop, what the total price was before.
+     kind: str = "new"
+     previous_price: Decimal | None = None
++    enrichment: Enrichment | None = None
+ 
+     @property
+     def is_price_drop(self) -> bool:
+@@ -492,9 +494,15 @@ class Repo:
+         *,
+         notify: list[Item] | None = None,
+         keep_raw: bool = False,
++        hold_s: int = 0,
++        never_hold: set[int] | None = None,
+     ) -> int:
+         """Store listings and queue their notifications in one transaction.
+ 
++        `hold_s` delays delivery to every destination except those in `never_hold`,
++        which is how the enrichment loop gets a head start: the webhook fires now, the
++        chat message waits for its verdict (or for the hold to run out).
++
+         Doing both at once is what makes a crash safe: either a listing is recorded and its
+         notifications are queued, or neither happened and the next check finds it again.
+ 
+@@ -546,17 +554,62 @@ class Repo:
+             )
+ 
+             if to_announce and destination_ids:
++                exempt = never_hold or set()
+                 await conn.executemany(
+                     "INSERT OR IGNORE INTO outbox (item_id, query_id, destination_id, "
+                     "next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?)",
+                     [
+-                        (item.item_id, query.id, destination_id, now, now)
++                        (
++                            item.item_id,
++                            query.id,
++                            destination_id,
++                            now if destination_id in exempt else now + hold_s,
++                            now,
++                        )
+                         for item in to_announce
+                         for destination_id in destination_ids
+                     ],
+                 )
+         return len(items)
+ 
++    async def destination_ids_of_kind(self, kind: str) -> set[int]:
++        rows = await self._db.fetch_all(
++            "SELECT id FROM destinations WHERE kind = ? AND active = 1", (kind,)
++        )
++        return {row["id"] for row in rows}
++
++    async def store_enrichment(self, item_id: int, verdict: EnrichmentIn) -> bool:
++        """Record an outside verdict and release any held notification for the listing.
++
++        Returns False if the listing is unknown (pruned, or never recorded).
++        """
++        now = int(time.time())
++        async with self._db.transaction() as conn:
++            cursor = await conn.execute(
++                "UPDATE items SET enrich_score = ?, enrich_model = ?, enrich_retail_price = ?, "
++                "enrich_retail_source = ?, enrich_matches_query = ?, enrich_risk = ?, "
++                "enrich_verdict = ?, enriched_at = ? WHERE item_id = ?",
++                (
++                    verdict.score,
++                    verdict.model,
++                    float(verdict.retail_price) if verdict.retail_price is not None else None,
++                    verdict.retail_source,
++                    None if verdict.matches_query is None else int(verdict.matches_query),
++                    verdict.risk,
++                    verdict.verdict,
++                    now,
++                    item_id,
++                ),
++            )
++            if cursor.rowcount == 0:
++                return False
++            await conn.execute(
++                "UPDATE outbox SET next_attempt_at = ? "
++                "WHERE item_id = ? AND status = 'pending' AND next_attempt_at > ?",
++                (now, item_id, now),
++            )
++        return True
++
+     async def current_prices(self, item_ids: list[int]) -> dict[int, Decimal | None]:
+         """What we last recorded each listing costing, buyer protection included."""
+         if not item_ids:
+@@ -693,6 +746,7 @@ class Repo:
+                 previous_price=(
+                     Decimal(str(row["previous_price"])) if row["kind"] == "price_drop" else None
+                 ),
++                enrichment=Enrichment.from_row(row),
+             )
+             for row in rows
+         ]
+diff --git a/src/vinted_sniper/deliver/discord.py b/src/vinted_sniper/deliver/discord.py
+index ff7bd01..44e9117 100644
+--- a/src/vinted_sniper/deliver/discord.py
++++ b/src/vinted_sniper/deliver/discord.py
+@@ -130,12 +130,13 @@ class DiscordSender:
+         fields: list[dict[str, Any]] = []
+         if item.price is not None:
+             fields.append({"name": "Price", "value": _price_value(item), "inline": True})
+-        if item.size:
+-            fields.append({"name": "Size", "value": item.size[:1024], "inline": True})
+-        if item.condition:
+-            fields.append({"name": "Condition", "value": item.condition[:1024], "inline": True})
+-        if item.brand:
+-            fields.append({"name": "Brand", "value": item.brand[:1024], "inline": True})
++        for name, value in (
++            ("Size", item.size),
++            ("Condition", item.condition),
++            ("Brand", item.brand),
++        ):
++            if value:
++                fields.append({"name": name, "value": value[:1024], "inline": True})
+         fields.append({"name": "Location", "value": _location(item.tld), "inline": True})
+         if item.seller_rating is not None:
+             fields.append({"name": "Seller rating", "value": _rating(item), "inline": True})
+@@ -145,6 +146,8 @@ class DiscordSender:
+             )
+         # Discord renders this in the reader's own timezone, as "2 minutes ago".
+         fields.append({"name": "Detected", "value": f"<t:{detected}:R>", "inline": True})
++        if (field := _verdict_field(notification)) is not None:
++            fields.append(field)
+ 
+         embed: dict[str, Any] = {
+             "author": {"name": f"{notification.headline()} • {notification.query_name}"[:256]},
+@@ -236,6 +239,19 @@ def _location(tld: str) -> str:
+     return f"{flag} {iso}"
+ 
+ 
++def _verdict_field(notification: PendingNotification) -> dict[str, Any] | None:
++    verdict = notification.enrichment
++    if verdict is None:
++        return None
++    item = notification.item
++    payable = item.total_price if item.total_price is not None else item.price
++    summary, details = verdict.lines(payable, item.currency)
++    text = "\n".join(part for part in [summary, *details] if part)
++    if not text:
++        return None
++    return {"name": "🤖 Verdict", "value": text[:1024], "inline": False}
++
++
+ def _rating(item: Item) -> str:
+     """Vinted's 0..1 reputation as the five-star figure users know, with its review count."""
+     stars = round((item.seller_rating or 0.0) * 50) / 10
+diff --git a/src/vinted_sniper/deliver/dispatcher.py b/src/vinted_sniper/deliver/dispatcher.py
+index 743b971..4d892aa 100644
+--- a/src/vinted_sniper/deliver/dispatcher.py
++++ b/src/vinted_sniper/deliver/dispatcher.py
+@@ -260,10 +260,16 @@ class Dispatcher:
+                         "is not set"
+                     )
+                 return TelegramSender(
+-                    config, bot_token=token.get_secret_value(), client=self._client
++                    config,
++                    bot_token=token.get_secret_value(),
++                    client=self._client,
++                    highlight_score=self._settings.enrichment_highlight_score,
++                    silent_below=self._settings.enrichment_silent_below,
+                 )
+             case "webhook":
+-                return WebhookSender(config, client=self._client)
++                return WebhookSender(
++                    config, client=self._client, callback_base=self._settings.dashboard_url
++                )
+             case "ntfy":
+                 return NtfySender(config, client=self._client)
+             case unknown:
+diff --git a/src/vinted_sniper/deliver/telegram.py b/src/vinted_sniper/deliver/telegram.py
+index 80b0ea3..cc1c55f 100644
+--- a/src/vinted_sniper/deliver/telegram.py
++++ b/src/vinted_sniper/deliver/telegram.py
+@@ -19,6 +19,7 @@ import httpx
+ from vinted_sniper.db.repo import PendingNotification
+ from vinted_sniper.deliver.base import SendResult, require
+ from vinted_sniper.deliver.ratelimit import TokenBucket
++from vinted_sniper.enrichment import Enrichment
+ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted.models import Item
+ 
+@@ -55,6 +56,8 @@ class TelegramSender:
+         config: dict[str, Any],
+         *,
+         bot_token: str,
++        highlight_score: int = 75,
++        silent_below: int = 40,
+         client: httpx.AsyncClient | None = None,
+         bucket: TokenBucket | None = None,
+     ) -> None:
+@@ -66,6 +69,8 @@ class TelegramSender:
+         self._client = client or httpx.AsyncClient(timeout=20.0)
+         self._owns_client = client is None
+         self._bucket = bucket or TokenBucket(MESSAGES_PER_S, capacity=2)
++        self._highlight_score = highlight_score
++        self._silent_below = silent_below
+ 
+     @property
+     def max_batch(self) -> int:
+@@ -86,6 +91,7 @@ class TelegramSender:
+                     notification.item,
+                     query_id=notification.query_id,
+                     headline=notification.headline() if notification.is_price_drop else None,
++                    enrichment=notification.enrichment,
+                 ),
+                 [notification.outbox_id],
+             )
+@@ -132,11 +138,19 @@ class TelegramSender:
+         return payload
+ 
+     def _listing_payload(
+-        self, item: Item, *, query_id: int | None = None, headline: str | None = None
++        self,
++        item: Item,
++        *,
++        query_id: int | None = None,
++        headline: str | None = None,
++        enrichment: Enrichment | None = None,
+     ) -> dict[str, Any]:
+         lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line())]
+         if headline:
+             lines.insert(0, f"📉 <b>{html.escape(headline)}</b>")
++        silent = enrichment is not None and enrichment.is_dull(self._silent_below)
++        if enrichment is not None:
++            self._weave_verdict(lines, item, enrichment, silent=silent)
+ 
+         details = " · ".join(
+             html.escape(part) for part in (item.brand, item.size, item.condition) if part
+@@ -168,6 +182,10 @@ class TelegramSender:
+             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
+             "reply_markup": {"inline_keyboard": keyboard},
+         }
++        if silent:
++            # Still delivered, still in the chat, just no buzz for something the outside
++            # brain rated as not worth one.
++            payload["disable_notification"] = True
+         if item.photo_url:
+             payload["link_preview_options"] = {
+                 "url": item.photo_url,
+@@ -178,6 +196,17 @@ class TelegramSender:
+             payload["link_preview_options"] = {"is_disabled": True}
+         return payload
+ 
++    def _weave_verdict(
++        self, lines: list[str], item: Item, verdict: Enrichment, *, silent: bool
++    ) -> None:
++        payable = item.total_price if item.total_price is not None else item.price
++        summary, details = verdict.lines(payable, item.currency)
++        if summary:
++            hot = verdict.is_hot(self._highlight_score)
++            marker = "🔥 <b>HOT DEAL</b> · " if hot else ("💤 " if silent else "🤖 ")
++            lines.insert(0, f"{marker}{html.escape(summary)}")
++        lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
++
+     def _digest_payload(self, batch: list[PendingNotification]) -> dict[str, Any]:
+         lines = [f"<b>{len(batch)} more matches</b>"]
+         for index, notification in enumerate(batch, start=1):
+diff --git a/src/vinted_sniper/deliver/webhook.py b/src/vinted_sniper/deliver/webhook.py
+index f161e40..4a120f5 100644
+--- a/src/vinted_sniper/deliver/webhook.py
++++ b/src/vinted_sniper/deliver/webhook.py
+@@ -30,9 +30,11 @@ class WebhookSender:
+         *,
+         client: httpx.AsyncClient | None = None,
+         bucket: TokenBucket | None = None,
++        callback_base: str | None = None,
+     ) -> None:
+         self._url = require(config, "url", self.kind)
+         self._headers = config.get("headers") or {}
++        self._callback_base = callback_base.rstrip("/") if callback_base else None
+         self._client = client or httpx.AsyncClient(timeout=20.0)
+         self._owns_client = client is None
+         self._bucket = bucket or TokenBucket(2.0, capacity=4)
+@@ -48,7 +50,8 @@ class WebhookSender:
+         payload = {
+             "version": PAYLOAD_VERSION,
+             "search": batch[0].query_name,
+-            "items": [_item_json(n) for n in batch],
++            "search_id": batch[0].query_id,
++            "items": [_item_json(n, self._callback_base) for n in batch],
+         }
+         await self._bucket.acquire()
+         try:
+@@ -78,9 +81,14 @@ class WebhookSender:
+             await self._client.aclose()
+ 
+ 
+-def _item_json(notification: PendingNotification) -> dict[str, Any]:
++def _item_json(notification: PendingNotification, callback_base: str | None) -> dict[str, Any]:
+     item = notification.item
+     return {
++        # Additive: where an agent may post what it concluded about this listing (see
++        # docs/enrichment.md). Absent when the dashboard is off.
++        "enrichment_url": (
++            f"{callback_base}/api/items/{item.item_id}/enrichment" if callback_base else None
++        ),
+         # Additive since version 1: "new" or "price_drop", and for a drop the total price
+         # it fell from. Consumers that ignore unknown keys see no change.
+         "event": notification.kind,
+@@ -98,8 +106,10 @@ def _item_json(notification: PendingNotification) -> dict[str, Any]:
+         "total_price": str(item.total_price) if item.total_price is not None else None,
+         "currency": item.currency,
+         "photo_url": item.photo_url,
++        "photo_urls": list(item.photo_urls),
+         "listed_at": item.listed_at.isoformat() if item.listed_at else None,
+         "seller": item.seller_login,
+         "seller_rating": item.seller_rating,
++        "seller_reviews": item.seller_feedback_count,
+         "links": {"message_seller": item.message_url, "buy": item.buy_url},
+     }
+diff --git a/src/vinted_sniper/engine/poller.py b/src/vinted_sniper/engine/poller.py
+index bb4a024..c993a43 100644
+--- a/src/vinted_sniper/engine/poller.py
++++ b/src/vinted_sniper/engine/poller.py
+@@ -166,12 +166,15 @@ class Poller:
+ 
+         destination_ids = await self._repo.destination_ids_for_query(self.query.id)
+         if selection.to_record:
++            hold_s = self._settings.enrichment_wait_s
+             await self._repo.record_new_items(
+                 self.query,
+                 selection.to_record,
+                 destination_ids,
+                 notify=selection.to_notify,
+                 keep_raw=self._settings.keep_raw_json,
++                hold_s=hold_s,
++                never_hold=await self._repo.destination_ids_of_kind("webhook") if hold_s else None,
+             )
+             if selection.to_notify and self._work_available is not None:
+                 self._work_available.set()
+diff --git a/src/vinted_sniper/enrichment.py b/src/vinted_sniper/enrichment.py
+new file mode 100644
+index 0000000..555e6e5
+--- /dev/null
++++ b/src/vinted_sniper/enrichment.py
+@@ -0,0 +1,104 @@
++"""Letting something smarter than a regex look at a listing before it is sent.
++
++The app itself knows only what the catalog says: a title, a price, a few photos, a seller.
++Whether the jacket in the photos is the model the search was after, what it costs new, and
++whether the price is a bargain or a warning sign are questions for a model that can look
++at pictures and search the web — which is not this app's job, and should not be.
++
++So the loop is: a listing's webhook goes out at once with a callback address; the plain
++notification is held for a short while; whatever posts a verdict to the callback in time
++gets it woven into the message (a deal score, the retail price, a one-line verdict), and
++if nothing arrives the message goes out as it always did. Silence from the outside brain
++costs a delay, never an alert.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from decimal import Decimal
++from typing import Any
++
++from pydantic import BaseModel, Field
++
++
++class EnrichmentIn(BaseModel):
++    """What the callback accepts. Everything optional: a partial verdict beats none."""
++
++    score: int | None = Field(default=None, ge=0, le=100, description="Deal score, 0-100.")
++    model: str | None = Field(default=None, max_length=200, description="Identified product.")
++    retail_price: Decimal | None = Field(default=None, ge=0)
++    retail_source: str | None = Field(default=None, max_length=500)
++    matches_query: bool | None = Field(
++        default=None, description="Is it what the search was actually after?"
++    )
++    risk: str | None = Field(default=None, max_length=300, description="Authenticity worries.")
++    verdict: str | None = Field(default=None, max_length=500, description="One line for a human.")
++
++
++@dataclass(frozen=True, slots=True)
++class Enrichment:
++    """What was stored for a listing, as the senders read it."""
++
++    score: int | None
++    model: str | None
++    retail_price: Decimal | None
++    retail_source: str | None
++    matches_query: bool | None
++    risk: str | None
++    verdict: str | None
++    enriched_at: int
++
++    @classmethod
++    def from_row(cls, row: Any) -> Enrichment | None:
++        if row["enriched_at"] is None:
++            return None
++        retail = row["enrich_retail_price"]
++        matches = row["enrich_matches_query"]
++        return cls(
++            score=row["enrich_score"],
++            model=row["enrich_model"],
++            retail_price=Decimal(str(retail)) if retail is not None else None,
++            retail_source=row["enrich_retail_source"],
++            matches_query=bool(matches) if matches is not None else None,
++            risk=row["enrich_risk"],
++            verdict=row["enrich_verdict"],
++            enriched_at=int(row["enriched_at"]),
++        )
++
++    def discount_percent(self, payable: Decimal | None) -> int | None:
++        if self.retail_price is None or payable is None or self.retail_price <= 0:
++            return None
++        return round((self.retail_price - payable) / self.retail_price * 100)
++
++    def is_hot(self, threshold: int) -> bool:
++        return self.score is not None and self.score >= threshold
++
++    def is_dull(self, threshold: int) -> bool:
++        """Not worth a buzz: scored below the line, or not the product searched for."""
++        return (self.score is not None and self.score < threshold) or self.matches_query is False
++
++    def lines(self, payable: Decimal | None, currency: str | None) -> tuple[str, list[str]]:
++        """The top line (may be empty) and the detail lines a message appends."""
++        details: list[str] = []
++        if self.model:
++            details.append(f"Looks like: {self.model}")
++        if self.verdict:
++            details.append(self.verdict)
++        return self.summary(payable, currency), details
++
++    def summary(self, payable: Decimal | None, currency: str | None) -> str:
++        """The compact line that goes at the top of a message."""
++        parts: list[str] = []
++        if self.score is not None:
++            parts.append(f"deal {self.score}/100")
++        if self.retail_price is not None:
++            unit = f" {currency}" if currency else ""
++            piece = f"retail ~{self.retail_price:.0f}{unit}"
++            if (off := self.discount_percent(payable)) is not None:
++                piece += f" · -{off}%"
++            parts.append(piece)
++        if self.matches_query is False:
++            parts.append("not the model searched for")
++        if self.risk:
++            parts.append(f"risk: {self.risk}")
++        return " · ".join(parts)
+diff --git a/src/vinted_sniper/web/server.py b/src/vinted_sniper/web/server.py
+index c5e3964..06fa821 100644
+--- a/src/vinted_sniper/web/server.py
++++ b/src/vinted_sniper/web/server.py
+@@ -29,7 +29,7 @@ from typing import Annotated, Any
+ from xml.sax.saxutils import escape as xml_escape
+ 
+ import uvicorn
+-from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request, Response
++from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Request, Response
+ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+ from fastapi.templating import Jinja2Templates
+ from pydantic import SecretStr
+@@ -37,6 +37,7 @@ from pydantic import SecretStr
+ from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
+ from vinted_sniper.db.repo import Repo
+ from vinted_sniper.engine import filters, health, quiet
++from vinted_sniper.enrichment import EnrichmentIn
+ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted import urls
+ from vinted_sniper.vinted.errors import VintedError
+@@ -63,8 +64,12 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+ 
+     async def require_login(
+         session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
++        authorization: Annotated[str | None, Header()] = None,
+     ) -> None:
+-        if not _authorised(session, token):
++        # A machine calling the API sends the same token as a bearer; a browser has
++        # the cookie the login form set. Either will do.
++        bearer = authorization.removeprefix("Bearer ").strip() if authorization else None
++        if not (_authorised(session, token) or (bearer and _authorised(bearer, token))):
+             raise HTTPException(status_code=401, detail="not signed in")
+ 
+     guard = Depends(require_login)
+@@ -146,6 +151,19 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
+             },
+         )
+ 
++    @app.post("/api/items/{item_id}/enrichment")
++    async def post_enrichment(item_id: int, verdict: EnrichmentIn, _: None = guard) -> JSONResponse:
++        """What an outside agent concluded about a listing. Releases any held alert."""
++        if not await repo.store_enrichment(item_id, verdict):
++            raise HTTPException(status_code=404, detail="no such listing")
++        log.info(
++            "enrichment.received",
++            item_id=item_id,
++            score=verdict.score,
++            matches_query=verdict.matches_query,
++        )
++        return JSONResponse({"ok": True})
++
+     @app.get("/api/health")
+     async def api_health(_: None = guard) -> JSONResponse:
+         snapshot = await health.snapshot(repo)
+@@ -449,6 +467,8 @@ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
+                 "seller_feedback_count": row["seller_feedback_count"],
+                 "favourite_count": row["favourite_count"] or 0,
+                 "price_dropped": bool(row["price_changed_at"]),
++                "deal_score": row["enrich_score"] if row["enriched_at"] else None,
++                "verdict": row["enrich_verdict"] if row["enriched_at"] else None,
+                 "query_name": row["query_name"],
+                 "age": _age(now - row["first_seen_at"]),
+             }
+diff --git a/src/vinted_sniper/web/templates/base.html b/src/vinted_sniper/web/templates/base.html
+index 5efb44c..e9f4aa0 100644
+--- a/src/vinted_sniper/web/templates/base.html
++++ b/src/vinted_sniper/web/templates/base.html
+@@ -145,6 +145,9 @@
+                          font-weight: 400; }
+     .combo-list button:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+     .pill.cooling { background: #fff3e0; color: #e65100; }
++    .tag.score { background: #ede7f6; color: #4527a0; }
++    .tag.score.hot { background: #fbe9e7; color: #bf360c; font-weight: 600; }
++    .tag.score.cold { opacity: .6; }
+     .tag.drop { background: #e8f5e9; color: #1b5e20; }
+     tr.edit-row td { background: rgba(0,0,0,.025); }
+     td.actions { white-space: nowrap; }
+diff --git a/src/vinted_sniper/web/templates/dashboard.html b/src/vinted_sniper/web/templates/dashboard.html
+index fc4386c..a18c2e8 100644
+--- a/src/vinted_sniper/web/templates/dashboard.html
++++ b/src/vinted_sniper/web/templates/dashboard.html
+@@ -411,6 +411,10 @@
+           <strong>{{ row.price or '—' }}</strong>
+           {% if row.total_price %}<span class="muted">{{ row.total_price }} total</span>{% endif %}
+           {% if row.price_dropped %}<span class="tag drop">📉 dropped</span>{% endif %}
++          {% if row.deal_score is not none %}
++          <span class="tag score {{ 'hot' if row.deal_score >= 75 else ('cold' if row.deal_score < 40 else '') }}"
++                title="{{ row.verdict or '' }}">🤖 {{ row.deal_score }}</span>
++          {% endif %}
+         </div>
+         {% if row.brand or row.size or row.condition %}
+         <div class="tags">
+diff --git a/tests/integration/test_delivery.py b/tests/integration/test_delivery.py
+index 7a14d4a..563313a 100644
+--- a/tests/integration/test_delivery.py
++++ b/tests/integration/test_delivery.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import asyncio
++import json
+ import time
+ from datetime import datetime
+ from decimal import Decimal
+@@ -15,6 +16,7 @@ from vinted_sniper.botctl.telegram_bot import _chat_is_paired, claim_pairing, cr
+ from vinted_sniper.config import Settings
+ from vinted_sniper.db.repo import Query, Repo
+ from vinted_sniper.deliver.dispatcher import MAX_ATTEMPTS, Dispatcher
++from vinted_sniper.enrichment import EnrichmentIn
+ from vinted_sniper.vinted.models import Item
+ 
+ 
+@@ -47,10 +49,12 @@ async def a_search(repo: Repo) -> Query:
+ class FakeEndpoint:
+     def __init__(self, *responses: httpx.Response) -> None:
+         self.calls = 0
++        self.requests: list[httpx.Request] = []
+         self._responses = list(responses)
+ 
+     def handler(self, request: httpx.Request) -> httpx.Response:
+         self.calls += 1
++        self.requests.append(request)
+         if self._responses:
+             return self._responses.pop(0)
+         return httpx.Response(200, json={"ok": True})
+@@ -384,3 +388,51 @@ async def test_a_destination_in_its_quiet_hours_is_left_alone_and_nothing_expire
+     assert sent == 1, "the held alert goes out when the window ends, not into the bin"
+     assert endpoint.calls == 1
+     assert await repo.outbox_depth() == 0
++
++
++# --- Enrichment loop -----------------------------------------------------------------
++
++
++async def test_chat_alerts_wait_for_a_verdict_while_the_webhook_fires_at_once(
++    repo: Repo, settings: Settings
++) -> None:
++    settings = settings.model_copy(update={"enrichment_wait_s": 90})
++    query = await a_search(repo)
++    brain = await repo.add_destination(
++        kind="webhook", name="n8n", config={"url": "https://example.test/n8n"}
++    )
++    phone = await repo.add_destination(
++        kind="webhook", name="phone", config={"url": "https://example.test/phone"}
++    )
++    # A plain webhook is never held; to stand in for a chat destination, hold "phone"
++    # by name rather than by kind.
++    await repo.record_new_items(
++        query, [listing(1)], [brain, phone], hold_s=settings.enrichment_wait_s, never_hold={brain}
++    )
++
++    endpoint = FakeEndpoint()
++    dispatcher = make_dispatcher(repo, settings, endpoint)
++    assert await dispatcher.drain() == 1, "only the brain's copy is due now"
++    assert endpoint.calls == 1
++    body = json.loads(endpoint_last_request(endpoint).content)
++    assert body["items"][0]["enrichment_url"].endswith("/api/items/1/enrichment")
++    assert "photo_urls" in body["items"][0]
++
++    # The verdict arrives: the held copy is released immediately, carrying it.
++    assert await repo.store_enrichment(
++        1, EnrichmentIn(score=88, model="Nike Air Max 90", retail_price=Decimal("140"))
++    )
++    assert await dispatcher.drain() == 1
++    sent = json.loads(endpoint_last_request(endpoint).content)
++    assert sent["items"][0]["id"] == 1
++
++    batch_view = await repo.claim_batch(phone, 10)
++    assert batch_view == [], "nothing left"
++
++
++async def test_a_verdict_for_an_unknown_listing_is_refused(repo: Repo) -> None:
++    assert not await repo.store_enrichment(424242, EnrichmentIn(score=10))
++
++
++def endpoint_last_request(endpoint: FakeEndpoint) -> httpx.Request:
++    return endpoint.requests[-1]
+diff --git a/tests/unit/test_senders.py b/tests/unit/test_senders.py
+index fab07d0..b7eb00c 100644
+--- a/tests/unit/test_senders.py
++++ b/tests/unit/test_senders.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import json
++from dataclasses import replace
+ from decimal import Decimal
+ from typing import Any
+ 
+@@ -13,6 +14,7 @@ from vinted_sniper.db.repo import PendingNotification
+ from vinted_sniper.deliver.discord import DiscordSender
+ from vinted_sniper.deliver.ratelimit import Gate, TokenBucket
+ from vinted_sniper.deliver.telegram import TelegramSender, inline_actions
++from vinted_sniper.enrichment import Enrichment
+ from vinted_sniper.vinted.models import Item
+ 
+ 
+@@ -395,3 +397,40 @@ def test_a_closed_gate_reopens_on_its_own() -> None:
+ 
+     clock["now"] += 5.1
+     assert gate.wait_s == 0.0
++
++
++async def test_telegram_headlines_a_hot_deal_and_mutes_a_dull_one() -> None:
++    recorder = Recorder(*[httpx.Response(200, json={"ok": True})] * 2)
++    sender = TelegramSender(
++        {"chat_id": "123"}, bot_token="t", client=recorder.client(), bucket=fast_bucket()
++    )
++    hot = Enrichment(
++        score=91,
++        model="Nike Air Max 90",
++        retail_price=Decimal("140"),
++        retail_source="nike.com",
++        matches_query=True,
++        risk=None,
++        verdict="Real pair, great price.",
++        enriched_at=1,
++    )
++    dull = Enrichment(
++        score=12,
++        model=None,
++        retail_price=None,
++        retail_source=None,
++        matches_query=False,
++        risk="stock photos only",
++        verdict=None,
++        enriched_at=1,
++    )
++    await sender.send([replace(notification(1), enrichment=hot)])
++    await sender.send([replace(notification(2), enrichment=dull)])
++
++    first, second = recorder.payload(0), recorder.payload(1)
++    assert first["text"].startswith("🔥 <b>HOT DEAL</b> · deal 91/100 · retail ~140 EUR · -88%")
++    assert "Looks like: Nike Air Max 90" in first["text"]
++    assert "disable_notification" not in first
++    assert second["disable_notification"] is True
++    assert "not the model searched for" in second["text"]
++    assert "risk: stock photos only" in second["text"]
+-- 
+2.43.0
+

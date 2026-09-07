@@ -1,0 +1,522 @@
+From 0a242d9c4071c01b99b6110d61ff85eeb2a82f90 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:01:35 +0000
+Subject: [PATCH 05/25] Announce a listing again when its price drops
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Vinted sellers cut prices constantly, and a jacket that was too dear on
+Monday may not be on Thursday — but once a listing had been announced it was
+never mentioned again. Now the poller compares the prices of listings it
+already knows against the page it just fetched, and when the total has fallen
+by PRICE_DROP_MIN_PERCENT (default 10) it queues a "price drop" notification
+carrying the old and new totals. This costs no additional requests: the
+search's first page is fetched anyway and carries every listing's current
+price, so a listing is tracked for as long as it stays on that page.
+
+The outbox gains a kind ('new' or 'price_drop') and the previous price; its
+unique key grows to include both, since a price can drop more than once,
+which SQLite only allows by rebuilding the table (migration 0006). Every
+sender shows the drop — Telegram and Discord headline it with old → new and
+the percentage, ntfy changes the tag, the webhook payload gains additive
+"event" and "previous_total_price" fields at the same contract version.
+---
+ .env.example                                  |  3 +
+ README.md                                     |  1 +
+ docs/configuration.md                         |  8 ++
+ src/vinted_sniper/config.py                   |  8 ++
+ .../db/migrations/0006_price_drops.sql        | 36 +++++++++
+ src/vinted_sniper/db/repo.py                  | 79 ++++++++++++++++++-
+ src/vinted_sniper/deliver/discord.py          |  2 +-
+ src/vinted_sniper/deliver/ntfy.py             | 10 ++-
+ src/vinted_sniper/deliver/telegram.py         | 24 ++++--
+ src/vinted_sniper/deliver/webhook.py          | 12 ++-
+ src/vinted_sniper/engine/poller.py            | 31 ++++++++
+ tests/integration/test_poller.py              | 61 ++++++++++++++
+ 12 files changed, 260 insertions(+), 15 deletions(-)
+ create mode 100644 src/vinted_sniper/db/migrations/0006_price_drops.sql
+
+diff --git a/.env.example b/.env.example
+index 98a48dd..8a1ec6a 100644
+--- a/.env.example
++++ b/.env.example
+@@ -50,6 +50,9 @@
+ #   newest  send exactly one listing, so you can confirm delivery works
+ # VINTED_SNIPER_FIRST_RUN_MODE=silent
+ 
++# Announce a listing again when its total price falls by at least this percent. 0 = off.
++# VINTED_SNIPER_PRICE_DROP_MIN_PERCENT=10
++
+ 
+ # --- Staying unblocked ---------------------------------------------------------------
+ # Total requests per minute to any one country site, across all searches, homepage loads
+diff --git a/README.md b/README.md
+index a0b2b5c..8398e91 100644
+--- a/README.md
++++ b/README.md
+@@ -48,6 +48,7 @@ Raspberry Pi, NAS or cheap VPS: see [the self-hosting guide](docs/self-hosting.m
+ ## Features
+ 
+ - **Filters on what you actually pay**, buyer protection included. Vinted's own price filter ignores it.
++- **Price drops**: a listing you already saw comes back when its price falls, at no extra requests.
+ - **Quiet hours per destination**: nothing at 03:00, a digest of the night at 07:00.
+ - **Filters Vinted's search cannot express**: words the title must contain, a title regex, a floor on seller rating and review count, and sellers to skip.
+ - **Tells you when it stops working.** A watchdog spots a search going silent and fixes the session itself.
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 54a8864..af62bf6 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -29,6 +29,7 @@ Every variable is prefixed `VINTED_SNIPER_`. All of them are optional except whe
+ | `POLL_DEFAULT_INTERVAL_S` | `60` | Seconds between checks for a newly added search. Per-search values override it. Anything under 10 is refused. |
+ | `FRESHNESS_WINDOW_MIN` | `20` | Ignore listings whose photo is older than this. Stops a restart from replaying old results. |
+ | `FIRST_RUN_MODE` | `silent` | What a brand-new search does first time: `silent` notifies nothing, `newest` sends exactly one listing so you can confirm delivery works. |
++| `PRICE_DROP_MIN_PERCENT` | `10` | Announce a listing again when its total price has fallen by at least this much since it was recorded. Free: only listings still on the search's first page are compared, using the page already fetched. `0` turns it off. |
+ | `REQUEST_TIMEOUT_S` | `15` | How long to wait for Vinted before giving up on one request. |
+ 
+ The 10-second floor is not caution for its own sake: Vinted's own API lags minutes behind
+@@ -137,6 +138,13 @@ Where to get each kind of target:
+ Each search can go to its own set of destinations, so a Discord channel for one thing and
+ your phone for another is normal.
+ 
++A listing that was already announced is announced again when its price drops by
++`PRICE_DROP_MIN_PERCENT` or more — Vinted sellers cut prices often, and a jacket that was
++too dear on Monday may not be on Thursday. This costs nothing extra: the search's first
++page, which the app fetches anyway, carries every listing's current price, so a listing is
++tracked for as long as it stays on that page (on a quiet search, indefinitely). Webhook
++consumers see `"event": "price_drop"` and `"previous_total_price"` on such items.
++
+ A destination can have **quiet hours** — `--quiet 23:00-07:00` on the command line, or the
+ field next to it in the dashboard — during which nothing is sent. Alerts found meanwhile are
+ kept (they are exempt from `OUTBOX_EXPIRY_MINUTES`) and go out together when the window
+diff --git a/src/vinted_sniper/config.py b/src/vinted_sniper/config.py
+index cd6f42c..f0e7b42 100644
+--- a/src/vinted_sniper/config.py
++++ b/src/vinted_sniper/config.py
+@@ -106,6 +106,14 @@ class Settings(BaseSettings):
+         description="Ignore listings whose photo timestamp is older than this. Stops a restart "
+         "or a slow first poll from replaying yesterday's catalog.",
+     )
++    price_drop_min_percent: int = Field(
++        default=10,
++        ge=0,
++        le=100,
++        description="Announce a listing again when its total price falls by at least this "
++        "much since we recorded it. Costs no extra requests: only listings still on the "
++        "search's first page are compared. 0 turns it off.",
++    )
+     first_run_mode: Literal["silent", "newest"] = Field(
+         default="silent",
+         description="What a brand-new search does on its first check: 'silent' notifies "
+diff --git a/src/vinted_sniper/db/migrations/0006_price_drops.sql b/src/vinted_sniper/db/migrations/0006_price_drops.sql
+new file mode 100644
+index 0000000..bc5cadd
+--- /dev/null
++++ b/src/vinted_sniper/db/migrations/0006_price_drops.sql
+@@ -0,0 +1,36 @@
++-- A notification now has a kind: the listing is new, or its price dropped. The outbox
++-- was unique on (item, destination), which was right when the only news about a listing
++-- was its arrival; a price can drop more than once, so the key grows to include what it
++-- dropped from. SQLite cannot change a table constraint in place, hence the rebuild.
++CREATE TABLE outbox_new (
++    id               INTEGER PRIMARY KEY AUTOINCREMENT,
++    item_id          INTEGER NOT NULL,
++    query_id         INTEGER NOT NULL,
++    destination_id   INTEGER NOT NULL REFERENCES destinations(id) ON DELETE CASCADE,
++    status           TEXT    NOT NULL DEFAULT 'pending'
++                     CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'cancelled')),
++    attempts         INTEGER NOT NULL DEFAULT 0,
++    next_attempt_at  INTEGER NOT NULL,
++    lease_expires_at INTEGER,
++    last_error       TEXT,
++    created_at       INTEGER NOT NULL,
++    sent_at          INTEGER,
++    kind             TEXT    NOT NULL DEFAULT 'new' CHECK (kind IN ('new', 'price_drop')),
++    -- The total price before the drop; 0 for a plain "new listing" row so the unique
++    -- key below still holds (NULLs would not compare equal).
++    previous_price   REAL    NOT NULL DEFAULT 0,
++    UNIQUE (item_id, destination_id, kind, previous_price)
++);
++
++INSERT INTO outbox_new (id, item_id, query_id, destination_id, status, attempts,
++                        next_attempt_at, lease_expires_at, last_error, created_at, sent_at)
++SELECT id, item_id, query_id, destination_id, status, attempts,
++       next_attempt_at, lease_expires_at, last_error, created_at, sent_at
++FROM outbox;
++
++DROP TABLE outbox;
++ALTER TABLE outbox_new RENAME TO outbox;
++CREATE INDEX idx_outbox_claim ON outbox(destination_id, status, next_attempt_at);
++
++-- When a listing's price last changed, so the dashboard can show it.
++ALTER TABLE items ADD COLUMN price_changed_at INTEGER;
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index 4857a15..a479ed9 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -93,6 +93,25 @@ class PendingNotification:
+     # When the poller first saw the listing, which is the honest "found it" moment even
+     # if delivery retries push the message out later.
+     detected_at: int | None = None
++    # "new" or "price_drop"; for a drop, what the total price was before.
++    kind: str = "new"
++    previous_price: Decimal | None = None
++
++    @property
++    def is_price_drop(self) -> bool:
++        return self.kind == "price_drop"
++
++    def headline(self) -> str:
++        """What kind of news this is, for the top of a message."""
++        if not self.is_price_drop:
++            return "New match"
++        item = self.item
++        now_payable = item.total_price if item.total_price is not None else item.price
++        currency = f" {item.currency}" if item.currency else ""
++        if self.previous_price is not None and now_payable is not None:
++            fall = round((self.previous_price - now_payable) / self.previous_price * 100)
++            return f"Price drop -{fall}%: {self.previous_price}{currency} → {now_payable}{currency}"
++        return "Price drop"
+ 
+ 
+ def _json_list(raw: str | None) -> list[str] | None:
+@@ -489,6 +508,58 @@ class Repo:
+                 )
+         return len(items)
+ 
++    async def current_prices(self, item_ids: list[int]) -> dict[int, Decimal | None]:
++        """What we last recorded each listing costing, buyer protection included."""
++        if not item_ids:
++            return {}
++        placeholders = ",".join("?" * len(item_ids))
++        rows = await self._db.fetch_all(
++            f"SELECT item_id, price, total_price FROM items WHERE item_id IN ({placeholders})",
++            item_ids,
++        )
++        out: dict[int, Decimal | None] = {}
++        for row in rows:
++            payable = row["total_price"] if row["total_price"] is not None else row["price"]
++            out[row["item_id"]] = Decimal(str(payable)) if payable is not None else None
++        return out
++
++    async def record_price_drops(
++        self,
++        query: Query,
++        drops: list[tuple[Item, Decimal]],
++        destination_ids: list[int],
++    ) -> int:
++        """Update a listing's price and queue a "dropped from X" notification, atomically."""
++        if not drops:
++            return 0
++        now = int(time.time())
++        async with self._db.transaction() as conn:
++            await conn.executemany(
++                "UPDATE items SET price = ?, total_price = ?, price_changed_at = ? "
++                "WHERE item_id = ?",
++                [
++                    (
++                        float(item.price) if item.price is not None else None,
++                        float(item.total_price) if item.total_price is not None else None,
++                        now,
++                        item.item_id,
++                    )
++                    for item, _ in drops
++                ],
++            )
++            if destination_ids:
++                await conn.executemany(
++                    "INSERT OR IGNORE INTO outbox (item_id, query_id, destination_id, "
++                    "next_attempt_at, created_at, kind, previous_price) "
++                    "VALUES (?, ?, ?, ?, ?, 'price_drop', ?)",
++                    [
++                        (item.item_id, query.id, destination_id, now, now, float(previous))
++                        for item, previous in drops
++                        for destination_id in destination_ids
++                    ],
++                )
++        return len(drops)
++
+     async def prune_items(self, older_than_days: int) -> int:
+         cutoff = int(time.time()) - older_than_days * 86_400
+         return await self._db.execute("DELETE FROM items WHERE first_seen_at < ?", (cutoff,))
+@@ -522,8 +593,8 @@ class Repo:
+         now = int(time.time())
+         async with self._db.transaction() as conn:
+             async with conn.execute(
+-                "SELECT o.id, o.destination_id, o.query_id, o.attempts, q.name AS query_name, "
+-                "i.* FROM outbox o "
++                "SELECT o.id, o.destination_id, o.query_id, o.attempts, o.kind, "
++                "o.previous_price, q.name AS query_name, i.* FROM outbox o "
+                 "JOIN items i ON i.item_id = o.item_id "
+                 "LEFT JOIN queries q ON q.id = o.query_id "
+                 "WHERE o.destination_id = ? AND o.status = 'pending' AND o.next_attempt_at <= ? "
+@@ -569,6 +640,10 @@ class Repo:
+                     view_count=row["view_count"] or 0,
+                 ),
+                 detected_at=row["first_seen_at"],
++                kind=row["kind"],
++                previous_price=(
++                    Decimal(str(row["previous_price"])) if row["kind"] == "price_drop" else None
++                ),
+             )
+             for row in rows
+         ]
+diff --git a/src/vinted_sniper/deliver/discord.py b/src/vinted_sniper/deliver/discord.py
+index 22ea46e..ff7bd01 100644
+--- a/src/vinted_sniper/deliver/discord.py
++++ b/src/vinted_sniper/deliver/discord.py
+@@ -147,7 +147,7 @@ class DiscordSender:
+         fields.append({"name": "Detected", "value": f"<t:{detected}:R>", "inline": True})
+ 
+         embed: dict[str, Any] = {
+-            "author": {"name": f"New match • {notification.query_name}"[:256]},
++            "author": {"name": f"{notification.headline()} • {notification.query_name}"[:256]},
+             "title": item.title[:256],
+             # Distinct per listing on purpose: Discord folds together embeds that share
+             # a URL.
+diff --git a/src/vinted_sniper/deliver/ntfy.py b/src/vinted_sniper/deliver/ntfy.py
+index 0edea74..989b301 100644
+--- a/src/vinted_sniper/deliver/ntfy.py
++++ b/src/vinted_sniper/deliver/ntfy.py
+@@ -49,9 +49,15 @@ class NtfySender:
+         for notification in batch:
+             item = notification.item
+             headers = {
+-                "Title": item.title[:200],
++                "Title": (
++                    f"{notification.headline()} — {item.title}"
++                    if notification.is_price_drop
++                    else item.title
++                )[:200],
+                 "Click": item.url,
+-                "Tags": "shopping_bags",
++                "Tags": (
++                    "chart_with_downwards_trend" if notification.is_price_drop else "shopping_bags"
++                ),
+             }
+             if item.photo_url:
+                 headers["Attach"] = item.photo_url
+diff --git a/src/vinted_sniper/deliver/telegram.py b/src/vinted_sniper/deliver/telegram.py
+index 523521f..80b0ea3 100644
+--- a/src/vinted_sniper/deliver/telegram.py
++++ b/src/vinted_sniper/deliver/telegram.py
+@@ -82,7 +82,11 @@ class TelegramSender:
+         for notification in individually:
+             result = await self._post(
+                 "sendMessage",
+-                self._listing_payload(notification.item, query_id=notification.query_id),
++                self._listing_payload(
++                    notification.item,
++                    query_id=notification.query_id,
++                    headline=notification.headline() if notification.is_price_drop else None,
++                ),
+                 [notification.outbox_id],
+             )
+             if not result.delivered:
+@@ -99,7 +103,7 @@ class TelegramSender:
+         if overflow:
+             result = await self._post(
+                 "sendMessage",
+-                self._digest_payload([n.item for n in overflow]),
++                self._digest_payload(overflow),
+                 [n.outbox_id for n in overflow],
+             )
+             if not result.delivered:
+@@ -127,8 +131,12 @@ class TelegramSender:
+             payload["message_thread_id"] = self._thread_id
+         return payload
+ 
+-    def _listing_payload(self, item: Item, *, query_id: int | None = None) -> dict[str, Any]:
++    def _listing_payload(
++        self, item: Item, *, query_id: int | None = None, headline: str | None = None
++    ) -> dict[str, Any]:
+         lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line())]
++        if headline:
++            lines.insert(0, f"📉 <b>{html.escape(headline)}</b>")
+ 
+         details = " · ".join(
+             html.escape(part) for part in (item.brand, item.size, item.condition) if part
+@@ -170,11 +178,13 @@ class TelegramSender:
+             payload["link_preview_options"] = {"is_disabled": True}
+         return payload
+ 
+-    def _digest_payload(self, items: list[Item]) -> dict[str, Any]:
+-        lines = [f"<b>{len(items)} more matches</b>"]
+-        for index, item in enumerate(items, start=1):
++    def _digest_payload(self, batch: list[PendingNotification]) -> dict[str, Any]:
++        lines = [f"<b>{len(batch)} more matches</b>"]
++        for index, notification in enumerate(batch, start=1):
++            item = notification.item
++            marker = "📉 " if notification.is_price_drop else ""
+             lines.append(
+-                f'{index}. <a href="{html.escape(item.url, quote=True)}">'
++                f'{index}. {marker}<a href="{html.escape(item.url, quote=True)}">'
+                 f"{html.escape(item.title[:80])}</a> — {html.escape(item.price_line())}"
+             )
+         return self._base_payload() | {
+diff --git a/src/vinted_sniper/deliver/webhook.py b/src/vinted_sniper/deliver/webhook.py
+index 2e87056..f161e40 100644
+--- a/src/vinted_sniper/deliver/webhook.py
++++ b/src/vinted_sniper/deliver/webhook.py
+@@ -15,7 +15,6 @@ import httpx
+ from vinted_sniper.db.repo import PendingNotification
+ from vinted_sniper.deliver.base import SendResult, require
+ from vinted_sniper.deliver.ratelimit import TokenBucket
+-from vinted_sniper.vinted.models import Item
+ 
+ PAYLOAD_VERSION = 1
+ 
+@@ -49,7 +48,7 @@ class WebhookSender:
+         payload = {
+             "version": PAYLOAD_VERSION,
+             "search": batch[0].query_name,
+-            "items": [_item_json(n.item) for n in batch],
++            "items": [_item_json(n) for n in batch],
+         }
+         await self._bucket.acquire()
+         try:
+@@ -79,8 +78,15 @@ class WebhookSender:
+             await self._client.aclose()
+ 
+ 
+-def _item_json(item: Item) -> dict[str, Any]:
++def _item_json(notification: PendingNotification) -> dict[str, Any]:
++    item = notification.item
+     return {
++        # Additive since version 1: "new" or "price_drop", and for a drop the total price
++        # it fell from. Consumers that ignore unknown keys see no change.
++        "event": notification.kind,
++        "previous_total_price": (
++            str(notification.previous_price) if notification.previous_price is not None else None
++        ),
+         "id": item.item_id,
+         "site": f"vinted.{item.tld}",
+         "title": item.title,
+diff --git a/src/vinted_sniper/engine/poller.py b/src/vinted_sniper/engine/poller.py
+index 9f45776..841a3da 100644
+--- a/src/vinted_sniper/engine/poller.py
++++ b/src/vinted_sniper/engine/poller.py
+@@ -13,6 +13,7 @@ import contextlib
+ import random
+ import time
+ from collections.abc import Awaitable, Callable
++from decimal import Decimal
+ 
+ from vinted_sniper.config import MAX_BACKOFF_S, Settings
+ from vinted_sniper.db.repo import Query, Repo
+@@ -145,6 +146,8 @@ class Poller:
+                 candidates.append(item)
+ 
+         known = await self._repo.known_item_ids([item.item_id for item in candidates])
++        if known and not state.is_first_run:
++            await self._announce_price_drops([c for c in candidates if c.item_id in known])
+         selection = dedup.select(
+             candidates=candidates,
+             all_items=items,
+@@ -194,6 +197,34 @@ class Poller:
+         else:
+             self._log.debug("poll.nothing_new", returned=len(items))
+ 
++    async def _announce_price_drops(self, seen_again: list[Item]) -> None:
++        """A listing already recorded, now cheaper. No extra request: it is on the page
++        we just fetched, and the page carries its current price."""
++        threshold = self._settings.price_drop_min_percent
++        if threshold <= 0 or not seen_again:
++            return
++        previous = await self._repo.current_prices([item.item_id for item in seen_again])
++        drops: list[tuple[Item, Decimal]] = []
++        for item in seen_again:
++            before = previous.get(item.item_id)
++            now_payable = item.total_price if item.total_price is not None else item.price
++            if before is None or now_payable is None or before <= 0:
++                continue
++            fall = (before - now_payable) / before * 100
++            if fall >= threshold:
++                drops.append((item, before))
++        if not drops:
++            return
++        destination_ids = await self._repo.destination_ids_for_query(self.query.id)
++        await self._repo.record_price_drops(self.query, drops, destination_ids)
++        if destination_ids and self._work_available is not None:
++            self._work_available.set()
++        self._log.info(
++            "poll.price_drops",
++            count=len(drops),
++            items=[(item.item_id, str(before), str(item.total_price)) for item, before in drops],
++        )
++
+     def _interval(self) -> float:
+         base = float(self.query.poll_interval_s)
+         return base + self._rng.uniform(0, base * _JITTER_FRACTION)
+diff --git a/tests/integration/test_poller.py b/tests/integration/test_poller.py
+index 1005ff9..0f697b5 100644
+--- a/tests/integration/test_poller.py
++++ b/tests/integration/test_poller.py
+@@ -487,3 +487,64 @@ async def test_server_errors_are_transient(
+ 
+     assert delay > 0
+     assert (await repo.get_state(poller.query.id)).last_status == "network"
++
++
++# --- Price drops ---------------------------------------------------------------------
++
++
++async def test_a_listing_that_gets_cheaper_is_announced_again(
++    transport: ScriptedTransport,
++    repo: Repo,
++    settings: Settings,
++    db: Any,
++    make_item: Callable[..., dict[str, Any]],
++) -> None:
++    poller, work = await make_poller(transport, repo, settings, db=db)
++    destination_id = await repo.add_destination(
++        kind="webhook", name="t", config={"url": "https://example.test/hook"}
++    )
++    await repo.route(poller.query.id, destination_id)
++    now = int(time.time())
++
++    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="50.0")])
++    await poller.tick()  # first run: recorded, nothing announced (silent mode)
++    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="50.0")])
++    await poller.tick()  # same price: nothing
++    assert await repo.outbox_depth() == 0
++
++    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="40.0")])
++    await poller.tick()  # 20% off: news
++
++    assert await repo.outbox_depth() == 1
++    assert work.is_set()
++    batch = await repo.claim_batch(destination_id, 10)
++    assert batch[0].is_price_drop
++    assert batch[0].previous_price is not None
++    assert batch[0].item.price == Decimal("40.0")
++    assert batch[0].headline().startswith("Price drop -20%")
++    await repo.mark_sent([batch[0].outbox_id])
++
++    # The stored price moved with it, so the same drop is not reported twice, and a
++    # smaller wobble after that is beneath notice.
++    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="40.0")])
++    await poller.tick()
++    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="38.0")])
++    await poller.tick()
++    assert await repo.outbox_depth() == 0
++
++
++async def test_price_drop_tracking_can_be_switched_off(
++    transport: ScriptedTransport,
++    repo: Repo,
++    settings: Settings,
++    db: Any,
++    make_item: Callable[..., dict[str, Any]],
++) -> None:
++    settings = settings.model_copy(update={"price_drop_min_percent": 0})
++    poller, _ = await make_poller(transport, repo, settings, db=db)
++    now = int(time.time())
++    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="50.0")])
++    await poller.tick()
++    transport.queue_catalog([make_item(1, photo_ts=now - 5, price="10.0")])
++    await poller.tick()
++    assert await repo.outbox_depth() == 0
+-- 
+2.43.0
+

@@ -1,0 +1,184 @@
+From 5dc295d36d8b0fee7efc2fcd389ca64727883804 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 17:43:06 +0000
+Subject: [PATCH 14/25] Drop the two dead buttons under Telegram alerts
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+"Message seller" linked to /items/{id}/want_it/new and "Buy" to
+/transaction/buy/new?transaction[item_id]=…, the deep links every Vinted
+notifier on GitHub has copied from one another since 2022. Vinted's front
+end was rebuilt and both answer "page not found"; checkout now needs a
+transaction the site creates when you press "Buy now", so there is no
+address that opens it. The listing page carries both actions right under
+the price, so the alert now offers "Open listing" and "Seller profile"
+(/member/{id}, which does resolve). urls.message_seller_url and buy_url
+return the listing page so the webhook's version-1 `links` keys keep
+working; `links.seller` is added.
+---
+ CHANGELOG.md                          |  5 +++++
+ README.md                             |  2 +-
+ src/vinted_sniper/deliver/telegram.py | 18 +++++++++++-------
+ src/vinted_sniper/deliver/webhook.py  |  8 +++++++-
+ src/vinted_sniper/vinted/urls.py      | 23 ++++++++++++++---------
+ tests/unit/test_senders.py            |  6 +++++-
+ tests/unit/test_urls.py               |  9 ++++++---
+ 7 files changed, 49 insertions(+), 22 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 9feb604..cee4ca5 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -5,6 +5,11 @@ All notable changes, newest first. Dates are when the change landed on `main`.
+ ## Unreleased
+ 
+ ### Fixed
++- The "Message seller" and "Buy" buttons under Telegram alerts linked to Vinted deep links
++  (`/items/{id}/want_it/new`, `/transaction/buy/new`) that have answered "page not found" since
++  the site's front end was rebuilt. They are replaced by "Seller profile"; asking and buying
++  happen from the listing page. The webhook's `links` keep their keys (now resolving) and
++  gain `seller`.
+ - A refusal during the session handshake (the anti-bot challenge page) crashed the search's
+   task; the supervisor restarted it every fifteen seconds and every search on the site
+   loaded the homepage four times a minute until the address was blocked outright. A refusal
+diff --git a/README.md b/README.md
+index dcff09e..1fa5e66 100644
+--- a/README.md
++++ b/README.md
+@@ -69,7 +69,7 @@ Raspberry Pi, NAS or cheap VPS: see [the self-hosting guide](docs/self-hosting.m
+   <img src="docs/media/discord.png" width="820" alt="A Discord notification: the search it matched, the title linking to the listing, links to the item, dashboard and seller, then price with buyer protection included, size, condition, brand, location, seller rating and photo">
+   <br><sub><b>Discord</b> — one rich card per listing, stacked into embeds when several land at once</sub>
+   <br><br>
+-  <img src="docs/media/telegram.png" width="820" alt="The same kind of notification in Telegram: photo preview, price with buyer protection included, brand, size, condition, seller, and the same three buttons">
++  <img src="docs/media/telegram.png" width="820" alt="The same kind of notification in Telegram: photo preview, price with buyer protection included, brand, size, condition, seller, and buttons to open the listing and the seller's profile">
+   <br><sub><b>Telegram</b> — photo as a preview, so the message keeps its buttons</sub>
+ </div>
+ 
+diff --git a/src/vinted_sniper/deliver/telegram.py b/src/vinted_sniper/deliver/telegram.py
+index 26b7bc3..9707355 100644
+--- a/src/vinted_sniper/deliver/telegram.py
++++ b/src/vinted_sniper/deliver/telegram.py
+@@ -167,13 +167,7 @@ class TelegramSender:
+         if item.listed_at:
+             lines.append(f"Listed {item.listed_at.strftime('%H:%M UTC')}")
+ 
+-        keyboard: list[list[dict[str, str]]] = [
+-            [
+-                {"text": "Open listing", "url": item.url},
+-                {"text": "Message seller", "url": item.message_url},
+-                {"text": "Buy", "url": item.buy_url},
+-            ]
+-        ]
++        keyboard: list[list[dict[str, str]]] = [_link_row(item)]
+         # A second row of actions the bot handles itself: the two things people most
+         # often want to do from the alert without opening the dashboard.
+         actions = inline_actions(query_id, item.seller_login)
+@@ -284,6 +278,16 @@ CALLBACK_BLOCK_SELLER = "bs"
+ CALLBACK_PAUSE_SEARCH = "ps"
+ 
+ 
++def _link_row(item: Item) -> list[dict[str, str]]:
++    """Only links that resolve. Vinted's old deep links to the message screen and to
++    checkout answer "page not found" since the site was rebuilt; both actions now live on
++    the listing page itself, so one button covers them."""
++    row = [{"text": "Open listing", "url": item.url}]
++    if item.seller_url:
++        row.append({"text": "Seller profile", "url": item.seller_url})
++    return row
++
++
+ def inline_actions(query_id: int | None, seller_login: str | None) -> list[dict[str, str]]:
+     """Callback buttons the bot in botctl answers. Empty when there is no search to act on."""
+     if query_id is None:
+diff --git a/src/vinted_sniper/deliver/webhook.py b/src/vinted_sniper/deliver/webhook.py
+index 4a120f5..65c211e 100644
+--- a/src/vinted_sniper/deliver/webhook.py
++++ b/src/vinted_sniper/deliver/webhook.py
+@@ -111,5 +111,11 @@ def _item_json(notification: PendingNotification, callback_base: str | None) ->
+         "seller": item.seller_login,
+         "seller_rating": item.seller_rating,
+         "seller_reviews": item.seller_feedback_count,
+-        "links": {"message_seller": item.message_url, "buy": item.buy_url},
++        # Kept for consumers written against version 1. Both used to be Vinted deep links
++        # that no longer resolve; they now point at the listing page, where the buttons are.
++        "links": {
++            "message_seller": item.message_url,
++            "buy": item.buy_url,
++            "seller": item.seller_url,
++        },
+     }
+diff --git a/src/vinted_sniper/vinted/urls.py b/src/vinted_sniper/vinted/urls.py
+index d85f272..c292947 100644
+--- a/src/vinted_sniper/vinted/urls.py
++++ b/src/vinted_sniper/vinted/urls.py
+@@ -181,17 +181,22 @@ def member_url(tld: str, user_id: int) -> str:
+ 
+ 
+ def message_seller_url(tld: str, item_id: int) -> str:
+-    """Deep link to the 'ask the seller' screen for a listing."""
+-    return f"https://www.vinted.{tld}/items/{item_id}/want_it/new"
++    """Where to go to ask the seller about a listing.
++
++    Vinted's web app used to expose `/items/{id}/want_it/new` for this; every notifier on
++    GitHub still links to it, and it has answered "page not found" since the front end was
++    rebuilt. The message screen is now reached from the listing page, which is where this
++    sends you — the "Ask seller" button sits right under the price.
++    """
++    return item_url(tld, item_id)
+ 
+ 
+ def buy_url(tld: str, item_id: int) -> str:
+-    """Deep link that opens checkout for a listing.
++    """Where to go to buy a listing.
+ 
+-    This only opens the page in the user's own browser, where they log in and decide.
+-    Nothing here buys anything on their behalf.
++    `/transaction/buy/new?transaction[item_id]=…` is gone too: checkout now needs a
++    transaction the site creates when you press "Buy now", so there is no address that
++    opens it directly. The listing page is the closest working thing. Nothing here buys
++    anything on anyone's behalf.
+     """
+-    return (
+-        f"https://www.vinted.{tld}/transaction/buy/new"
+-        f"?source_screen=item&transaction%5Bitem_id%5D={item_id}"
+-    )
++    return item_url(tld, item_id)
+diff --git a/tests/unit/test_senders.py b/tests/unit/test_senders.py
+index b7eb00c..82968cf 100644
+--- a/tests/unit/test_senders.py
++++ b/tests/unit/test_senders.py
+@@ -254,7 +254,11 @@ async def test_telegram_sends_one_message_per_listing_with_a_photo_preview() ->
+     payload = recorder.payload(0)
+     assert payload["parse_mode"] == "HTML"
+     assert payload["link_preview_options"]["prefer_large_media"] is True
+-    assert payload["reply_markup"]["inline_keyboard"][0][0]["url"].endswith("/items/1")
++    first_row = payload["reply_markup"]["inline_keyboard"][0]
++    assert first_row[0]["url"].endswith("/items/1")
++    assert [b["text"] for b in first_row] == ["Open listing", "Seller profile"]
++    assert first_row[1]["url"].endswith("/member/12345678")
++    assert all("want_it" not in b["url"] and "transaction" not in b["url"] for b in first_row)
+ 
+ 
+ async def test_telegram_alerts_carry_skip_seller_and_pause_buttons() -> None:
+diff --git a/tests/unit/test_urls.py b/tests/unit/test_urls.py
+index 03c52f2..3009ff4 100644
+--- a/tests/unit/test_urls.py
++++ b/tests/unit/test_urls.py
+@@ -89,7 +89,10 @@ def test_missing_scheme_is_tolerated() -> None:
+     assert urls.normalise_search_url("www.vinted.fr/catalog?search_text=x").startswith("https://")
+ 
+ 
+-def test_deep_links_stay_on_the_search_country_site() -> None:
++def test_deep_links_stay_on_the_search_country_site_and_resolve() -> None:
+     assert urls.item_url("de", 42) == "https://www.vinted.de/items/42"
+-    assert urls.message_seller_url("de", 42).endswith("/items/42/want_it/new")
+-    assert "transaction%5Bitem_id%5D=42" in urls.buy_url("de", 42)
++    # The old want_it/new and transaction/buy/new routes are gone from Vinted's front end;
++    # anything we link must be a page that actually loads.
++    assert urls.message_seller_url("de", 42) == "https://www.vinted.de/items/42"
++    assert urls.buy_url("de", 42) == "https://www.vinted.de/items/42"
++    assert urls.member_url("de", 7) == "https://www.vinted.de/member/7"
+-- 
+2.43.0
+

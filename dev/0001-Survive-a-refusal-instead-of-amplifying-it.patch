@@ -1,0 +1,1074 @@
+From dc9eeffc4a207a795cb230ec2bc27c0202edf028 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 16:33:11 +0000
+Subject: [PATCH 01/25] Survive a refusal instead of amplifying it
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Three things went wrong together when Vinted challenged an address:
+
+* A refusal at the handshake escaped the poller's own error handler — the handler
+  called rotate(), which bootstraps immediately and raises the same BlockedError
+  again, outside the try. The task died, the supervisor restarted it fifteen
+  seconds later, and every search on the site loaded the homepage four times a
+  minute until the address was blocked outright.
+* SessionManager.get() had no lock, so searches starting on an empty cache each
+  bootstrapped their own session: seven homepage loads with seven random browser
+  personas inside one second, from one address.
+* Nothing coordinated the searches. One being refused left the others polling at
+  full speed, and nothing bounded the address's total request rate.
+
+Now a refusal drops the session without fetching another (discard_blocked), the
+backoff closes a site-wide cooldown every search on that site honours
+(poll.cooling_down), the first refusal on a site is announced to status
+destinations, a per-site request budget bounds the address as a whole (including
+homepage loads), one bootstrap runs per site at a time, and searches are
+staggered at startup. The watchdog no longer rotates into a cooldown or crashes
+when its rotation is refused.
+
+The Docker image now includes the impersonate extra: the plain-Python TLS
+fingerprint is the first thing DataDome looks at.
+---
+ .env.example                           |   7 ++
+ Dockerfile                             |   4 +-
+ docs/configuration.md                  |   2 +
+ docs/troubleshooting.md                |   7 +-
+ pyproject.toml                         |   1 +
+ src/vinted_sniper/app.py               |  20 +++-
+ src/vinted_sniper/config.py            |  13 +++
+ src/vinted_sniper/deliver/ratelimit.py |  80 +-------------
+ src/vinted_sniper/engine/poller.py     |  33 +++++-
+ src/vinted_sniper/engine/watchdog.py   |  13 ++-
+ src/vinted_sniper/ratelimit.py         |  80 ++++++++++++++
+ src/vinted_sniper/vinted/client.py     |   8 ++
+ src/vinted_sniper/vinted/pacing.py     |  76 +++++++++++++
+ src/vinted_sniper/vinted/session.py    |  43 +++++++-
+ tests/integration/test_pacing.py       | 100 +++++++++++++++++
+ tests/integration/test_poller.py       | 144 +++++++++++++++++++++++--
+ 16 files changed, 531 insertions(+), 100 deletions(-)
+ create mode 100644 src/vinted_sniper/ratelimit.py
+ create mode 100644 src/vinted_sniper/vinted/pacing.py
+ create mode 100644 tests/integration/test_pacing.py
+
+diff --git a/.env.example b/.env.example
+index b7d623b..7c31456 100644
+--- a/.env.example
++++ b/.env.example
+@@ -49,6 +49,13 @@
+ 
+ 
+ # --- Staying unblocked ---------------------------------------------------------------
++# Total requests per minute to any one country site, across all searches, homepage loads
++# included. Anti-bot systems score the address, so this is the number that matters.
++# VINTED_SNIPER_SITE_REQUESTS_PER_MINUTE=12
++
++# Seconds between the first checks of successive searches at startup.
++# VINTED_SNIPER_STARTUP_STAGGER_S=20
++
+ # Start a fresh session after this many minutes. Blocks track how long a session has been
+ # alive more than how fast it is used, so replacing them on a timer helps.
+ # VINTED_SNIPER_SESSION_ROTATE_MINUTES=60
+diff --git a/Dockerfile b/Dockerfile
+index 225d320..342a3e3 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -13,11 +13,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
+     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+     --mount=type=bind,source=uv.lock,target=uv.lock \
+     --mount=type=bind,source=README.md,target=README.md \
+-    uv sync --locked --no-install-project --no-dev --extra web
++    uv sync --locked --no-install-project --no-dev --extra web --extra impersonate
+ 
+ COPY . /app
+ RUN --mount=type=cache,target=/root/.cache/uv \
+-    uv sync --locked --no-editable --no-dev --extra web
++    uv sync --locked --no-editable --no-dev --extra web --extra impersonate
+ 
+ 
+ # Runtime stage: the virtualenv and the code, nothing else.
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 936a3f9..add5ecb 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -40,6 +40,8 @@ was found, so you can see the real delay yourself.
+ 
+ | Variable | Default | What it does |
+ |---|---|---|
++| `SITE_REQUESTS_PER_MINUTE` | `12` | Ceiling on requests to any one country site from this address, counted across every search and including homepage loads. When one search is refused, every search on that site waits out the same backoff — the address is what gets scored, not the search. |
++| `STARTUP_STAGGER_S` | `20` | Seconds between the first checks of successive searches at startup, so a restart with ten searches does not open with ten requests in one second. |
+ | `SESSION_ROTATE_MINUTES` | `60` | Start a fresh anonymous session after this long. Blocks track session age more than request rate. |
+ | `HTTP_IMPERSONATE` | `false` | Make requests present a real browser's TLS fingerprint. Needs the `impersonate` extra. Only worth turning on if you are being blocked while the same search loads fine in a browser. |
+ | `PROXY_FILE` | unset | Path to a text file of proxy URLs, one per line (blank lines and `#` comments ignored). Used in turn; one that gets refused sits out for ten minutes. If all of them are sitting out, requests go direct rather than not at all. Rarely needed. |
+diff --git a/docs/troubleshooting.md b/docs/troubleshooting.md
+index 6541afc..997482c 100644
+--- a/docs/troubleshooting.md
++++ b/docs/troubleshooting.md
+@@ -70,8 +70,11 @@ open an issue with your logs.
+ Options, cheapest first:
+ 
+ 1. **Wait.** These are usually temporary. The app backs off on its own.
+-2. **Slow down.** Raise `VINTED_SNIPER_POLL_DEFAULT_INTERVAL_S` to 120 or 300. Ten searches
+-   at once from one address is a lot more traffic than one search.
++2. **Slow down.** Raise `VINTED_SNIPER_POLL_DEFAULT_INTERVAL_S` to 120 or 300, or lower
++   `VINTED_SNIPER_SITE_REQUESTS_PER_MINUTE`, which caps the address as a whole. Ten searches
++   at once from one address is a lot more traffic than one search. When one search is
++   refused, the others on that site hold back automatically (`poll.cooling_down` in the
++   logs) — that is deliberate, not a second problem.
+ 3. **Move it home.** Residential connections are challenged far less than datacenter ones. A
+    Raspberry Pi is enough.
+ 4. **Turn on TLS impersonation.** Set `VINTED_SNIPER_HTTP_IMPERSONATE=true`. This makes
+diff --git a/pyproject.toml b/pyproject.toml
+index dad666f..3430e5d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -93,6 +93,7 @@ ignore = [
+ # One send attempt has several distinct outcomes — delivered, paused, gone, retry, gave
+ # up — and each needs its own early exit. Splitting them would hide the flow, not clarify it.
+ "src/vinted_sniper/deliver/dispatcher.py" = ["C901", "PLR0911"]
++"src/vinted_sniper/engine/poller.py" = ["PLR0911"]  # one return per error type is the point
+ 
+ [tool.ruff.lint.mccabe]
+ max-complexity = 10
+diff --git a/src/vinted_sniper/app.py b/src/vinted_sniper/app.py
+index edbde4a..7d033e1 100644
+--- a/src/vinted_sniper/app.py
++++ b/src/vinted_sniper/app.py
+@@ -26,6 +26,7 @@ from vinted_sniper.engine.poller import Poller
+ from vinted_sniper.engine.watchdog import Watchdog
+ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted.client import VintedClient
++from vinted_sniper.vinted.pacing import RequestBudget
+ from vinted_sniper.vinted.proxies import ProxyRotation
+ from vinted_sniper.vinted.session import SessionManager
+ from vinted_sniper.vinted.taxonomy import Taxonomy
+@@ -76,13 +77,17 @@ class Application:
+ 
+             pool = TransportPool(build)
+             try:
++                budget = RequestBudget(settings.site_requests_per_minute)
+                 sessions = SessionManager(
+                     db,
+                     pool,
+                     rotate_after_minutes=settings.session_rotate_minutes,
+                     proxies=proxies,
++                    budget=budget,
++                )
++                client = VintedClient(
++                    None, sessions, keep_raw=settings.keep_raw_json, budget=budget
+                 )
+-                client = VintedClient(None, sessions, keep_raw=settings.keep_raw_json)
+                 dispatcher = Dispatcher(
+                     repo=repo,
+                     settings=settings,
+@@ -113,7 +118,8 @@ class Application:
+                         tg.create_task(heartbeat.run(), name="heartbeat")
+                         tg.create_task(self._housekeeping(repo), name="housekeeping")
+                         tg.create_task(
+-                            self._supervise(tg, repo, client, sessions), name="supervisor"
++                            self._supervise(tg, repo, client, sessions, dispatcher),
++                            name="supervisor",
+                         )
+ 
+                         if settings.telegram_bot_token is not None:
+@@ -138,11 +144,12 @@ class Application:
+         repo: Repo,
+         client: VintedClient,
+         sessions: SessionManager,
++        dispatcher: Dispatcher | None = None,
+     ) -> None:
+         """Keep one running task per active search."""
+         while not self._stop.is_set():
+             try:
+-                await self._reconcile(tg, repo, client, sessions)
++                await self._reconcile(tg, repo, client, sessions, dispatcher)
+             except Exception as exc:
+                 log.exception("supervisor.failed", error=str(exc))
+ 
+@@ -158,6 +165,7 @@ class Application:
+         repo: Repo,
+         client: VintedClient,
+         sessions: SessionManager,
++        dispatcher: Dispatcher | None = None,
+     ) -> None:
+         queries = {query.id: query for query in await repo.list_queries(include_paused=False)}
+ 
+@@ -174,6 +182,9 @@ class Application:
+                 if query is None:
+                     log.info("poller.stopped", query_id=query_id)
+ 
++        # Searches starting in the same pass are spread out, so a restart with ten of them
++        # does not open with ten catalog requests in the same second.
++        started_this_pass = 0
+         for query_id, query in queries.items():
+             if query_id in self._poller_tasks:
+                 continue
+@@ -185,7 +196,10 @@ class Application:
+                 settings=self._settings,
+                 stop=self._stop,
+                 work_available=self._work_available,
++                initial_delay_s=started_this_pass * self._settings.startup_stagger_s,
++                announce=dispatcher.notify_status if dispatcher is not None else None,
+             )
++            started_this_pass += 1
+             self._poller_tasks[query_id] = tg.create_task(
+                 self._guard(poller), name=f"poll:{query_id}"
+             )
+diff --git a/src/vinted_sniper/config.py b/src/vinted_sniper/config.py
+index 8548692..e8a9f51 100644
+--- a/src/vinted_sniper/config.py
++++ b/src/vinted_sniper/config.py
+@@ -78,6 +78,19 @@ class Settings(BaseSettings):
+         "Blocks correlate with session age more than with request rate.",
+     )
+     request_timeout_s: float = Field(default=15.0, gt=0)
++    site_requests_per_minute: int = Field(
++        default=12,
++        ge=1,
++        description="Upper bound on requests to any one country site from this address, "
++        "counted across every search and including homepage loads. The address is what "
++        "gets scored, so the total matters more than any single search's interval.",
++    )
++    startup_stagger_s: float = Field(
++        default=20.0,
++        ge=0,
++        description="Seconds between the first checks of successive searches at startup, "
++        "so ten searches do not all introduce themselves in the same second.",
++    )
+ 
+     # --- Polling -------------------------------------------------------------------
+     poll_default_interval_s: int = Field(
+diff --git a/src/vinted_sniper/deliver/ratelimit.py b/src/vinted_sniper/deliver/ratelimit.py
+index 658c5e0..78cfe85 100644
+--- a/src/vinted_sniper/deliver/ratelimit.py
++++ b/src/vinted_sniper/deliver/ratelimit.py
+@@ -1,80 +1,8 @@
+-"""Staying inside what chat platforms allow.
+-
+-Both Discord and Telegram will tell you to slow down, and both remember that they had to.
+-Discord in particular counts rejected requests against an allowance that, once spent, gets
+-your address blocked at the edge rather than by the API — so the goal is not to react well
+-to being throttled, it is to not get throttled.
+-
+-The clock is injectable so the tests can prove the spacing without waiting for it.
+-"""
++"""Kept for import compatibility; the primitives moved up a level so the Vinted side can
++pace itself with the same tools without importing the delivery package."""
+ 
+ from __future__ import annotations
+ 
+-import asyncio
+-import time
+-from collections.abc import Awaitable, Callable
+-
+-
+-class TokenBucket:
+-    """Lets through `rate` requests a second, with a little burst allowance."""
+-
+-    def __init__(
+-        self,
+-        rate_per_s: float,
+-        capacity: float | None = None,
+-        *,
+-        clock: Callable[[], float] = time.monotonic,
+-        sleep: Callable[[float], Awaitable[None]] | None = None,
+-    ) -> None:
+-        if rate_per_s <= 0:
+-            raise ValueError("rate_per_s must be positive")
+-        self._rate = rate_per_s
+-        self._capacity = capacity if capacity is not None else max(1.0, rate_per_s)
+-        self._tokens = self._capacity
+-        self._clock = clock
+-        self._sleep = sleep or asyncio.sleep
+-        self._updated = clock()
+-        self._lock = asyncio.Lock()
+-
+-    async def acquire(self, tokens: float = 1.0) -> float:
+-        """Wait until `tokens` are available. Returns how long it waited."""
+-        async with self._lock:
+-            waited = 0.0
+-            while True:
+-                self._refill()
+-                if self._tokens >= tokens:
+-                    self._tokens -= tokens
+-                    return waited
+-                shortfall = tokens - self._tokens
+-                delay = shortfall / self._rate
+-                waited += delay
+-                await self._sleep(delay)
+-
+-    def _refill(self) -> None:
+-        now = self._clock()
+-        elapsed = max(0.0, now - self._updated)
+-        self._updated = now
+-        self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+-
+-
+-class Gate:
+-    """A hold that can be closed for a while.
+-
+-    Used when a platform says "stop, globally": one destination hitting a global limit has
+-    to pause every other destination sharing that connection, not just itself.
+-    """
+-
+-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+-        self._clock = clock
+-        self._open_at = 0.0
+-
+-    def close_for(self, seconds: float) -> None:
+-        self._open_at = max(self._open_at, self._clock() + seconds)
+-
+-    @property
+-    def wait_s(self) -> float:
+-        return max(0.0, self._open_at - self._clock())
++from vinted_sniper.ratelimit import Gate, TokenBucket
+ 
+-    @property
+-    def is_closed(self) -> bool:
+-        return self.wait_s > 0
++__all__ = ["Gate", "TokenBucket"]
+diff --git a/src/vinted_sniper/engine/poller.py b/src/vinted_sniper/engine/poller.py
+index c4a1493..9f45776 100644
+--- a/src/vinted_sniper/engine/poller.py
++++ b/src/vinted_sniper/engine/poller.py
+@@ -12,6 +12,7 @@ import asyncio
+ import contextlib
+ import random
+ import time
++from collections.abc import Awaitable, Callable
+ 
+ from vinted_sniper.config import MAX_BACKOFF_S, Settings
+ from vinted_sniper.db.repo import Query, Repo
+@@ -48,6 +49,8 @@ class Poller:
+         stop: asyncio.Event,
+         work_available: asyncio.Event | None = None,
+         rng: random.Random | None = None,
++        initial_delay_s: float = 0.0,
++        announce: Callable[[str], Awaitable[None]] | None = None,
+     ) -> None:
+         self.query = query
+         self._repo = repo
+@@ -57,17 +60,29 @@ class Poller:
+         self._stop = stop
+         self._work_available = work_available
+         self._rng = rng or random.Random()
++        self._initial_delay_s = initial_delay_s
++        self._announce = announce
+         self._consecutive_errors = 0
+         self._log = log.bind(query_id=query.id, query=query.name, tld=query.tld)
+ 
+     async def run(self) -> None:
+         """Check on a schedule until the stop event is set."""
++        if self._initial_delay_s > 0:
++            await self._wait(self._initial_delay_s)
+         while not self._stop.is_set():
+             delay = await self.tick()
+             await self._wait(delay)
+ 
+     async def tick(self) -> float:
+         """Run one check. Returns how long to wait before the next one."""
++        # Someone else on this site was refused recently. Their backoff is ours too: the
++        # address is what is being scored, and finding the block out for ourselves only
++        # adds to it.
++        holding = self._sessions.cooldown.wait_s(self.query.tld)
++        if holding > 0:
++            self._log.info("poll.cooling_down", retry_in_s=round(holding))
++            return holding + self._rng.uniform(0, 5.0)
++
+         try:
+             await self._check()
+         except AuthExpiredError as exc:
+@@ -77,13 +92,25 @@ class Poller:
+             await self._sessions.invalidate(self.query.tld)
+             return min(5.0, float(self.query.poll_interval_s))
+         except BlockedError as exc:
+-            # Vinted is refusing this client. A fresh cookie will not change that, so back
+-            # off hard and come back with a different session.
++            # Vinted is refusing this client. A fresh cookie will not change that, so drop
++            # the session, back off hard, and hold every other search on this site with
++            # us. The replacement session is fetched by the next check, not now — asking
++            # again the same second is how a short challenge becomes a long block.
+             self._consecutive_errors += 1
+             await self._repo.record_failure(self.query.id, "http_403", str(exc))
+-            await self._sessions.rotate(self.query.tld, blocked=True)
++            await self._sessions.discard_blocked(self.query.tld)
+             delay = self._backoff()
++            first_on_site = not self._sessions.cooldown.is_closed(self.query.tld)
++            self._sessions.cooldown.close(self.query.tld, delay)
+             self._log.warning("poll.blocked", error=str(exc), retry_in_s=round(delay))
++            if first_on_site and self._announce is not None:
++                with contextlib.suppress(Exception):
++                    await self._announce(
++                        f"vinted.{self.query.tld} is refusing requests from this address "
++                        f"(\u201c{self.query.name}\u201d was the first to notice). Holding "
++                        f"every search on that site for about {round(delay / 60)} min. "
++                        "If this keeps happening, see the troubleshooting guide."
++                    )
+             return delay
+         except RateLimitedError as exc:
+             self._consecutive_errors += 1
+diff --git a/src/vinted_sniper/engine/watchdog.py b/src/vinted_sniper/engine/watchdog.py
+index 8389768..6fbc15a 100644
+--- a/src/vinted_sniper/engine/watchdog.py
++++ b/src/vinted_sniper/engine/watchdog.py
+@@ -22,6 +22,7 @@ from dataclasses import dataclass
+ from vinted_sniper.config import Settings
+ from vinted_sniper.db.repo import Repo
+ from vinted_sniper.log import get_logger
++from vinted_sniper.vinted.errors import BlockedError, NetworkError
+ from vinted_sniper.vinted.session import SessionManager
+ 
+ log = get_logger(__name__)
+@@ -123,8 +124,16 @@ class Watchdog:
+         )
+ 
+         if self._settings.watchdog_action == "rotate":
+-            await self._sessions.rotate(search.tld)
+-            log.info("watchdog.session_rotated", tld=search.tld)
++            if self._sessions.cooldown.is_closed(search.tld):
++                # The site is already holding us off; a fresh handshake now would only
++                # add to the score that caused it.
++                log.info("watchdog.rotation_skipped", tld=search.tld, reason="site cooling down")
++            else:
++                try:
++                    await self._sessions.rotate(search.tld)
++                    log.info("watchdog.session_rotated", tld=search.tld)
++                except (BlockedError, NetworkError) as exc:
++                    log.warning("watchdog.rotation_failed", tld=search.tld, error=str(exc))
+ 
+         if self._announce is not None:
+             await self._announce(
+diff --git a/src/vinted_sniper/ratelimit.py b/src/vinted_sniper/ratelimit.py
+new file mode 100644
+index 0000000..658c5e0
+--- /dev/null
++++ b/src/vinted_sniper/ratelimit.py
+@@ -0,0 +1,80 @@
++"""Staying inside what chat platforms allow.
++
++Both Discord and Telegram will tell you to slow down, and both remember that they had to.
++Discord in particular counts rejected requests against an allowance that, once spent, gets
++your address blocked at the edge rather than by the API — so the goal is not to react well
++to being throttled, it is to not get throttled.
++
++The clock is injectable so the tests can prove the spacing without waiting for it.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import time
++from collections.abc import Awaitable, Callable
++
++
++class TokenBucket:
++    """Lets through `rate` requests a second, with a little burst allowance."""
++
++    def __init__(
++        self,
++        rate_per_s: float,
++        capacity: float | None = None,
++        *,
++        clock: Callable[[], float] = time.monotonic,
++        sleep: Callable[[float], Awaitable[None]] | None = None,
++    ) -> None:
++        if rate_per_s <= 0:
++            raise ValueError("rate_per_s must be positive")
++        self._rate = rate_per_s
++        self._capacity = capacity if capacity is not None else max(1.0, rate_per_s)
++        self._tokens = self._capacity
++        self._clock = clock
++        self._sleep = sleep or asyncio.sleep
++        self._updated = clock()
++        self._lock = asyncio.Lock()
++
++    async def acquire(self, tokens: float = 1.0) -> float:
++        """Wait until `tokens` are available. Returns how long it waited."""
++        async with self._lock:
++            waited = 0.0
++            while True:
++                self._refill()
++                if self._tokens >= tokens:
++                    self._tokens -= tokens
++                    return waited
++                shortfall = tokens - self._tokens
++                delay = shortfall / self._rate
++                waited += delay
++                await self._sleep(delay)
++
++    def _refill(self) -> None:
++        now = self._clock()
++        elapsed = max(0.0, now - self._updated)
++        self._updated = now
++        self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
++
++
++class Gate:
++    """A hold that can be closed for a while.
++
++    Used when a platform says "stop, globally": one destination hitting a global limit has
++    to pause every other destination sharing that connection, not just itself.
++    """
++
++    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
++        self._clock = clock
++        self._open_at = 0.0
++
++    def close_for(self, seconds: float) -> None:
++        self._open_at = max(self._open_at, self._clock() + seconds)
++
++    @property
++    def wait_s(self) -> float:
++        return max(0.0, self._open_at - self._clock())
++
++    @property
++    def is_closed(self) -> bool:
++        return self.wait_s > 0
+diff --git a/src/vinted_sniper/vinted/client.py b/src/vinted_sniper/vinted/client.py
+index 60c9aeb..396a51e 100644
+--- a/src/vinted_sniper/vinted/client.py
++++ b/src/vinted_sniper/vinted/client.py
+@@ -23,6 +23,7 @@ from vinted_sniper.vinted.errors import (
+     RateLimitedError,
+ )
+ from vinted_sniper.vinted.models import Item, ParseError, parse_item
++from vinted_sniper.vinted.pacing import RequestBudget
+ from vinted_sniper.vinted.session import SessionManager
+ from vinted_sniper.vinted.transport import Response, Transport, TransportError
+ 
+@@ -50,11 +51,13 @@ class VintedClient:
+         *,
+         keep_raw: bool = False,
+         rng: random.Random | None = None,
++        budget: RequestBudget | None = None,
+     ) -> None:
+         self._transport = transport
+         self._sessions = sessions
+         self._keep_raw = keep_raw
+         self._rng = rng or random.Random()
++        self._budget = budget
+ 
+     async def search(self, tld: str, params: dict[str, str]) -> list[Item]:
+         """Return the current first page of a search, newest first.
+@@ -68,6 +71,11 @@ class VintedClient:
+         query["per_page"] = str(PER_PAGE)
+         query["time"] = str(int(time.time()) - self._rng.randint(*_TIME_SKEW_RANGE_S))
+ 
++        if self._budget is not None:
++            waited = await self._budget.acquire(tld)
++            if waited > 1.0:
++                log.debug("catalog.paced", tld=tld, waited_s=round(waited, 1))
++
+         try:
+             response = await transport.get(
+                 urls.catalog_endpoint(tld),
+diff --git a/src/vinted_sniper/vinted/pacing.py b/src/vinted_sniper/vinted/pacing.py
+new file mode 100644
+index 0000000..8da4d0b
+--- /dev/null
++++ b/src/vinted_sniper/vinted/pacing.py
+@@ -0,0 +1,76 @@
++"""Keeping every search on one site inside a single, shared pace.
++
++Anti-bot systems score an *address*, not a search. Ten searches each politely checking every
++ten minutes still add up to one address making a request every minute, and when one of them
++gets refused the other nine carrying on at full speed is exactly what turns a short challenge
++into a long block. So two things live here that the pollers share rather than own:
++
++* A request budget per country site, so the total rate from this address stays bounded no
++  matter how many searches are configured. Homepage loads count too — they are the most
++  scrutinised request of all.
++* A cooldown per country site. The first search to be refused closes it for everyone on that
++  site; the rest wait it out instead of each discovering the block for themselves.
++
++Both take an injectable clock so the tests can prove the timing without living through it.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import time
++from collections.abc import Awaitable, Callable
++
++from vinted_sniper.ratelimit import Gate, TokenBucket
++
++
++class RequestBudget:
++    """One token bucket per country site, created on first use."""
++
++    def __init__(
++        self,
++        per_minute: float,
++        *,
++        burst: float = 3.0,
++        clock: Callable[[], float] = time.monotonic,
++        sleep: Callable[[float], Awaitable[None]] | None = None,
++    ) -> None:
++        if per_minute <= 0:
++            raise ValueError("per_minute must be positive")
++        self._rate_per_s = per_minute / 60.0
++        self._burst = burst
++        self._clock = clock
++        self._sleep = sleep or asyncio.sleep
++        self._buckets: dict[str, TokenBucket] = {}
++
++    async def acquire(self, tld: str) -> float:
++        """Wait for permission to make one request to a site. Returns how long it waited."""
++        bucket = self._buckets.get(tld)
++        if bucket is None:
++            bucket = TokenBucket(
++                self._rate_per_s, capacity=self._burst, clock=self._clock, sleep=self._sleep
++            )
++            self._buckets[tld] = bucket
++        return await bucket.acquire()
++
++
++class SiteCooldown:
++    """A site-wide hold, closed by whichever search was refused first."""
++
++    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
++        self._clock = clock
++        self._gates: dict[str, Gate] = {}
++
++    def close(self, tld: str, seconds: float) -> None:
++        """Hold every search on this site for at least `seconds` more."""
++        self._gates.setdefault(tld, Gate(clock=self._clock)).close_for(seconds)
++
++    def wait_s(self, tld: str) -> float:
++        """Seconds until the site may be asked again; zero when it may be asked now."""
++        gate = self._gates.get(tld)
++        return gate.wait_s if gate is not None else 0.0
++
++    def is_closed(self, tld: str) -> bool:
++        return self.wait_s(tld) > 0
++
++    def clear(self, tld: str) -> None:
++        self._gates.pop(tld, None)
+diff --git a/src/vinted_sniper/vinted/session.py b/src/vinted_sniper/vinted/session.py
+index b87ace5..7d05e4e 100644
+--- a/src/vinted_sniper/vinted/session.py
++++ b/src/vinted_sniper/vinted/session.py
+@@ -12,6 +12,7 @@ been alive more than how fast it is used.
+ 
+ from __future__ import annotations
+ 
++import asyncio
+ import json
+ import time
+ from dataclasses import dataclass
+@@ -22,6 +23,7 @@ from vinted_sniper.log import get_logger
+ from vinted_sniper.vinted import headers as hdr
+ from vinted_sniper.vinted import urls
+ from vinted_sniper.vinted.errors import BlockedError, NetworkError
++from vinted_sniper.vinted.pacing import RequestBudget, SiteCooldown
+ from vinted_sniper.vinted.proxies import QUARANTINE_BLOCKED_S, QUARANTINE_NETWORK_S, ProxyRotation
+ from vinted_sniper.vinted.transport import Transport, TransportError, TransportPool
+ 
+@@ -63,6 +65,8 @@ class SessionManager:
+         *,
+         rotate_after_minutes: int = 60,
+         proxies: ProxyRotation | None = None,
++        budget: RequestBudget | None = None,
++        cooldown: SiteCooldown | None = None,
+     ) -> None:
+         self._db = db
+         self._pool: TransportPool | None = None
+@@ -73,7 +77,14 @@ class SessionManager:
+             self._transport = transport
+         self._rotate_after_s = rotate_after_minutes * 60
+         self._proxies = proxies or ProxyRotation()
++        self._budget = budget
++        self.cooldown = cooldown or SiteCooldown()
+         self._cache: dict[str, Session] = {}
++        # One bootstrap per site at a time. Without this, every search that starts on an
++        # empty cache loads the homepage itself — a burst of different browser personas
++        # from one address inside a second, which is the most bot-shaped thing this app
++        # could possibly do.
++        self._locks: dict[str, asyncio.Lock] = {}
+ 
+     def transport_for(self, session: Session) -> Transport:
+         """The client that reaches Vinted the same way this session was created."""
+@@ -85,6 +96,11 @@ class SessionManager:
+ 
+     async def get(self, tld: str) -> Session:
+         """Return a usable session for a site, creating or replacing it as needed."""
++        lock = self._locks.setdefault(tld, asyncio.Lock())
++        async with lock:
++            return await self._get_locked(tld)
++
++    async def _get_locked(self, tld: str) -> Session:
+         session = self._cache.get(tld) or await self._load(tld)
+ 
+         if session is not None and session.age_s() >= self._rotate_after_s:
+@@ -102,16 +118,30 @@ class SessionManager:
+         self._cache.pop(tld, None)
+         await self._db.execute("DELETE FROM sessions WHERE tld = ?", (tld,))
+ 
+-    async def rotate(self, tld: str, *, blocked: bool = False) -> Session:
+-        """Replace a session outright, with a different browser persona.
++    async def discard_blocked(self, tld: str) -> None:
++        """Drop a refused session without asking for another one yet.
+ 
+-        When the old one was refused rather than merely old, its route is set aside too:
+-        a new cookie down the same blocked path buys nothing.
++        The route it came through is set aside too: a new cookie down the same blocked
++        path buys nothing. The replacement is deliberately *not* fetched here — the caller
++        is about to back off, and the next check will bootstrap when it is time. Asking
++        again immediately after a refusal is the one move guaranteed to make it longer.
+         """
+         previous = self._cache.get(tld)
+         await self.invalidate(tld)
+-        if blocked and previous is not None:
++        if previous is not None:
+             self._proxies.bench(previous.proxy, QUARANTINE_BLOCKED_S, "refused by Vinted")
++
++    async def rotate(self, tld: str, *, blocked: bool = False) -> Session:
++        """Replace a session outright, with a different browser persona.
++
++        When the old one was refused rather than merely old, its route is set aside too.
++        Note that this bootstraps straight away and can therefore raise `BlockedError`;
++        callers reacting to a refusal want `discard_blocked` instead.
++        """
++        if blocked:
++            await self.discard_blocked(tld)
++        else:
++            await self.invalidate(tld)
+         return await self.get(tld)
+ 
+     async def bootstrap(self, tld: str) -> Session:
+@@ -123,6 +153,9 @@ class SessionManager:
+         if transport is None:  # pragma: no cover - one of the two is always set
+             raise RuntimeError("SessionManager was built without a transport")
+ 
++        if self._budget is not None:
++            await self._budget.acquire(tld)
++
+         try:
+             response = await transport.get(
+                 root,
+diff --git a/tests/integration/test_pacing.py b/tests/integration/test_pacing.py
+new file mode 100644
+index 0000000..5eb5381
+--- /dev/null
++++ b/tests/integration/test_pacing.py
+@@ -0,0 +1,100 @@
++"""One address, many searches: the parts that keep them from behaving like a botnet."""
++
++from __future__ import annotations
++
++import asyncio
++from typing import Any
++
++from tests.conftest import ScriptedTransport
++from vinted_sniper.vinted.client import VintedClient
++from vinted_sniper.vinted.pacing import RequestBudget, SiteCooldown
++from vinted_sniper.vinted.session import SessionManager
++
++
++async def test_searches_starting_together_share_one_handshake(
++    transport: ScriptedTransport, db: Any
++) -> None:
++    """Seven searches on an empty cache used to mean seven homepage loads inside a second,
++    each with its own randomly chosen browser persona. One address, seven browsers, one
++    second: the anti-bot system does not need a second clue."""
++    sessions = SessionManager(db, transport)
++
++    results = await asyncio.gather(*(sessions.get("fr") for _ in range(7)))
++
++    homepage_loads = [r for r in transport.requests if "/api/v2/" not in r["url"]]
++    assert len(homepage_loads) == 1
++    assert len({id(session) for session in results}) == 1, "everyone gets the same session"
++    assert len({session.identity.user_agent for session in results}) == 1
++
++
++async def test_sites_are_bootstrapped_independently(transport: ScriptedTransport, db: Any) -> None:
++    sessions = SessionManager(db, transport)
++
++    await asyncio.gather(sessions.get("fr"), sessions.get("de"))
++
++    homepage_loads = [r for r in transport.requests if "/api/v2/" not in r["url"]]
++    assert len(homepage_loads) == 2
++
++
++async def test_the_budget_paces_catalog_requests_and_handshakes_alike(
++    transport: ScriptedTransport, db: Any
++) -> None:
++    clock = _Clock()
++    slept: list[float] = []
++
++    async def sleep(seconds: float) -> None:
++        slept.append(seconds)
++        clock.now += seconds
++
++    budget = RequestBudget(per_minute=6, burst=1, clock=clock, sleep=sleep)
++    sessions = SessionManager(db, transport, budget=budget)
++    client = VintedClient(transport, sessions, budget=budget)
++
++    for _ in range(3):
++        transport.queue_catalog([])
++        await client.search("fr", {"search_text": "x"})
++
++    # Handshake + three catalog calls = four requests; the first is free (burst of one),
++    # each of the rest waits out a ten-second slot at six per minute.
++    assert len(transport.requests) == 4
++    assert len(slept) == 3
++    assert all(abs(s - 10.0) < 0.01 for s in slept)
++
++
++async def test_budgets_are_per_site() -> None:
++    clock = _Clock()
++    slept: list[float] = []
++
++    async def sleep(seconds: float) -> None:
++        slept.append(seconds)
++        clock.now += seconds
++
++    budget = RequestBudget(per_minute=6, burst=1, clock=clock, sleep=sleep)
++    await budget.acquire("fr")
++    await budget.acquire("de")
++
++    assert slept == [], "a request to one site should not be charged against another"
++
++
++def test_the_cooldown_is_per_site_and_only_ever_extends() -> None:
++    clock = _Clock()
++    cooldown = SiteCooldown(clock=clock)
++
++    assert not cooldown.is_closed("fr")
++    cooldown.close("fr", 300)
++    assert cooldown.is_closed("fr")
++    assert not cooldown.is_closed("de")
++
++    cooldown.close("fr", 60)
++    assert cooldown.wait_s("fr") == 300, "a shorter hold must not cut an existing one short"
++
++    clock.now += 301
++    assert not cooldown.is_closed("fr")
++
++
++class _Clock:
++    def __init__(self) -> None:
++        self.now = 0.0
++
++    def __call__(self) -> float:
++        return self.now
+diff --git a/tests/integration/test_poller.py b/tests/integration/test_poller.py
+index 9b341e8..1005ff9 100644
+--- a/tests/integration/test_poller.py
++++ b/tests/integration/test_poller.py
+@@ -20,6 +20,7 @@ from vinted_sniper.config import Settings
+ from vinted_sniper.db.repo import Repo
+ from vinted_sniper.engine.poller import Poller
+ from vinted_sniper.vinted.client import VintedClient
++from vinted_sniper.vinted.pacing import SiteCooldown
+ from vinted_sniper.vinted.proxies import ProxyRotation
+ from vinted_sniper.vinted.session import SessionManager
+ from vinted_sniper.vinted.transport import Response, TransportPool
+@@ -32,6 +33,8 @@ async def make_poller(
+     *,
+     db: Any,
+     max_total_price: str | None = None,
++    clock: FakeClock | None = None,
++    announce: Any = None,
+ ) -> tuple[Poller, asyncio.Event]:
+     query_id = await repo.add_query(
+         name="test search",
+@@ -43,7 +46,20 @@ async def make_poller(
+     )
+     query = await repo.get_query(query_id)
+     assert query is not None
+-    return poller_for(query, transport, repo, settings, db=db)
++    return poller_for(query, transport, repo, settings, db=db, clock=clock, announce=announce)
++
++
++class FakeClock:
++    """A monotonic clock the test moves by hand, for the site-wide cooldown."""
++
++    def __init__(self) -> None:
++        self.now = 1000.0
++
++    def __call__(self) -> float:
++        return self.now
++
++    def advance(self, seconds: float) -> None:
++        self.now += seconds
+ 
+ 
+ def poller_for(
+@@ -53,9 +69,12 @@ def poller_for(
+     settings: Settings,
+     *,
+     db: Any,
++    clock: FakeClock | None = None,
++    announce: Any = None,
+ ) -> tuple[Poller, asyncio.Event]:
+     """Build a poller over an existing search, as a restarted process would."""
+-    sessions = SessionManager(db, transport)
++    cooldown = SiteCooldown(clock=clock) if clock is not None else None
++    sessions = SessionManager(db, transport, cooldown=cooldown)
+     client = VintedClient(transport, sessions)
+     work = asyncio.Event()
+     poller = Poller(
+@@ -66,6 +85,7 @@ def poller_for(
+         settings=settings,
+         stop=asyncio.Event(),
+         work_available=work,
++        announce=announce,
+     )
+     return poller, work
+ 
+@@ -167,7 +187,9 @@ async def test_only_listings_newer_than_the_last_check_are_announced(
+ async def test_a_blocked_request_backs_off_and_replaces_the_session(
+     transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
+ ) -> None:
+-    poller, _ = await make_poller(transport, repo, settings, db=db)
++    clock = FakeClock()
++    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock)
++    await poller.tick()  # a first, successful check establishes a session
+     transport.queue_status(403, "Forbidden")
+     homepage_visits_before = sum(1 for r in transport.requests if "/api/v2/" not in r["url"])
+ 
+@@ -178,15 +200,121 @@ async def test_a_blocked_request_backs_off_and_replaces_the_session(
+     assert state.count_403 == 1
+     assert delay > settings.poll_default_interval_s, "a block must slow us down, not speed us up"
+ 
++    homepage_visits_now = sum(1 for r in transport.requests if "/api/v2/" not in r["url"])
++    assert homepage_visits_now == homepage_visits_before, (
++        "being refused must not trigger another handshake on the spot; that is the one "
++        "request guaranteed to make the block longer"
++    )
++
++    # Once the backoff has passed, the search comes back with a fresh session and keeps
++    # running rather than dying.
++    clock.advance(delay + 1)
++    transport.queue_catalog([])
++    assert await poller.tick() > 0
++    assert (await repo.get_state(poller.query.id)).last_status == "ok"
+     homepage_visits_after = sum(1 for r in transport.requests if "/api/v2/" not in r["url"])
+     assert homepage_visits_after > homepage_visits_before, (
+-        "being refused should start a fresh session rather than reuse the refused one"
++        "the next check should start a fresh session rather than reuse the refused one"
++    )
++
++
++async def test_a_refusal_during_the_handshake_itself_is_a_backoff_not_a_crash(
++    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
++) -> None:
++    """The homepage answering without a session cookie is the DataDome challenge page.
++
++    That used to escape the poller as an unhandled exception, kill its task, and have the
++    supervisor restart it fifteen seconds later — every search on the site hitting the
++    homepage four times a minute until the address was blocked outright.
++    """
++    clock = FakeClock()
++    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock)
++    transport.queue_root(
++        Response(status_code=200, text="<html>challenge</html>", headers={}, cookies={})
++    )
++
++    delay = await poller.tick()  # must not raise
++
++    state = await repo.get_state(poller.query.id)
++    assert state.last_status == "http_403"
++    assert delay > settings.poll_default_interval_s
++
++    # A second refusal at the handshake, still no crash, and a longer wait.
++    clock.advance(delay + 1)
++    transport.queue_root(
++        Response(status_code=200, text="<html>challenge</html>", headers={}, cookies={})
+     )
++    assert await poller.tick() > delay
+ 
+-    # And the search keeps running rather than dying.
++
++async def test_one_refusal_holds_every_search_on_that_site(
++    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
++) -> None:
++    clock = FakeClock()
++    sessions = SessionManager(db, transport, cooldown=SiteCooldown(clock=clock))
++    client = VintedClient(transport, sessions)
++
++    async def add(name: str) -> Poller:
++        query_id = await repo.add_query(
++            name=name,
++            url=f"https://www.vinted.fr/catalog?search_text={name}",
++            tld="fr",
++            params={"search_text": name},
++            poll_interval_s=60,
++        )
++        query = await repo.get_query(query_id)
++        assert query is not None
++        return Poller(
++            query,
++            repo=repo,
++            client=client,
++            sessions=sessions,
++            settings=settings,
++            stop=asyncio.Event(),
++        )
++
++    first, second = await add("first"), await add("second")
++
++    transport.queue_status(403, "Forbidden")
++    hold = await first.tick()
++    requests_before = len(transport.requests)
++
++    wait = await second.tick()
++
++    assert len(transport.requests) == requests_before, (
++        "the second search must not go and discover the block for itself"
++    )
++    assert wait >= hold * 0.9
++    assert (await repo.get_state(second.query.id)).last_status is None, (
++        "waiting out someone else's backoff is not a failure of this search"
++    )
++
++    clock.advance(hold + 10)
+     transport.queue_catalog([])
++    assert await second.tick() > 0
++    assert (await repo.get_state(second.query.id)).last_status == "ok"
++
++
++async def test_the_first_refusal_on_a_site_is_announced_once(
++    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
++) -> None:
++    clock = FakeClock()
++    announcements: list[str] = []
++
++    async def announce(message: str) -> None:
++        announcements.append(message)
++
++    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock, announce=announce)
++
++    transport.queue_status(403, "Forbidden")
++    delay = await poller.tick()
++    assert len(announcements) == 1
++    assert "vinted.fr" in announcements[0]
++
++    # Still inside the hold: a second refusal from the same site is not news.
++    clock.advance(delay / 2)
+     assert await poller.tick() > 0
+-    assert (await repo.get_state(poller.query.id)).last_status == "ok"
++    assert len(announcements) == 1
+ 
+ 
+ async def test_a_blocked_proxy_is_set_aside_and_the_next_one_is_used(
+@@ -225,12 +353,14 @@ async def test_a_blocked_proxy_is_set_aside_and_the_next_one_is_used(
+ async def test_backoff_grows_with_repeated_blocks(
+     transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
+ ) -> None:
+-    poller, _ = await make_poller(transport, repo, settings, db=db)
++    clock = FakeClock()
++    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock)
+ 
+     delays = []
+     for _ in range(3):
+         transport.queue_status(403, "Forbidden")
+         delays.append(await poller.tick())
++        clock.advance(delays[-1] + 1)
+ 
+     assert delays[0] < delays[1] < delays[2]
+ 
+-- 
+2.43.0
+

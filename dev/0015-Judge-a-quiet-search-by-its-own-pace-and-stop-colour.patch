@@ -1,0 +1,364 @@
+From 08880683058e2c4e32dd0c0c48ef5774ed1cb123 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 18:03:27 +0000
+Subject: [PATCH 15/25] Judge a quiet search by its own pace, and stop
+ colouring container logs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The watchdog compared every search against its busiest neighbour on the
+same site: if "waterproof jacket" kept finding listings, "Rab Downpour"
+going quiet for a hundred minutes was "stale". But the niche search sees a
+listing a week and returns four results on a page that holds ninety-six.
+Now a search whose last page was not full is never called stale — a frozen
+feed serves the same full page forever, a niche search serves what little
+there is — and a full-page search has to be quiet for six times its own
+median gap between listings (from the listing times already recorded), and
+two hours at least, before it counts. Migration 0009 records the last page
+size.
+
+Console logs used ANSI colours whenever stderr was a TTY, which a container
+started with one reports even when the reader is Portainer's log viewer;
+it renders the escape codes as a smear of repeated words. Colours are now
+off unless LOG_COLOR=true.
+---
+ .env.example                                  |  2 +
+ CHANGELOG.md                                  |  6 ++
+ docs/configuration.md                         |  1 +
+ src/vinted_sniper/cli.py                      |  2 +-
+ src/vinted_sniper/config.py                   |  5 ++
+ .../db/migrations/0009_last_returned.sql      |  3 +
+ src/vinted_sniper/db/repo.py                  | 24 +++++++-
+ src/vinted_sniper/engine/watchdog.py          | 32 ++++++++++
+ src/vinted_sniper/log.py                      | 14 ++++-
+ .../integration/test_watchdog_and_storage.py  | 61 +++++++++++++++++++
+ 10 files changed, 144 insertions(+), 6 deletions(-)
+ create mode 100644 src/vinted_sniper/db/migrations/0009_last_returned.sql
+
+diff --git a/.env.example b/.env.example
+index 9c923fb..89d4be5 100644
+--- a/.env.example
++++ b/.env.example
+@@ -117,6 +117,8 @@
+ # VINTED_SNIPER_LOG_LEVEL=INFO
+ # console while you are watching, json when something else is collecting it.
+ # VINTED_SNIPER_LOG_FORMAT=console
++# Colours only if you read the log in a real terminal.
++# VINTED_SNIPER_LOG_COLOR=false
+ 
+ 
+ # --- Working on the code ----------------------------------------------------------------
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index cee4ca5..d950270 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -5,6 +5,12 @@ All notable changes, newest first. Dates are when the change landed on `main`.
+ ## Unreleased
+ 
+ ### Fixed
++- The watchdog called niche searches "stale" whenever a busy search on the same site kept
++  finding listings — "Rab Downpour" measured against "waterproof jacket" looked frozen forever.
++  A search whose page is not even full is never stale, and a full-page search is judged
++  against its own usual gap between listings (six times it, two hours at least).
++- Console logs no longer use ANSI colours unless `LOG_COLOR=true`; Portainer's log viewer
++  rendered them as a smear of repeated words.
+ - The "Message seller" and "Buy" buttons under Telegram alerts linked to Vinted deep links
+   (`/items/{id}/want_it/new`, `/transaction/buy/new`) that have answered "page not found" since
+   the site's front end was rebuilt. They are replaced by "Seller profile"; asking and buying
+diff --git a/docs/configuration.md b/docs/configuration.md
+index da74f85..e96cea5 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -81,6 +81,7 @@ was found, so you can see the real delay yourself.
+ | Variable | Default | What it does |
+ |---|---|---|
+ | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
++| `LOG_COLOR` | `false` | ANSI colours in console logs. Leave off when the reader is Portainer or `docker logs`; they render the escape codes as repeated words. |
+ | `LOG_FORMAT` | `console` | `json` when something else is collecting the logs. |
+ | `FETCH_MODE` | `live` | `mock` replays recorded responses from disk instead of calling Vinted. |
+ | `MOCK_SCENARIO_DIR` | unset | Required when `FETCH_MODE=mock`. |
+diff --git a/src/vinted_sniper/cli.py b/src/vinted_sniper/cli.py
+index 12d1c33..1a7134c 100644
+--- a/src/vinted_sniper/cli.py
++++ b/src/vinted_sniper/cli.py
+@@ -431,7 +431,7 @@ async def _cmd_import(settings: Settings, path: str) -> int:
+ 
+ async def _run(args: argparse.Namespace) -> int:
+     settings = Settings()
+-    log.configure(level=settings.log_level, fmt=settings.log_format)
++    log.configure(level=settings.log_level, fmt=settings.log_format, colors=settings.log_color)
+ 
+     match args.command:
+         case "run":
+diff --git a/src/vinted_sniper/config.py b/src/vinted_sniper/config.py
+index 103b28d..e6b2753 100644
+--- a/src/vinted_sniper/config.py
++++ b/src/vinted_sniper/config.py
+@@ -61,6 +61,11 @@ class Settings(BaseSettings):
+     # --- Logging -------------------------------------------------------------------
+     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+     log_format: Literal["console", "json"] = "console"
++    log_color: bool = Field(
++        default=False,
++        description="ANSI colours in console logs. Off by default: Portainer's and Docker's "
++        "log viewers render the escape codes as garbled, repeated words.",
++    )
+ 
+     # --- Vinted transport ----------------------------------------------------------
+     http_impersonate: bool = Field(
+diff --git a/src/vinted_sniper/db/migrations/0009_last_returned.sql b/src/vinted_sniper/db/migrations/0009_last_returned.sql
+new file mode 100644
+index 0000000..2655a45
+--- /dev/null
++++ b/src/vinted_sniper/db/migrations/0009_last_returned.sql
+@@ -0,0 +1,3 @@
++-- How many listings the last check returned. A search whose page is not even full is a
++-- niche one, and its quiet is the market's, not a frozen feed's.
++ALTER TABLE query_state ADD COLUMN last_returned INTEGER;
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index c54a454..5b4de13 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -6,6 +6,7 @@ of the code deals in ordinary Python objects rather than rows.
+ 
+ from __future__ import annotations
+ 
++import itertools
+ import json
+ import time
+ from dataclasses import dataclass, field
+@@ -62,6 +63,7 @@ class QueryState:
+     items_seen_total: int = 0
+     count_403: int = 0
+     count_429: int = 0
++    last_returned: int | None = None
+ 
+     @property
+     def is_first_run(self) -> bool:
+@@ -310,6 +312,7 @@ class Repo:
+             items_seen_total=row["items_seen_total"],
+             count_403=row["count_403"],
+             count_429=row["count_429"],
++            last_returned=row["last_returned"],
+         )
+ 
+     async def all_states(self) -> list[QueryState]:
+@@ -327,6 +330,7 @@ class Repo:
+                 items_seen_total=row["items_seen_total"],
+                 count_403=row["count_403"],
+                 count_429=row["count_429"],
++                last_returned=row["last_returned"],
+             )
+             for row in rows
+         ]
+@@ -355,8 +359,9 @@ class Repo:
+             "UPDATE query_state SET last_polled_at = ?, last_success_at = ?, last_status = 'ok', "
+             "last_error = NULL, newest_raw_ts = ?, "
+             "newest_item_ts = COALESCE(?, newest_item_ts), "
+-            "items_seen_total = items_seen_total + ?, stale_cycles = ? WHERE query_id = ?",
+-            (now, now, newest_raw_ts, newest_item_ts, seen, stale_cycles, query_id),
++            "items_seen_total = items_seen_total + ?, stale_cycles = ?, last_returned = ? "
++            "WHERE query_id = ?",
++            (now, now, newest_raw_ts, newest_item_ts, seen, stale_cycles, seen, query_id),
+         )
+ 
+     # --- Destinations --------------------------------------------------------------
+@@ -690,6 +695,21 @@ class Repo:
+                 )
+         return len(drops)
+ 
++    async def typical_listing_gap_s(self, query_id: int) -> int | None:
++        """How often this search normally sees a new listing, from the listing times we
++        have recorded for it — the median gap between consecutive photo timestamps.
++        None until there are enough to say."""
++        rows = await self._db.fetch_all(
++            "SELECT photo_ts FROM items WHERE query_id = ? AND photo_ts IS NOT NULL "
++            "ORDER BY photo_ts DESC LIMIT 60",
++            (query_id,),
++        )
++        stamps = [int(row["photo_ts"]) for row in rows]
++        if len(stamps) < 8:  # noqa: PLR2004 - fewer and the median is noise
++            return None
++        gaps = sorted(a - b for a, b in itertools.pairwise(stamps) if a > b)
++        return gaps[len(gaps) // 2] if gaps else None
++
+     async def delivery_history(
+         self, *, limit: int = 200, query_id: int | None = None, status: str | None = None
+     ) -> list[aiosqlite.Row]:
+diff --git a/src/vinted_sniper/engine/watchdog.py b/src/vinted_sniper/engine/watchdog.py
+index 6fbc15a..ce3aa0b 100644
+--- a/src/vinted_sniper/engine/watchdog.py
++++ b/src/vinted_sniper/engine/watchdog.py
+@@ -9,6 +9,13 @@ The tell is comparative. A search whose newest listing has not moved for many ch
+ just be a quiet corner of the market — but if a different search on the same site is still
+ turning up new things, the quiet one is stuck rather than slow. That distinction is the
+ whole trick, and it is why this runs across searches instead of inside the poller.
++
++Comparing across searches has a blind spot, though: velocities differ wildly. "Waterproof
++jacket" sees a new listing every few minutes; "Rab Downpour" a few a week. Measured against
++the busy one, the niche one is "stale" forever. So a search is also judged against its own
++history — how often it normally sees a listing — and a search whose page is not even full
++is never called stale: a frozen feed serves the same full page over and over, a niche
++search serves what little there is.
+ """
+ 
+ from __future__ import annotations
+@@ -22,6 +29,7 @@ from dataclasses import dataclass
+ from vinted_sniper.config import Settings
+ from vinted_sniper.db.repo import Repo
+ from vinted_sniper.log import get_logger
++from vinted_sniper.vinted.client import PER_PAGE
+ from vinted_sniper.vinted.errors import BlockedError, NetworkError
+ from vinted_sniper.vinted.session import SessionManager
+ 
+@@ -30,6 +38,11 @@ log = get_logger(__name__)
+ # How long a site must have been advancing for us to trust it as a comparison.
+ _RECENT_MOVEMENT_S = 900
+ 
++# A search is only suspicious once it has been quiet for this many times its own usual gap
++# between listings, and for at least this long in absolute terms.
++_QUIET_MULTIPLE = 6
++_QUIET_FLOOR_S = 2 * 3600
++
+ 
+ @dataclass(frozen=True, slots=True)
+ class StaleSearch:
+@@ -95,6 +108,13 @@ class Watchdog:
+             if query.tld not in moving_sites:
+                 # The whole site is quiet. That is a slow night, not a stuck feed.
+                 continue
++            if state.last_returned is not None and state.last_returned < PER_PAGE:
++                # Not even a full page: a niche search, not a frozen one.
++                self._already_warned.discard(query_id)
++                continue
++            if not await self._quiet_for_its_own_standards(query_id, state.newest_raw_ts, now):
++                self._already_warned.discard(query_id)
++                continue
+             stale.append(
+                 StaleSearch(
+                     query_id=query_id,
+@@ -109,6 +129,18 @@ class Watchdog:
+             await self._react(search)
+         return stale
+ 
++    async def _quiet_for_its_own_standards(
++        self, query_id: int, newest_raw_ts: int | None, now: int
++    ) -> bool:
++        """Has this search been silent far longer than it usually is between listings?"""
++        if newest_raw_ts is None:
++            return True
++        quiet_for = now - newest_raw_ts
++        gap = await self._repo.typical_listing_gap_s(query_id)
++        if gap is None:
++            return quiet_for >= _QUIET_FLOOR_S
++        return quiet_for >= max(_QUIET_FLOOR_S, gap * _QUIET_MULTIPLE)
++
+     async def _react(self, search: StaleSearch) -> None:
+         if search.query_id in self._already_warned:
+             return
+diff --git a/src/vinted_sniper/log.py b/src/vinted_sniper/log.py
+index 72d3e4a..599a115 100644
+--- a/src/vinted_sniper/log.py
++++ b/src/vinted_sniper/log.py
+@@ -8,6 +8,7 @@ among a dozen healthy ones.
+ from __future__ import annotations
+ 
+ import logging
++import os
+ import sys
+ from typing import Any
+ 
+@@ -17,10 +18,17 @@ import structlog
+ _NOISY_LOGGERS = ("httpx", "httpcore", "aiogram.event", "uvicorn.access")
+ 
+ 
+-def configure(level: str = "INFO", fmt: str = "console") -> None:
+-    """Set up structlog and the standard library logger it bridges to."""
++def configure(level: str = "INFO", fmt: str = "console", *, colors: bool | None = None) -> None:
++    """Set up structlog and the standard library logger it bridges to.
++
++    Colours are off unless asked for. A container started with a TTY reports one even when
++    the reader is Portainer's log viewer, which does not understand the escape codes and
++    renders every coloured line as a smear of repeated words.
++    """
++    if colors is None:
++        colors = os.environ.get("VINTED_SNIPER_LOG_COLOR", "").lower() in {"1", "true", "yes"}
+     renderer: structlog.typing.Processor = (
+-        structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
++        structlog.dev.ConsoleRenderer(colors=colors and sys.stderr.isatty())
+         if fmt == "console"
+         else structlog.processors.JSONRenderer()
+     )
+diff --git a/tests/integration/test_watchdog_and_storage.py b/tests/integration/test_watchdog_and_storage.py
+index aa334fe..fdfda39 100644
+--- a/tests/integration/test_watchdog_and_storage.py
++++ b/tests/integration/test_watchdog_and_storage.py
+@@ -235,3 +235,64 @@ async def test_old_listings_are_pruned(repo: Repo, db: Database) -> None:
+ 
+     assert await repo.prune_items(older_than_days=30) == 1
+     assert await repo.known_item_ids([1]) == set()
++
++
++async def test_a_niche_search_is_not_stale_just_because_a_busy_one_keeps_moving(
++    repo: Repo, db: Database, transport: ScriptedTransport, settings: Settings
++) -> None:
++    """'Rab Downpour' sees a listing a week; 'waterproof jacket' one every few minutes.
++    Measured against the busy one, the niche one looked frozen forever."""
++    niche = await add_search(repo, "rab downpour")
++    busy = await add_search(repo, "waterproof jacket")
++    now = int(time.time())
++
++    # The niche search's page is not even full.
++    await set_state(
++        db, niche, last_success_at=now, stale_cycles=12, newest_raw_ts=now - 86_400, last_returned=4
++    )
++    await set_state(db, busy, last_success_at=now, stale_cycles=0, newest_raw_ts=now - 30)
++
++    watchdog, announcements = make_watchdog(repo, db, transport, settings)
++    assert await watchdog.check() == []
++    assert announcements == []
++
++
++async def test_a_full_page_search_is_judged_against_its_own_pace(
++    repo: Repo, db: Database, transport: ScriptedTransport, settings: Settings
++) -> None:
++    slow = await add_search(repo, "slow but full")
++    busy = await add_search(repo, "busy")
++    now = int(time.time())
++    query = await repo.get_query(slow)
++    assert query is not None
++
++    # This search normally sees one listing every ~4 hours.
++    listings = [
++        Item(
++            item_id=i,
++            tld="fr",
++            title=f"x{i}",
++            url=f"https://www.vinted.fr/items/{i}",
++            photo_ts=now - i * 4 * 3600,
++        )
++        for i in range(1, 13)
++    ]
++    await repo.record_new_items(query, listings, [])
++
++    await set_state(db, busy, last_success_at=now, stale_cycles=0, newest_raw_ts=now - 30)
++    watchdog, _ = make_watchdog(repo, db, transport, settings)
++
++    # Quiet for 10 hours with a 4-hour rhythm: unremarkable.
++    await set_state(
++        db,
++        slow,
++        last_success_at=now,
++        stale_cycles=12,
++        newest_raw_ts=now - 10 * 3600,
++        last_returned=96,
++    )
++    assert await watchdog.check() == []
++
++    # Quiet for 30 hours — more than six times its usual gap — with a full page: stuck.
++    await set_state(db, slow, newest_raw_ts=now - 30 * 3600)
++    assert [s.query_id for s in await watchdog.check()] == [slow]
+-- 
+2.43.0
+

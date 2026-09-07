@@ -1,0 +1,701 @@
+From 58e0f18c2027f4661abd7560842cca0ffdac4265 Mon Sep 17 00:00:00 2001
+From: Luc3as <luc3as@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 18:08:06 +0000
+Subject: [PATCH 16/25] Market memory, retail cache and buyer feedback for the
+ agent
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+"Is this a bargain?" cannot be answered from the retail price alone: what a
+thing costs new says little about what it sells for used. The search's own
+page says that — ninety-six price points every check — and until now they
+were thrown away unless they passed the filters.
+
+Every listing on the page is now recorded in a market table (price, size,
+condition, hearts, views, first and last seen), at no extra requests. The
+webhook payload gains a "market" block per listing: price percentiles over
+thirty days, the listing's own percentile, the median for the same
+condition, and the median price of listings that vanished within a day —
+the closest thing to a sold price the catalog offers. Demand travels too:
+favourites, views, minutes since listing, favourites per hour.
+
+Two feedback loops close as well. A verdict's model and retail price are
+cached per search and sent as "known_retail" next time, so the same product
+does not cost another web search and gets the same number. And 👍/👎 buttons
+under each judged alert (and each late-verdict follow-up) store the buyer's
+opinion, sent back as "buyer_feedback" — examples of what this particular
+buyer calls a deal. Migration 0010 adds the three tables.
+---
+ CHANGELOG.md                                  |   1 +
+ docs/enrichment.md                            |  23 ++-
+ src/vinted_sniper/app.py                      |   1 +
+ src/vinted_sniper/botctl/telegram_bot.py      |  28 ++-
+ .../migrations/0010_market_and_feedback.sql   |  43 +++++
+ src/vinted_sniper/db/repo.py                  | 171 ++++++++++++++++++
+ src/vinted_sniper/deliver/dispatcher.py       |  20 +-
+ src/vinted_sniper/deliver/telegram.py         |  32 +++-
+ src/vinted_sniper/deliver/webhook.py          |  38 +++-
+ src/vinted_sniper/engine/poller.py            |   2 +
+ tests/integration/test_delivery.py            |  73 ++++++++
+ tests/unit/test_senders.py                    |   2 +
+ 12 files changed, 420 insertions(+), 14 deletions(-)
+ create mode 100644 src/vinted_sniper/db/migrations/0010_market_and_feedback.sql
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d950270..6604186 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -47,6 +47,7 @@ All notable changes, newest first. Dates are when the change landed on `main`.
+   dull ones muted. Late hot verdicts get a short follow-up. See `docs/enrichment.md`.
+ - **Delivery history** page (`/history`, `/api/history`): every notification, its kind, where it went, sent/pending/failed with the error, held-until for enrichment — the answer to "did my alert go out?".
+ - Telegram `/pause <id>` alongside `/resume <id>`.
++- **Market memory**: every listing on a search's page is recorded as a price point (no extra requests). The webhook payload gains `market` (percentiles, the listing's own percentile, median for the same condition, the price under which listings vanish within a day), demand (`favourites_per_hour`), `known_retail` (retail prices earlier verdicts found, cached per search) and `buyer_feedback` (👍/👎 the buyer gave earlier verdicts, via new buttons under Telegram alerts).
+ - **Weekly report** to status destinations on Monday morning (`WEEKLY_REPORT`).
+ - **`export` / `import`** of searches, destinations and routes as one JSON document; also
+   `/api/export` and `/api/import`.
+diff --git a/docs/enrichment.md b/docs/enrichment.md
+index 86c9160..fd84a1b 100644
+--- a/docs/enrichment.md
++++ b/docs/enrichment.md
+@@ -49,6 +49,10 @@ cares about:
+ | `items[].photo_urls` | Every photo, full size. Two or three are usually enough to identify a product. |
+ | `items[].seller`, `seller_rating`, `seller_reviews` | Who is selling, 0–1 rating, review count. |
+ | `items[].enrichment_url` | Where to post the verdict. `null` while the dashboard is off. |
++| `items[].favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour` | Demand. A listing twelve minutes old with six hearts is one the market has already noticed. |
++| `items[].market` | Where the price sits among everything this search has shown in the last 30 days (`null` until there are ten points): `n`, `p10`, `p25`, `median`, `p75`, `median_same_condition`, `this_percentile` (share of listings cheaper than this one), and `sells_fast_under` — the median price of listings that vanished within a day, the closest thing to a sold price the catalog offers. Built from every listing on the page, filters or not, at no extra requests. |
++| `items[].known_retail` | Retail prices earlier verdicts reported for this search, `[{model, price, currency, source}]`. Reuse instead of searching again when the product matches. |
++| `items[].buyer_feedback` | The buyer's thumbs on recent verdicts for this search: `[{title, condition, total_price, agent_score, agent_model, buyer_said}]`. What this particular buyer calls a deal. |
+ 
+ ## What the agent posts back
+ 
+@@ -94,9 +98,16 @@ listing as usual, then "Looks like: …" and the verdict in italics.
+ 
+ ## Scoring guidance for the agent
+ 
+-The score is yours to define, but the one the reference workflow uses weighs, in order:
+-discount against retail (total price, buyer protection included); whether it is the product
+-searched for at all; condition; seller history; and authenticity risk, which caps the score
+-rather than merely lowering it — a suspiciously cheap "genuine" item is a 30, not an 85.
+-A reverse image search is rarely needed: brand, title and one clear photo identify most
+-products, and a text search for the retail price is a fraction of the cost.
++Retail is one leg of three. What a thing costs new says little about what it sells for
++used; `market` says that, and `sells_fast_under` says what people actually pay. The
++reference workflow scores, in order: the listing's percentile in its market (a listing
++under `p10` in good condition from a trusted seller is a bargain; under `p10` from a seller
++with no history and stock photos is a scam, not a discount); demand (`favourites_per_hour`);
++discount against retail; condition and seller history; and authenticity risk, which caps
++the score rather than merely lowering it. `buyer_feedback` tunes all of that to one
++person's taste. A reverse image search is rarely needed: brand, title and one clear photo
++identify most products.
++
++**Verdicts feed back.** A verdict's `model` and `retail_price` are cached per search and
++sent as `known_retail` next time. The 👍/👎 buttons under a Telegram alert become
++`buyer_feedback`.
+diff --git a/src/vinted_sniper/app.py b/src/vinted_sniper/app.py
+index c3e42a2..24d4899 100644
+--- a/src/vinted_sniper/app.py
++++ b/src/vinted_sniper/app.py
+@@ -256,6 +256,7 @@ class Application:
+                 pruned = await repo.prune_items(self._settings.item_retention_days)
+                 if pruned:
+                     log.debug("housekeeping.pruned_items", count=pruned)
++                await repo.prune_market(max(self._settings.item_retention_days, 60))
+             with contextlib.suppress(TimeoutError):
+                 await asyncio.wait_for(self._stop.wait(), timeout=HOUSEKEEPING_INTERVAL_S)
+ 
+diff --git a/src/vinted_sniper/botctl/telegram_bot.py b/src/vinted_sniper/botctl/telegram_bot.py
+index 465e438..4a6fa8f 100644
+--- a/src/vinted_sniper/botctl/telegram_bot.py
++++ b/src/vinted_sniper/botctl/telegram_bot.py
+@@ -27,7 +27,11 @@ from aiogram.filters import Command, CommandObject
+ from aiogram.types import CallbackQuery, Message
+ 
+ from vinted_sniper.db.repo import Repo
+-from vinted_sniper.deliver.telegram import CALLBACK_BLOCK_SELLER, CALLBACK_PAUSE_SEARCH
++from vinted_sniper.deliver.telegram import (
++    CALLBACK_BLOCK_SELLER,
++    CALLBACK_FEEDBACK,
++    CALLBACK_PAUSE_SEARCH,
++)
+ from vinted_sniper.engine import health
+ from vinted_sniper.log import get_logger
+ 
+@@ -182,6 +186,28 @@ def build_dispatcher(repo: Repo) -> Dispatcher:
+             show_alert=True,
+         )
+ 
++    @dispatcher.callback_query(F.data.startswith(f"{CALLBACK_FEEDBACK}:"))
++    async def handle_feedback(callback: CallbackQuery) -> None:
++        if not await _from_paired_chat(repo, callback):
++            await callback.answer("This chat is not connected to vinted-sniper.", show_alert=True)
++            return
++        _, _, rest = (callback.data or "").partition(":")
++        raw_id, _, raw_rating = rest.partition(":")
++        item_id = _int_or_none(raw_id)
++        rating = _int_or_none(raw_rating)
++        if item_id is None or rating not in (1, -1):
++            await callback.answer("That button is out of date.")
++            return
++        if await repo.rate_verdict(item_id, rating):
++            log.info("telegram.verdict_rated", item_id=item_id, rating=rating)
++            await callback.answer(
++                "Noted — the agent will see this next time."
++                if rating > 0
++                else "Noted. Fewer of these."
++            )
++        else:
++            await callback.answer("That listing is no longer stored.")
++
+     @dispatcher.message(Command("resume"))
+     async def handle_resume(message: Message, command: CommandObject) -> None:
+         await _set_paused_from_chat(repo, message, command, paused=False)
+diff --git a/src/vinted_sniper/db/migrations/0010_market_and_feedback.sql b/src/vinted_sniper/db/migrations/0010_market_and_feedback.sql
+new file mode 100644
+index 0000000..575d4c3
+--- /dev/null
++++ b/src/vinted_sniper/db/migrations/0010_market_and_feedback.sql
+@@ -0,0 +1,43 @@
++-- Three kinds of memory that make a verdict about "is this a bargain?" rest on facts.
++--
++-- market: every listing a search's page has ever shown, whether or not it passed the
++-- filters, with its price and how long it stayed visible. Prices across a few hundred of
++-- these say what the thing actually sells for second-hand — which retail price does not.
++CREATE TABLE market (
++    item_id         INTEGER NOT NULL,
++    query_id        INTEGER NOT NULL REFERENCES queries(id) ON DELETE CASCADE,
++    price           REAL,
++    total_price     REAL,
++    currency        TEXT,
++    size            TEXT,
++    condition       TEXT,
++    brand           TEXT,
++    photo_ts        INTEGER,
++    favourite_count INTEGER,
++    view_count      INTEGER,
++    first_seen_at   INTEGER NOT NULL,
++    last_seen_at    INTEGER NOT NULL,
++    PRIMARY KEY (item_id, query_id)
++);
++CREATE INDEX idx_market_query_seen ON market(query_id, last_seen_at);
++
++-- retail_prices: what the agent found a product costs new, kept so the next listing of
++-- the same product does not cost another web search and gets the same number.
++CREATE TABLE retail_prices (
++    query_id   INTEGER NOT NULL REFERENCES queries(id) ON DELETE CASCADE,
++    model      TEXT    NOT NULL,
++    price      REAL    NOT NULL,
++    currency   TEXT,
++    source     TEXT,
++    updated_at INTEGER NOT NULL,
++    PRIMARY KEY (query_id, model)
++);
++
++-- verdict_feedback: the buyer's thumbs up or down on a verdict. Fed back to the agent as
++-- examples of what this particular buyer calls a deal.
++CREATE TABLE verdict_feedback (
++    item_id  INTEGER PRIMARY KEY,
++    query_id INTEGER NOT NULL,
++    rating   INTEGER NOT NULL CHECK (rating IN (-1, 1)),
++    rated_at INTEGER NOT NULL
++);
+diff --git a/src/vinted_sniper/db/repo.py b/src/vinted_sniper/db/repo.py
+index 5b4de13..27cc4de 100644
+--- a/src/vinted_sniper/db/repo.py
++++ b/src/vinted_sniper/db/repo.py
+@@ -22,6 +22,13 @@ from vinted_sniper.vinted.models import Item
+ # --- Row types ---------------------------------------------------------------------
+ 
+ 
++# Market memory: a listing is "gone" once the search has had two hours of checks without
++# seeing it, "sold fast" if it was gone within a day, and a percentile needs a few points.
++_GONE_GRACE_S = 7200
++_SOLD_FAST_S = 86_400
++_MIN_GROUP = 5
++
++
+ @dataclass(frozen=True, slots=True)
+ class Query:
+     """A saved search."""
+@@ -620,6 +627,22 @@ class Repo:
+             )
+             if cursor.rowcount == 0:
+                 return False
++            if verdict.model and verdict.retail_price:
++                # The next listing of this product gets the same number for free.
++                await conn.execute(
++                    "INSERT INTO retail_prices (query_id, model, price, currency, source, "
++                    "updated_at) SELECT query_id, ?, ?, currency, ?, ? FROM items "
++                    "WHERE item_id = ? AND query_id IS NOT NULL "
++                    "ON CONFLICT(query_id, model) DO UPDATE SET price = excluded.price, "
++                    "source = excluded.source, updated_at = excluded.updated_at",
++                    (
++                        verdict.model.strip()[:200],
++                        float(verdict.retail_price),
++                        verdict.retail_source,
++                        now,
++                        item_id,
++                    ),
++                )
+             released = await conn.execute(
+                 "UPDATE outbox SET next_attempt_at = ? "
+                 "WHERE item_id = ? AND status = 'pending' AND next_attempt_at > ?",
+@@ -695,6 +718,154 @@ class Repo:
+                 )
+         return len(drops)
+ 
++    # --- Market memory -------------------------------------------------------------
++
++    async def observe_market(self, query_id: int, items: list[Item]) -> None:
++        """Note every listing on the page, filters or not: it is a price point either way."""
++        if not items:
++            return
++        now = int(time.time())
++        await self._db.execute_many(
++            "INSERT INTO market (item_id, query_id, price, total_price, currency, size, "
++            "condition, brand, photo_ts, favourite_count, view_count, first_seen_at, "
++            "last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
++            "ON CONFLICT(item_id, query_id) DO UPDATE SET price = excluded.price, "
++            "total_price = excluded.total_price, favourite_count = excluded.favourite_count, "
++            "view_count = excluded.view_count, last_seen_at = excluded.last_seen_at",
++            [
++                (
++                    item.item_id,
++                    query_id,
++                    float(item.price) if item.price is not None else None,
++                    float(item.total_price) if item.total_price is not None else None,
++                    item.currency,
++                    item.size,
++                    item.condition,
++                    item.brand,
++                    item.photo_ts,
++                    item.favourite_count,
++                    item.view_count,
++                    now,
++                    now,
++                )
++                for item in items
++            ],
++        )
++
++    async def market_context(
++        self, query_id: int, payable: Decimal | None, condition: str | None, *, days: int = 30
++    ) -> dict[str, Any] | None:
++        """Where a price sits among everything this search has seen lately.
++
++        Percentiles of the total price over the window, the same for listings in the same
++        condition, this listing's own percentile, and the price under which listings tend
++        to vanish within a day — the closest thing to a sold price the catalog offers.
++        """
++        since = int(time.time()) - days * 86_400
++        rows = await self._db.fetch_all(
++            "SELECT COALESCE(total_price, price) AS p, condition, first_seen_at, last_seen_at "
++            "FROM market WHERE query_id = ? AND last_seen_at >= ? "
++            "AND COALESCE(total_price, price) IS NOT NULL",
++            (query_id, since),
++        )
++        prices = sorted(float(row["p"]) for row in rows)
++        if len(prices) < 10:  # noqa: PLR2004 - fewer points and percentiles mislead
++            return None
++
++        def pct(values: list[float], q: float) -> float:
++            return values[min(len(values) - 1, int(q * len(values)))]
++
++        same = sorted(
++            float(row["p"])
++            for row in rows
++            if condition and (row["condition"] or "").lower() == condition.lower()
++        )
++        now = int(time.time())
++        # A listing that stopped appearing within a day, while the search kept being
++        # checked, most likely sold. The median price of those is what the market pays.
++        gone_fast = sorted(
++            float(row["p"])
++            for row in rows
++            if row["last_seen_at"] < now - _GONE_GRACE_S
++            and row["last_seen_at"] - row["first_seen_at"] < _SOLD_FAST_S
++        )
++        context: dict[str, Any] = {
++            "n": len(prices),
++            "days": days,
++            "p10": round(pct(prices, 0.10), 2),
++            "p25": round(pct(prices, 0.25), 2),
++            "median": round(pct(prices, 0.50), 2),
++            "p75": round(pct(prices, 0.75), 2),
++            "median_same_condition": (
++                round(pct(same, 0.5), 2) if len(same) >= _MIN_GROUP else None
++            ),
++            "sells_fast_under": (
++                round(pct(gone_fast, 0.5), 2) if len(gone_fast) >= _MIN_GROUP else None
++            ),
++            "this_percentile": None,
++        }
++        if payable is not None:
++            below = sum(1 for p in prices if p < float(payable))
++            context["this_percentile"] = round(100 * below / len(prices))
++        return context
++
++    async def prune_market(self, older_than_days: int) -> int:
++        cutoff = int(time.time()) - older_than_days * 86_400
++        return await self._db.execute("DELETE FROM market WHERE last_seen_at < ?", (cutoff,))
++
++    async def remember_retail(
++        self, query_id: int, model: str, price: Decimal, currency: str | None, source: str | None
++    ) -> None:
++        await self._db.execute(
++            "INSERT INTO retail_prices (query_id, model, price, currency, source, updated_at) "
++            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(query_id, model) DO UPDATE SET "
++            "price = excluded.price, currency = excluded.currency, source = excluded.source, "
++            "updated_at = excluded.updated_at",
++            (query_id, model.strip()[:200], float(price), currency, source, int(time.time())),
++        )
++
++    async def known_retail(self, query_id: int, *, limit: int = 8) -> list[dict[str, Any]]:
++        rows = await self._db.fetch_all(
++            "SELECT model, price, currency, source FROM retail_prices WHERE query_id = ? "
++            "ORDER BY updated_at DESC LIMIT ?",
++            (query_id, limit),
++        )
++        return [dict(row) for row in rows]
++
++    async def rate_verdict(self, item_id: int, rating: int) -> bool:
++        row = await self._db.fetch_one("SELECT query_id FROM items WHERE item_id = ?", (item_id,))
++        if row is None:
++            return False
++        await self._db.execute(
++            "INSERT INTO verdict_feedback (item_id, query_id, rating, rated_at) "
++            "VALUES (?, ?, ?, ?) ON CONFLICT(item_id) DO UPDATE SET rating = excluded.rating, "
++            "rated_at = excluded.rated_at",
++            (item_id, row["query_id"], rating, int(time.time())),
++        )
++        return True
++
++    async def feedback_examples(self, query_id: int, *, limit: int = 6) -> list[dict[str, Any]]:
++        """What this buyer thought of recent verdicts on this search, for the agent."""
++        rows = await self._db.fetch_all(
++            "SELECT i.title, i.condition, COALESCE(i.total_price, i.price) AS paid, i.currency, "
++            "i.enrich_score, i.enrich_model, f.rating FROM verdict_feedback f "
++            "JOIN items i ON i.item_id = f.item_id WHERE f.query_id = ? "
++            "ORDER BY f.rated_at DESC LIMIT ?",
++            (query_id, limit),
++        )
++        return [
++            {
++                "title": row["title"],
++                "condition": row["condition"],
++                "total_price": row["paid"],
++                "currency": row["currency"],
++                "agent_score": row["enrich_score"],
++                "agent_model": row["enrich_model"],
++                "buyer_said": "good deal" if row["rating"] > 0 else "not for me",
++            }
++            for row in rows
++        ]
++
+     async def typical_listing_gap_s(self, query_id: int) -> int | None:
+         """How often this search normally sees a new listing, from the listing times we
+         have recorded for it — the median gap between consecutive photo timestamps.
+diff --git a/src/vinted_sniper/deliver/dispatcher.py b/src/vinted_sniper/deliver/dispatcher.py
+index 4d892aa..dfec754 100644
+--- a/src/vinted_sniper/deliver/dispatcher.py
++++ b/src/vinted_sniper/deliver/dispatcher.py
+@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
+ import httpx
+ 
+ from vinted_sniper.config import Settings
+-from vinted_sniper.db.repo import Destination, Repo
++from vinted_sniper.db.repo import Destination, PendingNotification, Repo
+ from vinted_sniper.deliver.base import Sender, SenderConfigError
+ from vinted_sniper.deliver.discord import DiscordSender
+ from vinted_sniper.deliver.ntfy import NtfySender
+@@ -220,6 +220,19 @@ class Dispatcher:
+ 
+         return len(result.delivered)
+ 
++    async def _agent_context(self, notification: PendingNotification) -> dict[str, Any]:
++        """The facts an outside agent should weigh: market position, known retail prices,
++        what the buyer thought of earlier verdicts on this search."""
++        item = notification.item
++        payable = item.total_price if item.total_price is not None else item.price
++        return {
++            "market": await self._repo.market_context(
++                notification.query_id, payable, item.condition
++            ),
++            "known_retail": await self._repo.known_retail(notification.query_id),
++            "buyer_feedback": await self._repo.feedback_examples(notification.query_id),
++        }
++
+     async def notify_status(self, message: str) -> None:
+         """Send an operational notice to whichever destinations asked for them."""
+         for destination_id in await self._repo.status_destination_ids():
+@@ -268,7 +281,10 @@ class Dispatcher:
+                 )
+             case "webhook":
+                 return WebhookSender(
+-                    config, client=self._client, callback_base=self._settings.dashboard_url
++                    config,
++                    client=self._client,
++                    callback_base=self._settings.dashboard_url,
++                    context=self._agent_context,
+                 )
+             case "ntfy":
+                 return NtfySender(config, client=self._client)
+diff --git a/src/vinted_sniper/deliver/telegram.py b/src/vinted_sniper/deliver/telegram.py
+index 9707355..bf0c6c4 100644
+--- a/src/vinted_sniper/deliver/telegram.py
++++ b/src/vinted_sniper/deliver/telegram.py
+@@ -170,9 +170,7 @@ class TelegramSender:
+         keyboard: list[list[dict[str, str]]] = [_link_row(item)]
+         # A second row of actions the bot handles itself: the two things people most
+         # often want to do from the alert without opening the dashboard.
+-        actions = inline_actions(query_id, item.seller_login)
+-        if actions:
+-            keyboard.append(actions)
++        keyboard.extend(_action_rows(item, query_id, enrichment))
+ 
+         payload = self._base_payload() | {
+             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
+@@ -205,7 +203,12 @@ class TelegramSender:
+             lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
+         return self._base_payload() | {
+             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
+-            "reply_markup": {"inline_keyboard": [[{"text": "Open listing", "url": item.url}]]},
++            "reply_markup": {
++                "inline_keyboard": [
++                    [{"text": "Open listing", "url": item.url}],
++                    feedback_buttons(item.item_id),
++                ]
++            },
+             "link_preview_options": {"is_disabled": True},
+         }
+ 
+@@ -276,6 +279,27 @@ class TelegramSender:
+ _CALLBACK_LIMIT = 64
+ CALLBACK_BLOCK_SELLER = "bs"
+ CALLBACK_PAUSE_SEARCH = "ps"
++CALLBACK_FEEDBACK = "fb"
++
++
++def feedback_buttons(item_id: int) -> list[dict[str, str]]:
++    """Thumbs on a verdict. What the buyer says here is fed back to the agent as examples
++    of what this particular buyer calls a deal."""
++    return [
++        {"text": "👍 Good call", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:1"},
++        {"text": "👎 Not for me", "callback_data": f"{CALLBACK_FEEDBACK}:{item_id}:-1"},
++    ]
++
++
++def _action_rows(
++    item: Item, query_id: int | None, enrichment: Enrichment | None
++) -> list[list[dict[str, str]]]:
++    rows: list[list[dict[str, str]]] = []
++    if actions := inline_actions(query_id, item.seller_login):
++        rows.append(actions)
++    if enrichment is not None:
++        rows.append(feedback_buttons(item.item_id))
++    return rows
+ 
+ 
+ def _link_row(item: Item) -> list[dict[str, str]]:
+diff --git a/src/vinted_sniper/deliver/webhook.py b/src/vinted_sniper/deliver/webhook.py
+index 65c211e..3c13e5b 100644
+--- a/src/vinted_sniper/deliver/webhook.py
++++ b/src/vinted_sniper/deliver/webhook.py
+@@ -8,6 +8,8 @@ people's automations, so it changes only with a version bump.
+ 
+ from __future__ import annotations
+ 
++import time
++from collections.abc import Awaitable, Callable
+ from typing import Any
+ 
+ import httpx
+@@ -15,6 +17,9 @@ import httpx
+ from vinted_sniper.db.repo import PendingNotification
+ from vinted_sniper.deliver.base import SendResult, require
+ from vinted_sniper.deliver.ratelimit import TokenBucket
++from vinted_sniper.log import get_logger
++
++log = get_logger(__name__)
+ 
+ PAYLOAD_VERSION = 1
+ 
+@@ -31,10 +36,14 @@ class WebhookSender:
+         client: httpx.AsyncClient | None = None,
+         bucket: TokenBucket | None = None,
+         callback_base: str | None = None,
++        context: Callable[[PendingNotification], Awaitable[dict[str, Any]]] | None = None,
+     ) -> None:
+         self._url = require(config, "url", self.kind)
+         self._headers = config.get("headers") or {}
+         self._callback_base = callback_base.rstrip("/") if callback_base else None
++        # Extra facts an agent on the other end can lean on: where the price sits in
++        # this search's market, retail prices already found, the buyer's past verdicts.
++        self._context = context
+         self._client = client or httpx.AsyncClient(timeout=20.0)
+         self._owns_client = client is None
+         self._bucket = bucket or TokenBucket(2.0, capacity=4)
+@@ -47,11 +56,20 @@ class WebhookSender:
+         if not batch:
+             return SendResult.ok([])
+         outbox_ids = [n.outbox_id for n in batch]
++        items: list[dict[str, Any]] = []
++        for notification in batch:
++            entry = _item_json(notification, self._callback_base)
++            if self._context is not None:
++                try:
++                    entry.update(await self._context(notification))
++                except Exception as exc:  # noqa: BLE001 - a bonus, never a reason not to send
++                    log.warning("webhook.context_failed", error=str(exc))
++            items.append(entry)
+         payload = {
+             "version": PAYLOAD_VERSION,
+             "search": batch[0].query_name,
+             "search_id": batch[0].query_id,
+-            "items": [_item_json(n, self._callback_base) for n in batch],
++            "items": items,
+         }
+         await self._bucket.acquire()
+         try:
+@@ -81,6 +99,19 @@ class WebhookSender:
+             await self._client.aclose()
+ 
+ 
++def _minutes_since(ts: int | None) -> int | None:
++    if ts is None:
++        return None
++    return max(0, int((time.time() - ts) / 60))
++
++
++def _per_hour(count: int, since_ts: int | None) -> float | None:
++    if since_ts is None:
++        return None
++    hours = max((time.time() - since_ts) / 3600, 0.25)  # a brand-new listing is not infinite
++    return round(count / hours, 2)
++
++
+ def _item_json(notification: PendingNotification, callback_base: str | None) -> dict[str, Any]:
+     item = notification.item
+     return {
+@@ -111,6 +142,11 @@ def _item_json(notification: PendingNotification, callback_base: str | None) ->
+         "seller": item.seller_login,
+         "seller_rating": item.seller_rating,
+         "seller_reviews": item.seller_feedback_count,
++        # Demand: how many people have hearted it, and how fast that is happening.
++        "favourites": item.favourite_count,
++        "views": item.view_count,
++        "listed_minutes_ago": _minutes_since(item.photo_ts),
++        "favourites_per_hour": _per_hour(item.favourite_count, item.photo_ts),
+         # Kept for consumers written against version 1. Both used to be Vinted deep links
+         # that no longer resolve; they now point at the listing page, where the buttons are.
+         "links": {
+diff --git a/src/vinted_sniper/engine/poller.py b/src/vinted_sniper/engine/poller.py
+index c993a43..07e4f02 100644
+--- a/src/vinted_sniper/engine/poller.py
++++ b/src/vinted_sniper/engine/poller.py
+@@ -144,6 +144,8 @@ class Poller:
+     async def _check(self) -> None:
+         items = await self._client.search(self.query.tld, self.query.params)
+         state = await self._repo.get_state(self.query.id)
++        # Every listing on the page is a price point, filters or not. Costs nothing.
++        await self._repo.observe_market(self.query.id, items)
+ 
+         candidates: list[Item] = []
+         for item in items:
+diff --git a/tests/integration/test_delivery.py b/tests/integration/test_delivery.py
+index 76b2abd..1e6be1c 100644
+--- a/tests/integration/test_delivery.py
++++ b/tests/integration/test_delivery.py
+@@ -473,3 +473,76 @@ async def test_a_verdict_that_arrives_in_time_does_not_also_send_a_follow_up(
+ 
+     batch = await repo.claim_batch(phone, 10)
+     assert len(batch) == 1 and batch[0].kind == "new", "released, enriched, once"
++
++
++# --- Market memory and feedback ------------------------------------------------------
++
++
++async def test_the_webhook_carries_market_position_retail_and_the_buyers_past_verdicts(
++    repo: Repo, settings: Settings
++) -> None:
++    query = await a_search(repo)
++    # Thirty days of market: prices 10..49, uniformly.
++    observed = [
++        Item(
++            item_id=1000 + i,
++            tld="fr",
++            title=f"m{i}",
++            url=f"https://www.vinted.fr/items/{1000 + i}",
++            price=Decimal(10 + i),
++            total_price=Decimal(10 + i),
++            currency="EUR",
++            condition="Very good",
++        )
++        for i in range(40)
++    ]
++    await repo.observe_market(query.id, observed)
++    await repo.remember_retail(query.id, "Nike Air Max 90", Decimal("140"), "EUR", "nike.com")
++
++    brain = await repo.add_destination(
++        kind="webhook", name="n8n", config={"url": "https://example.test/n8n"}
++    )
++    cheap = listing(1)  # total 11.70 → among the cheapest
++    await repo.record_new_items(query, [cheap], [brain])
++    # An earlier verdict the buyer rated.
++    await repo.record_new_items(query, [listing(2)], [])
++    await repo.store_enrichment(2, EnrichmentIn(score=80, model="Nike Air Max 90"))
++    assert await repo.rate_verdict(2, 1)
++
++    endpoint = FakeEndpoint()
++    await make_dispatcher(repo, settings, endpoint).drain()
++    body = json.loads(endpoint.requests[-1].content)
++    sent = body["items"][0]
++
++    assert sent["market"]["n"] == 40
++    assert sent["market"]["median"] == 30.0
++    assert sent["market"]["this_percentile"] <= 5
++    assert sent["market"]["median_same_condition"] is None, "the listing states no condition"
++    same = await repo.market_context(query.id, Decimal("11.70"), "very good")
++    assert same is not None and same["median_same_condition"] == 30.0
++    assert sent["known_retail"][0]["model"] == "Nike Air Max 90"
++    assert sent["buyer_feedback"][0]["buyer_said"] == "good deal"
++    assert "favourites_per_hour" in sent
++
++
++async def test_a_verdict_with_a_retail_price_is_remembered_for_the_search(
++    repo: Repo,
++) -> None:
++    query = await a_search(repo)
++    await repo.record_new_items(query, [listing(1)], [])
++    await repo.store_enrichment(
++        1,
++        EnrichmentIn(
++            model="Nike Air Max 90", retail_price=Decimal("140"), retail_source="nike.com"
++        ),
++    )
++    known = await repo.known_retail(query.id)
++    assert known == [
++        {"model": "Nike Air Max 90", "price": 140.0, "currency": "EUR", "source": "nike.com"}
++    ]
++
++
++async def test_market_context_is_withheld_until_there_is_enough_of_it(repo: Repo) -> None:
++    query = await a_search(repo)
++    await repo.observe_market(query.id, [listing(1), listing(2)])
++    assert await repo.market_context(query.id, Decimal("11.70"), None) is None
+diff --git a/tests/unit/test_senders.py b/tests/unit/test_senders.py
+index 82968cf..c667ed3 100644
+--- a/tests/unit/test_senders.py
++++ b/tests/unit/test_senders.py
+@@ -433,6 +433,8 @@ async def test_telegram_headlines_a_hot_deal_and_mutes_a_dull_one() -> None:
+ 
+     first, second = recorder.payload(0), recorder.payload(1)
+     assert first["text"].startswith("🔥 <b>HOT DEAL</b> · deal 91/100 · retail ~140 EUR · -88%")
++    thumbs = first["reply_markup"]["inline_keyboard"][-1]
++    assert [b["callback_data"] for b in thumbs] == ["fb:1:1", "fb:1:-1"]
+     assert "Looks like: Nike Air Max 90" in first["text"]
+     assert "disable_notification" not in first
+     assert second["disable_notification"] is True
+-- 
+2.43.0
+
