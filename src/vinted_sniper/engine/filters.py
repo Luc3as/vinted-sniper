@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import functools
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from vinted_sniper.db.repo import Query
@@ -31,9 +32,22 @@ class Rejection:
     detail: str
 
 
-def check(item: Item, query: Query) -> Rejection | None:
-    """Return why this listing should be skipped, or None if it should be sent."""
-    for gate in _GATES:
+Gate = Callable[[Item, Query], Rejection | None]
+"""Every gate below reads a listing against a search and either objects or stays quiet."""
+
+
+def check(
+    item: Item,
+    query: Query,
+    *,
+    gates: tuple[Gate, ...] | None = None,
+) -> Rejection | None:
+    """Return why this listing should be skipped, or None if it should be sent.
+
+    `gates` lets a caller run a different subset; it defaults to the full set the poller
+    uses, so leaving it out behaves exactly as it always has. See SWEEP_GATES.
+    """
+    for gate in gates if gates is not None else _GATES:
         if rejection := gate(item, query):
             return rejection
     return None
@@ -127,6 +141,22 @@ _GATES = (
     _banned,
     _required,
     _title_pattern,
+    _price,
+    _condition,
+    _blocked_seller,
+    _seller_rating,
+    _seller_reviews,
+)
+
+# What a relevance sweep runs instead. A sweep reads existing stock rather than the newest
+# arrivals, so three of the gates above would work against it:
+#   _promoted     — bumped listings are ordinary in standing stock, not stale repeats.
+#   _required     — Vinted's search_text is only a hint and sellers routinely leave the
+#   _title_pattern  model name out of the title, so the title has to rank a listing
+#                   (engine/sweep.py:score_title) rather than eliminate it.
+# Everything else is a real constraint on what you would buy, so it still drops listings.
+SWEEP_GATES: tuple[Gate, ...] = (
+    _banned,
     _price,
     _condition,
     _blocked_seller,
