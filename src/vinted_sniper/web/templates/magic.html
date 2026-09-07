@@ -161,13 +161,13 @@
     <div class="row" id="m-labels" style="margin:.6rem 0"></div>
     <p class="muted" id="m-signature"></p>
     <p class="muted" id="m-hints"></p>
+    {# The ceiling, in words, before the button that spends it. #}
+    <span class="hint">Up to {{ max_items }} listings checked, up to {{ max_verdicts }} full opinions.
+      That is what this dashboard is set to spend on one sweep; it will stop there whatever it has found.</span>
     <div class="row" style="margin-top:.75rem">
       <button type="button" id="m-run">Look through what is for sale</button>
       <button type="button" class="quiet" id="m-back">Start over</button>
     </div>
-    {# The ceiling, in words, before the button that spends it. #}
-    <span class="hint">Up to {{ max_items }} listings checked, up to {{ max_verdicts }} full opinions.
-      That is what this dashboard is set to spend on one sweep; it will stop there whatever it has found.</span>
     <p class="error error-line" id="m-confirm-msg" role="alert" hidden style="margin:.6rem 0 0"></p>
   </div>
 

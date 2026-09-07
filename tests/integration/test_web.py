@@ -1420,10 +1420,18 @@ def test_the_magic_page_is_in_the_nav_and_says_what_a_sweep_will_cost(
 
     assert page.status_code == 200
     assert '<a href="/magic" aria-current="page"' in page.text
-    assert (
+    ceiling = (
         f"Up to {web_settings.sweep_max_items} listings checked, "
         f"up to {web_settings.sweep_max_verdicts} full opinions."
-    ) in page.text
+    )
+    assert ceiling in page.text
+
+    # And "before" means before: the price of pressing the button is read on the way down
+    # to it, not after it has already been pressed. Both halves are asserted present above
+    # and here, so a template rename fails loudly instead of comparing two -1s.
+    button = 'id="m-run"'
+    assert button in page.text
+    assert page.text.index(ceiling) < page.text.index(button)
 
 
 async def test_a_judged_sweep_is_rendered_on_the_magic_page(
