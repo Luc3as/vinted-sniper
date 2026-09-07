@@ -175,6 +175,24 @@ class Settings(BaseSettings):
         description="The most listings one sweep will look at, counted before anything is "
         "sent to the AI. A hard stop, whatever the page count would otherwise allow.",
     )
+    magic_webhook_url: str | None = Field(
+        default=None,
+        description="The n8n flow that turns plain words like 'men's Patagonia jacket size M "
+        "under 60 eur' into the filters a search needs. Leave it unset and Magic Search is "
+        "off: the endpoint says so instead of guessing.",
+    )
+    magic_webhook_token: SecretStr | None = Field(
+        default=None,
+        description="Sent to that flow as a bearer token, so a stranger who finds the URL "
+        "cannot use it. Set it only if the flow asks for one.",
+    )
+    magic_timeout_s: float = Field(
+        default=30.0,
+        gt=0,
+        le=120,
+        description="How long to wait for the flow to answer before giving up. An AI "
+        "reading a sentence takes a few seconds; a minute means something is wrong.",
+    )
 
     # --- Delivery ------------------------------------------------------------------
     outbox_expiry_minutes: int = Field(

@@ -63,13 +63,17 @@ was found, so you can see the real delay yourself.
 ### Magic Search
 
 A sweep is a one-off look at stock already listed on Vinted, best matches first — separate
-from the searches that keep watching for new listings. These two settings bound how much one
-sweep reads before any of it reaches the AI.
+from the searches that keep watching for new listings. The first two settings bound how much
+one sweep reads before any of it reaches the AI. The rest point the app at the flow that
+turns a sentence like "men's Patagonia jacket size M under 60 eur" into search filters.
 
 | Variable | Default | What it does |
 |---|---|---|
 | `SWEEP_MAX_PAGES` | `4` | How many pages of best-matching listings one sweep reads. Each page is one more request to Vinted, so raising this makes a sweep slower and heavier. |
 | `SWEEP_MAX_ITEMS` | `200` | The most listings one sweep will look at, counted before anything is sent to the AI. A hard stop: it wins over the page count. |
+| `MAGIC_WEBHOOK_URL` | unset | The n8n flow that turns plain words into the filters a search needs. Leave it unset and Magic Search stays off — the endpoint says so plainly instead of guessing. |
+| `MAGIC_WEBHOOK_TOKEN` | unset | Sent to that flow as a bearer token, so a stranger who finds the URL cannot use it. Set it only if the flow asks for one. |
+| `MAGIC_TIMEOUT_S` | `30` | How long to wait for the flow to answer before giving up. An AI reading a sentence takes a few seconds; a minute means something is wrong. |
 
 `SWEEP_MAX_ITEMS` has to be at least `SWEEP_MAX_PAGES`, otherwise a sweep would stop before
 finishing even one page and asking for several pages would mean nothing.
@@ -337,13 +341,18 @@ nájdený, takže skutočné oneskorenie vidíš sám.
 ### Magic Search
 
 Sweep je jednorazový pohľad na to, čo už na Vintede visí, od najlepšie sediacich inzerátov —
-oddelene od vyhľadávaní, ktoré stále striehnu na nové. Tieto dve nastavenia ohraničujú, koľko
-toho jeden sweep prečíta predtým, než sa čokoľvek z toho dostane k AI.
+oddelene od vyhľadávaní, ktoré stále striehnu na nové. Prvé dve nastavenia ohraničujú, koľko
+toho jeden sweep prečíta predtým, než sa čokoľvek z toho dostane k AI. Zvyšné nasmerujú
+aplikáciu na flow, ktorý z vety ako „pánska bunda Patagonia veľkosť M do 60 eur" spraví
+filtre vyhľadávania.
 
 | Premenná | Predvolené | Čo robí |
 |---|---|---|
 | `SWEEP_MAX_PAGES` | `4` | Koľko stránok najlepšie sediacich inzerátov jeden sweep prečíta. Každá stránka je ďalší request na Vinted, takže vyššia hodnota robí sweep pomalším a ťažším. |
 | `SWEEP_MAX_ITEMS` | `200` | Najviac inzerátov, na ktoré sa jeden sweep pozrie, počítané ešte predtým, než sa čokoľvek pošle AI. Tvrdý strop: prebíja počet stránok. |
+| `MAGIC_WEBHOOK_URL` | nenastavené | n8n flow, ktorý z bežných slov spraví filtre, aké vyhľadávanie potrebuje. Keď ho nenastavíš, Magic Search je vypnutý — endpoint to rovno povie namiesto hádania. |
+| `MAGIC_WEBHOOK_TOKEN` | nenastavené | Posiela sa tomu flowu ako bearer token, aby ho cudzí človek, ktorý natrafí na URL, nemohol používať. Nastav ho len vtedy, ak si ho flow pýta. |
+| `MAGIC_TIMEOUT_S` | `30` | Ako dlho čakať na odpoveď flowu, kým to vzdáme. AI prečíta vetu za pár sekúnd; minúta znamená, že je niečo zle. |
 
 `SWEEP_MAX_ITEMS` musí byť aspoň `SWEEP_MAX_PAGES`, inak by sweep skončil skôr, než dočíta
 čo i len jednu stránku, a pýtať si viac stránok by nedávalo zmysel.

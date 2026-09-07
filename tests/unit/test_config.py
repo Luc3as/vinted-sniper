@@ -83,3 +83,24 @@ def test_a_sweep_page_count_has_a_ceiling() -> None:
 def test_an_item_ceiling_below_the_page_count_is_rejected() -> None:
     with pytest.raises(ValidationError, match="SWEEP_MAX_ITEMS"):
         Settings(_env_file=None, sweep_max_pages=4, sweep_max_items=2)  # type: ignore[call-arg]
+
+
+def test_magic_search_is_off_until_a_flow_is_named() -> None:
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.magic_webhook_url is None
+    assert settings.magic_webhook_token is None
+    assert settings.magic_timeout_s == 30.0
+
+
+def test_a_mapper_that_never_times_out_is_rejected() -> None:
+    """Zero would mean the request gives up before it is sent."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, magic_timeout_s=0)  # type: ignore[call-arg]
+
+
+def test_the_mapper_token_does_not_leak_through_repr() -> None:
+    settings = Settings(_env_file=None, magic_webhook_token=SecretStr("n8n-s3cret"))  # type: ignore[call-arg]
+
+    assert settings.magic_webhook_token is not None
+    assert "n8n-s3cret" not in repr(settings)
