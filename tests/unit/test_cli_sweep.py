@@ -22,11 +22,16 @@ import pytest
 
 from vinted_sniper import cli
 from vinted_sniper.cli import build_parser
-from vinted_sniper.config import Settings
+from vinted_sniper.config import (
+    SWEEP_MAX_ITEMS_CEILING,
+    SWEEP_MAX_PAGES_CEILING,
+    Settings,
+)
 from vinted_sniper.db import Database, apply_pending
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine import sweep
 from vinted_sniper.enrichment import EnrichmentIn
+from vinted_sniper.vinted.client import PER_PAGE
 from vinted_sniper.vinted.models import Item, parse_item
 
 URL = "https://www.vinted.sk/catalog?search_text=torrentshell"
@@ -306,3 +311,118 @@ def test_the_judged_output_is_plain_language() -> None:
 
     for jargon in ("percentile", "median", "std dev", "z-score"):
         assert jargon not in lowered
+
+
+# --- The flags cannot outrun the ceilings -------------------------------------------
+#
+# The environment path was always bounded (Settings.sweep_max_pages is le=10,
+# sweep_max_items le=2000). The flags were not: --pages 11 issued eleven requests.
+
+
+class _CountingClient:
+    """Stands in for VintedClient and hands back a full page every time it is asked.
+
+    A full page is what keeps `run_sweep` paging — a short one is its "that was the end"
+    signal — and the same 96 listings every time means the item ceiling never fires
+    either, so the only thing that can stop the loop is the page ceiling.
+    """
+
+    def __init__(self, items: list[Item]) -> None:
+        self._items = items
+        self.requests: list[dict[str, str]] = []
+
+    async def search(self, tld: str, params: dict[str, str]) -> list[Item]:
+        self.requests.append(dict(params))
+        return list(self._items)
+
+
+def test_more_pages_than_the_ceiling_still_reads_only_ten(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    make_item: Callable[..., Any],
+) -> None:
+    """--pages 11 must not become eleven requests to Vinted.
+
+    The assertion is on what the client was actually asked for, not on a local variable:
+    the defect was a cost paid upstream, so upstream is where it has to be counted.
+    """
+    page = [parse_item(make_item(i, photo_ts=1_760_000_000), "sk") for i in range(PER_PAGE)]
+    client = _CountingClient(page)
+    monkeypatch.setattr(cli, "VintedClient", lambda *_args, **_kwargs: client)
+
+    code = asyncio.run(
+        cli._cmd_sweep(_settings(tmp_path), URL, pages=11, max_items=0, keywords=[], judge=False)
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert len(client.requests) == SWEEP_MAX_PAGES_CEILING, (
+        f"asked Vinted for {len(client.requests)} page(s), ceiling is {SWEEP_MAX_PAGES_CEILING}"
+    )
+    assert [req["page"] for req in client.requests] == [str(n) for n in range(1, 11)]
+    # Clamped, not silently: the number asked for, the number given, and why.
+    assert "You asked for 11 page(s); reading 10." in out
+    assert "another request to Vinted" in out
+    assert "Reading up to 10 page(s)" in out
+
+
+def test_a_page_count_under_the_ceiling_is_left_alone(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    make_item: Callable[..., Any],
+) -> None:
+    """The clamp is a ceiling, not a rewrite: --pages 2 is still two requests."""
+    page = [parse_item(make_item(i, photo_ts=1_760_000_000), "sk") for i in range(PER_PAGE)]
+    client = _CountingClient(page)
+    monkeypatch.setattr(cli, "VintedClient", lambda *_args, **_kwargs: client)
+
+    asyncio.run(
+        cli._cmd_sweep(_settings(tmp_path), URL, pages=2, max_items=0, keywords=[], judge=False)
+    )
+    out = capsys.readouterr().out
+
+    assert len(client.requests) == 2
+    assert "You asked for" not in out
+
+
+def test_more_listings_than_the_ceiling_is_bounded_at_two_thousand(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--max-items 5000 is what the later AI stages would have been asked to pay for."""
+    seen: dict[str, Any] = {}
+
+    async def fake_run_sweep(**kwargs: Any) -> sweep.SweepResult:
+        seen.update(kwargs)
+        return sweep.SweepResult(pages_fetched=1, items_seen=0)
+
+    monkeypatch.setattr(cli.sweep, "run_sweep", fake_run_sweep)
+    code = asyncio.run(
+        cli._cmd_sweep(_settings(tmp_path), URL, pages=0, max_items=5000, keywords=[], judge=False)
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert seen["max_items"] == SWEEP_MAX_ITEMS_CEILING
+    assert "You asked to look at 5000 listing(s); looking at 2000." in out
+    assert "at most 2000 listing(s)" in out
+
+
+def test_a_listing_count_under_the_ceiling_is_left_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake_run_sweep(**kwargs: Any) -> sweep.SweepResult:
+        seen.update(kwargs)
+        return sweep.SweepResult(pages_fetched=1, items_seen=0)
+
+    monkeypatch.setattr(cli.sweep, "run_sweep", fake_run_sweep)
+    asyncio.run(
+        cli._cmd_sweep(_settings(tmp_path), URL, pages=0, max_items=50, keywords=[], judge=False)
+    )
+    out = capsys.readouterr().out
+
+    assert seen["max_items"] == 50
+    assert "You asked to look at" not in out

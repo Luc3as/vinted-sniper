@@ -21,6 +21,14 @@ MIN_POLL_INTERVAL_S = 10
 # Ceiling for the 403 backoff ladder.
 MAX_BACKOFF_S = 900
 
+# The hard ceilings on one sweep's cost, stated once so the settings and the CLI cannot
+# drift apart. Every page is another request to Vinted and every listing is another thing
+# the AI stages may be asked to look at, so both paths clamp to these numbers: the settings
+# through the `Field(le=...)` bounds below, `cli._cmd_sweep` by hand for flags that never
+# go through pydantic.
+SWEEP_MAX_PAGES_CEILING = 10
+SWEEP_MAX_ITEMS_CEILING = 2000
+
 
 def _in_container() -> bool:
     """Whether we are inside Docker or Podman.
@@ -164,14 +172,14 @@ class Settings(BaseSettings):
     sweep_max_pages: int = Field(
         default=4,
         ge=1,
-        le=10,
+        le=SWEEP_MAX_PAGES_CEILING,
         description="How many pages of listings already on Vinted one sweep reads, best "
         "matches first. More pages reach further back, but every page is another request.",
     )
     sweep_max_items: int = Field(
         default=200,
         ge=1,
-        le=2000,
+        le=SWEEP_MAX_ITEMS_CEILING,
         description="The most listings one sweep will look at, counted before anything is "
         "sent to the AI. A hard stop, whatever the page count would otherwise allow.",
     )

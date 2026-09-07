@@ -163,8 +163,8 @@ Options for `sweep`:
 
 | Option | Meaning |
 |---|---|
-| `--pages N` | How many pages to read. Defaults to `SWEEP_MAX_PAGES`. |
-| `--max-items N` | The most listings to look at. Defaults to `SWEEP_MAX_ITEMS`. |
+| `--pages N` | How many pages to read. Defaults to `SWEEP_MAX_PAGES`. Never more than 10, whatever you ask for: every page is another request to Vinted. Ask for more and the sweep says so and reads 10. |
+| `--max-items N` | The most listings to look at. Defaults to `SWEEP_MAX_ITEMS`. Never more than 2000, whatever you ask for, so one run's cost stays knowable. Ask for more and the sweep says so and looks at 2000. |
 | `--keyword WORD` | A word that makes a listing a better match. Repeat it for more words. Defaults to the words in the search URL. |
 
 A sweep is a one-off read of stock already on Vinted, best matches first. It is not a
@@ -456,8 +456,8 @@ Voľby pre `sweep`:
 
 | Voľba | Význam |
 |---|---|
-| `--pages N` | Koľko stránok prečítať. Predvolene `SWEEP_MAX_PAGES`. |
-| `--max-items N` | Najviac inzerátov, na ktoré sa pozrieť. Predvolene `SWEEP_MAX_ITEMS`. |
+| `--pages N` | Koľko stránok prečítať. Predvolene `SWEEP_MAX_PAGES`. Nikdy nie viac ako 10, nech si pýtaš čokoľvek: každá stránka je ďalšia požiadavka na Vinted. Ak si vypýtaš viac, sweep to povie a prečíta 10. |
+| `--max-items N` | Najviac inzerátov, na ktoré sa pozrieť. Predvolene `SWEEP_MAX_ITEMS`. Nikdy nie viac ako 2000, nech si pýtaš čokoľvek, aby cena jedného behu ostala známa. Ak si vypýtaš viac, sweep to povie a pozrie sa na 2000. |
 | `--keyword SLOVO` | Slovo, ktoré robí inzerát lepšie sediacim. Zopakuj ho pre viac slov. Predvolene slová z URL vyhľadávania. |
 
 Sweep je jednorazové prečítanie toho, čo už na Vintede visí, od najlepšie sediacich. Nie je

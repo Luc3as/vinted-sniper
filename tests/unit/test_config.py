@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
+from vinted_sniper import cli
+from vinted_sniper.config import (
+    MIN_POLL_INTERVAL_S,
+    SWEEP_MAX_ITEMS_CEILING,
+    SWEEP_MAX_PAGES_CEILING,
+    Settings,
+)
 
 
 def test_defaults_are_conservative() -> None:
@@ -151,3 +157,32 @@ def test_a_photo_check_batch_of_nothing_is_rejected() -> None:
 def test_a_negative_price_estimate_is_rejected() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, magic_cost_per_mtok_in=-1.0)  # type: ignore[call-arg]
+
+
+def test_the_sweep_ceilings_are_stated_once() -> None:
+    """The settings bound and the CLI clamp must be the same numbers, not two copies.
+
+    `cli._cmd_sweep` clamps the flags by hand because they never go through pydantic.
+    If the `Field(le=...)` bound and the constant the CLI reads ever drift apart, the
+    environment path and the flag path start disagreeing about what a sweep may cost.
+    """
+    fields = Settings.model_fields
+
+    def upper_bound(name: str) -> int:
+        (bound,) = [m.le for m in fields[name].metadata if getattr(m, "le", None) is not None]
+        return int(bound)
+
+    assert upper_bound("sweep_max_pages") == SWEEP_MAX_PAGES_CEILING
+    assert upper_bound("sweep_max_items") == SWEEP_MAX_ITEMS_CEILING
+    assert cli.SWEEP_MAX_PAGES_CEILING is SWEEP_MAX_PAGES_CEILING
+    assert cli.SWEEP_MAX_ITEMS_CEILING is SWEEP_MAX_ITEMS_CEILING
+
+
+def test_more_pages_than_the_ceiling_is_rejected_through_the_environment() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, sweep_max_pages=SWEEP_MAX_PAGES_CEILING + 1)  # type: ignore[call-arg]
+
+
+def test_more_listings_than_the_ceiling_is_rejected_through_the_environment() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, sweep_max_items=SWEEP_MAX_ITEMS_CEILING + 1)  # type: ignore[call-arg]

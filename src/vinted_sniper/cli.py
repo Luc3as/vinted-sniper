@@ -11,7 +11,12 @@ from collections.abc import Sequence
 from decimal import Decimal, InvalidOperation
 
 from vinted_sniper import __version__, app, backup, log
-from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
+from vinted_sniper.config import (
+    MIN_POLL_INTERVAL_S,
+    SWEEP_MAX_ITEMS_CEILING,
+    SWEEP_MAX_PAGES_CEILING,
+    Settings,
+)
 from vinted_sniper.db import Database, apply_pending
 from vinted_sniper.db.repo import Repo, SweepCandidate
 from vinted_sniper.engine import filters, health, quiet, sweep
@@ -285,8 +290,26 @@ async def _cmd_sweep(
         print(f"That URL will not work: {exc}", file=sys.stderr)
         return 2
 
+    # Clamped here rather than in argparse: the flags are only one caller. Anything that
+    # reaches _cmd_sweep in-process gets the same ceilings, and the clamp stays inline so
+    # the source-level guard in tests/unit/test_cli_sweep.py keeps covering this function.
     max_pages = pages if pages > 0 else settings.sweep_max_pages
+    if max_pages > SWEEP_MAX_PAGES_CEILING:
+        print(
+            f"You asked for {max_pages} page(s); reading {SWEEP_MAX_PAGES_CEILING}. "
+            "Every page is another request to Vinted, and asking for too many in one go "
+            "is how a sweep gets blocked. Narrow the search and run it again to reach "
+            "further back."
+        )
+        max_pages = SWEEP_MAX_PAGES_CEILING
     ceiling = max_items if max_items > 0 else settings.sweep_max_items
+    if ceiling > SWEEP_MAX_ITEMS_CEILING:
+        print(
+            f"You asked to look at {ceiling} listing(s); looking at "
+            f"{SWEEP_MAX_ITEMS_CEILING}. That is as much as one sweep will read, so the "
+            "run has a knowable cost. Narrow the search and run it again for the rest."
+        )
+        ceiling = SWEEP_MAX_ITEMS_CEILING
     # With no --keyword the words you typed into Vinted are the ones that rank. They are a
     # hint either way: a listing missing all of them still gets stored, just last.
     ranking = keywords or params.get("search_text", "").split()
