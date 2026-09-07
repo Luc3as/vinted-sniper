@@ -1,11 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Searches · vinted-sniper{% endblock %}
-{% from "_macros.html" import icon, help %}
+{% from "_macros.html" import icon, help, refresh_ring %}
 
 {% block header_extra %}
   <span class="status"><span class="dot {{ '' if snapshot.alive else 'off' }}" aria-hidden="true"></span>
     <span data-field="header-status">{% if snapshot.alive %}running{% else %}not responding{% endif %} · {{ snapshot.queued_notifications }} queued</span>
     {{ help('“queued” = alerts written but not yet delivered: waiting for a destination to be paired, held for an AI verdict, inside quiet hours, or retrying.') }}
+    {{ refresh_ring(10) }}
   </span>
   {% if auth_enabled %}
   <form method="post" action="/logout" class="inline">
@@ -841,6 +842,8 @@
   }
 
   async function refresh() {
+    // Rewind the header ring so it always shows time until the next poll.
+    document.querySelector(".refresh-ind .hand")?.getAnimations().forEach((a) => { a.currentTime = 0; });
     let data;
     try {
       const res = await fetch("/api/health", { headers: { Accept: "application/json" } });

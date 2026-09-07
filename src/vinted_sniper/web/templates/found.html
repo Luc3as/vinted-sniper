@@ -1,11 +1,12 @@
 {% extends "base.html" %}
-{% from "_macros.html" import icon, help %}
+{% from "_macros.html" import icon, help, refresh_ring %}
 {% block title %}vinted-sniper{% endblock %}
 
 {% block header_extra %}
   <span class="status"><span class="dot {{ '' if snapshot.alive else 'off' }}" aria-hidden="true"></span>
     <span data-field="header-status">{% if snapshot.alive %}running{% else %}not responding{% endif %} · {{ snapshot.queued_notifications }} queued</span>
     {{ help('“queued” = alerts written but not yet delivered: waiting for a destination to be paired, held for an AI verdict, inside quiet hours, or retrying.') }}
+    {{ refresh_ring(10) }}
   </span>
   {% if auth_enabled %}
   <form method="post" action="/logout" class="inline">
@@ -132,15 +133,16 @@
     document.body.style.overflow = "";
   }
 
-  for (const button of document.querySelectorAll(".listing .photo")) {
-    button.addEventListener("click", () => {
-      photos = JSON.parse(button.dataset.photos);
-      if (!photos.length) return;
-      box.hidden = false;
-      document.body.style.overflow = "hidden"; // the page should not scroll underneath
-      show(0);
-    });
-  }
+  // Delegated, because the auto-refresh swaps the cards (and their buttons) out.
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest(".listing .photo");
+    if (!button) return;
+    photos = JSON.parse(button.dataset.photos);
+    if (!photos.length) return;
+    box.hidden = false;
+    document.body.style.overflow = "hidden"; // the page should not scroll underneath
+    show(0);
+  });
 
   box.querySelector(".lb-close").addEventListener("click", close);
   prev.addEventListener("click", () => show(index - 1));
@@ -162,7 +164,7 @@
   // Client-side filter plus show-more paging over the loaded cards.
   const grid = document.querySelector(".listing-grid");
   if (!grid) return;
-  const cards = [...grid.querySelectorAll(".listing")];
+  let cards = [...grid.querySelectorAll(".listing")];
   const input = document.getElementById("recent-filter");
   const drops = document.getElementById("recent-drops");
   const more = document.getElementById("recent-more");
@@ -189,8 +191,69 @@
   input.addEventListener("input", () => { shown = PAGE; render(); });
   drops.addEventListener("change", () => { shown = PAGE; render(); });
   more.addEventListener("click", () => { shown += PAGE; render(); });
+  document.addEventListener("grid-refreshed", () => {
+    cards = [...grid.querySelectorAll(".listing")];
+    render(); // the active filter and paging carry over to the fresh cards
+  });
   render();
 })();
 </script>
 {% endif %}
+<script>
+(() => {
+  "use strict";
+  // Keep the page current without full reloads: poll /api/health (cheap) every
+  // cycle; only when the totals change does it refetch the page and swap the
+  // grid in place, so the filter box, paging and scroll position survive.
+  const REFRESH_S = 10;
+  let seen = null;
+
+  function fingerprint(data) {
+    let total = 0;
+    let newest = 0;
+    for (const search of data.searches) {
+      total += search.items_total;
+      if (search.newest_listing_at) newest = Math.max(newest, search.newest_listing_at);
+    }
+    return `${total}:${newest}`;
+  }
+
+  async function swapGrid() {
+    const lightbox = document.getElementById("lightbox");
+    if (lightbox && !lightbox.hidden) return; // never yank photos out from under the viewer
+    let doc;
+    try {
+      const res = await fetch(location.href, { headers: { Accept: "text/html" } });
+      if (!res.ok) return;
+      doc = new DOMParser().parseFromString(await res.text(), "text/html");
+    } catch { return; }
+    const grid = document.querySelector(".listing-grid");
+    const fresh = doc.querySelector(".listing-grid");
+    if (!grid || !fresh) { location.reload(); return; } // empty ↔ filled: the page structure changed
+    grid.innerHTML = fresh.innerHTML;
+    document.dispatchEvent(new CustomEvent("grid-refreshed"));
+  }
+
+  async function poll() {
+    // Rewind the header ring so it always shows time until the next poll.
+    document.querySelector(".refresh-ind .hand")?.getAnimations().forEach((a) => { a.currentTime = 0; });
+    let data;
+    try {
+      const res = await fetch("/api/health", { headers: { Accept: "application/json" } });
+      if (!res.ok) return;
+      data = await res.json();
+    } catch { return; }
+    const header = document.querySelector('[data-field="header-status"]');
+    if (header) header.textContent = `${data.alive ? "running" : "not responding"} · ${data.queued_notifications} queued`;
+    const dot = document.querySelector("header .dot");
+    if (dot) dot.classList.toggle("off", !data.alive);
+    const mark = fingerprint(data);
+    if (seen === null) { seen = mark; return; } // first poll just records where we are
+    if (mark !== seen) { seen = mark; await swapGrid(); }
+  }
+
+  poll();
+  setInterval(poll, REFRESH_S * 1000);
+})();
+</script>
 {% endblock %}

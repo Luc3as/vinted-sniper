@@ -76,6 +76,15 @@
     .status { font-size: .85rem; color: var(--muted); display: inline-flex; gap: .5rem; align-items: center; }
     .dot { width: .55rem; height: .55rem; border-radius: 999px; background: var(--ok); display: inline-block; }
     .dot.off { background: var(--bad); }
+    /* The auto-refresh ring: the coloured arc drains over one poll interval
+       (the duration is set inline by the refresh_ring macro). */
+    .refresh-ind { display: inline-flex; align-items: center; }
+    .refresh-ind svg { width: .8rem; height: .8rem; transform: rotate(-90deg); flex: none; }
+    .refresh-ind .track { stroke: var(--line); }
+    .refresh-ind .hand { stroke: var(--accent); stroke-linecap: round;
+                         stroke-dasharray: 28.3; animation: refresh-drain linear infinite; }
+    @keyframes refresh-drain { from { stroke-dashoffset: 0; } to { stroke-dashoffset: 28.3; } }
+    @media (prefers-reduced-motion: reduce) { .refresh-ind .hand { animation: none; } }
 
     /* Wide enough for the tables to breathe, capped so a 4K monitor doesn't stretch
        rows into unreadable ribbons; the viewport term keeps side gutters on laptops. */

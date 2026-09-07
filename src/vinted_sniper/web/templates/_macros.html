@@ -16,3 +16,8 @@
 {%- endif -%}
 {%- endmacro %}
 {% macro help(text) -%}<button type="button" class="help" data-tip="{{ text }}" aria-label="{{ text }}">?</button>{%- endmacro %}
+{# A small draining ring showing when the page next refreshes itself. The page's
+   refresh script rewinds the animation each cycle so it stays honest. #}
+{% macro refresh_ring(seconds) -%}
+<span class="refresh-ind" data-tip="This page refreshes itself every {{ seconds }} seconds — the ring shows how long until the next one." aria-label="Auto-refreshes every {{ seconds }} seconds"><svg viewBox="0 0 12 12" fill="none" stroke-width="1.6" aria-hidden="true"><circle class="track" cx="6" cy="6" r="4.5"/><circle class="hand" cx="6" cy="6" r="4.5" style="animation-duration:{{ seconds }}s"/></svg></span>
+{%- endmacro %}
