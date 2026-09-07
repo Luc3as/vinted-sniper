@@ -9,6 +9,7 @@ never touches `Dispatcher`, `record_new_items`, `record_price_drops`, `observe_m
 
 from __future__ import annotations
 
+import argparse
 import ast
 import inspect
 import textwrap
@@ -33,7 +34,7 @@ FORBIDDEN = (
 )
 
 
-def parse(*argv: str):
+def parse(*argv: str) -> argparse.Namespace:
     return build_parser().parse_args(list(argv))
 
 
