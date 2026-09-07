@@ -10,7 +10,7 @@ import pytest
 from tests.conftest import ScriptedTransport
 from vinted_sniper.db import Database
 from vinted_sniper.db.repo import Repo
-from vinted_sniper.magic.errors import MappingError
+from vinted_sniper.magic.errors import MappingError, TaxonomyUnavailableError
 from vinted_sniper.magic.models import MappedQuery
 from vinted_sniper.magic.validate import find_catalog, validate
 from vinted_sniper.vinted.errors import VintedError
@@ -309,3 +309,132 @@ async def test_an_unreadable_category_tree_is_a_mapping_error_too(
         await validate(
             mapping(catalog={"id": 2052, "name": "Jackets & Coats"}), tld="fr", taxonomy=taxonomy
         )
+
+
+# --- A mapping that filters on nothing -------------------------------------------------
+#
+# Every field on MappedQuery is optional and extra keys are ignored, so a flow answering
+# with something unrelated parses cleanly into an all-unset mapping. Left alone that
+# becomes a search across the whole of Vinted, read and judged out of the triage budget.
+
+
+async def test_a_mapping_with_no_filters_at_all_is_refused_by_name(
+    taxonomy: Taxonomy, transport: ScriptedTransport
+) -> None:
+    """A `{"nonsense": true}` flow reply is exactly this: nothing set, nothing ignored."""
+    nonsense = MappedQuery.model_validate({"nonsense": True})
+
+    with pytest.raises(MappingError) as caught:
+        await validate(nonsense, tld="fr", taxonomy=taxonomy)
+
+    message = str(caught.value)
+    for missing in ("category", "brand", "size", "price limit", "words to search for"):
+        assert missing in message, f"the refusal never says {missing!r} is missing"
+    assert transport.requests == [], "nothing worth asking Vinted about a search with no search"
+
+
+async def test_the_ranking_only_fields_do_not_make_a_search(
+    taxonomy: Taxonomy, transport: ScriptedTransport
+) -> None:
+    """keywords, visual_signature and watch_hints rank and describe; they never filter."""
+    with pytest.raises(MappingError):
+        await validate(
+            mapping(
+                currency="EUR",
+                keywords=["torrentshell"],
+                visual_signature="a hooded shell jacket",
+                watch_hints={"required_keywords": ["torrentshell"], "title_pattern": None},
+            ),
+            tld="fr",
+            taxonomy=taxonomy,
+        )
+
+    assert transport.requests == []
+
+
+async def test_search_text_on_its_own_is_a_legitimate_search(
+    taxonomy: Taxonomy, transport: ScriptedTransport
+) -> None:
+    """The at-least-one rule must not cost the text-only search its right to exist."""
+    await validate(mapping(search_text="patagonia torrentshell"), tld="fr", taxonomy=taxonomy)
+
+    assert transport.requests == []
+
+
+async def test_a_free_price_ceiling_still_counts_as_a_filter(
+    taxonomy: Taxonomy, transport: ScriptedTransport
+) -> None:
+    """`price_to = 0` is the free listings — a real ceiling, and a falsy one."""
+    await validate(mapping(price_to=0), tld="fr", taxonomy=taxonomy)
+
+    assert transport.requests == []
+
+
+async def test_an_empty_search_text_does_not_count_as_a_filter(
+    taxonomy: Taxonomy, transport: ScriptedTransport
+) -> None:
+    with pytest.raises(MappingError):
+        await validate(mapping(search_text=""), tld="fr", taxonomy=taxonomy)
+
+
+# --- Telling an unreachable Vinted from a wrong id -------------------------------------
+#
+# Both are MappingError so every handler in the package keeps working, but the endpoint
+# answers them with different statuses, which needs them to be different types.
+
+
+async def test_an_unreachable_vinted_is_its_own_error_type(
+    taxonomy: Taxonomy, transport: ScriptedTransport
+) -> None:
+    queue_bootstrap(transport)
+    transport.queue_root(Response(status_code=503, text="upstream is down", headers={}, cookies={}))
+
+    with pytest.raises(TaxonomyUnavailableError) as caught:
+        await validate(
+            mapping(catalog={"id": 2052, "name": "Jackets & Coats"}), tld="fr", taxonomy=taxonomy
+        )
+
+    assert isinstance(caught.value, MappingError), "every existing handler must keep catching it"
+    assert not isinstance(caught.value, VintedError)
+
+
+async def test_a_failing_size_lookup_is_unavailable_not_a_wrong_id(
+    taxonomy: Taxonomy, transport: ScriptedTransport, repo: Repo, clock: Clock
+) -> None:
+    await cache_tree(repo, clock)
+    queue_bootstrap(transport)
+    queue_page(transport, flight_page())
+    transport.queue_status(503, "upstream is down")
+
+    with pytest.raises(TaxonomyUnavailableError):
+        await validate(
+            mapping(
+                catalog={"id": 2052, "name": "Jackets & Coats"},
+                sizes=[{"id": 208, "name": "M"}],
+            ),
+            tld="fr",
+            taxonomy=taxonomy,
+        )
+
+
+async def test_a_wrong_id_is_a_plain_mapping_error_and_not_the_unavailable_one(
+    taxonomy: Taxonomy, transport: ScriptedTransport, repo: Repo, clock: Clock
+) -> None:
+    """The whole point of the split: an id nobody has stays the caller's to fix."""
+    await cache_tree(repo, clock)
+
+    with pytest.raises(MappingError) as caught:
+        await validate(
+            mapping(catalog={"id": 9999, "name": "panske bundy"}), tld="fr", taxonomy=taxonomy
+        )
+
+    assert not isinstance(caught.value, TaxonomyUnavailableError)
+
+
+async def test_a_filterless_mapping_is_not_reported_as_an_unreachable_vinted(
+    taxonomy: Taxonomy, transport: ScriptedTransport
+) -> None:
+    with pytest.raises(MappingError) as caught:
+        await validate(MappedQuery.model_validate({"nonsense": True}), tld="fr", taxonomy=taxonomy)
+
+    assert not isinstance(caught.value, TaxonomyUnavailableError)

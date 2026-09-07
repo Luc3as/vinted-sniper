@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Any, NoReturn
 
 from vinted_sniper.log import get_logger
-from vinted_sniper.magic.errors import MappingError
+from vinted_sniper.magic.errors import MappingError, TaxonomyUnavailableError
 from vinted_sniper.magic.models import MappedQuery, Named
 from vinted_sniper.vinted.errors import VintedError
 from vinted_sniper.vinted.taxonomy import Taxonomy
@@ -32,6 +32,11 @@ log = get_logger(__name__)
 # How many of the names Vinted did return to quote back in a rejection. Enough to be
 # useful when the model was close, short enough to stay one readable line.
 _MAX_SUGGESTIONS = 5
+
+# What counts as an actual constraint on the search. `currency` is not here — it is the
+# unit `price_to` is counted in, not a thing it narrows — and neither are `keywords`,
+# `visual_signature` or `watch_hints`, which rank and describe but never filter (R003/D008).
+_FILTERS = ("catalog", "brand", "sizes", "price_to", "search_text")
 
 
 def find_catalog(tree: list[dict[str, Any]], catalog_id: int) -> dict[str, Any] | None:
@@ -53,8 +58,11 @@ async def validate(mapped: MappedQuery, *, tld: str, taxonomy: Taxonomy) -> None
     """Confirm every id in `mapped` exists on vinted.`tld`. Raise `MappingError` if not.
 
     Returns nothing on success — this is a gate, not a transform. A field left unset skips
-    its tier: a text-only search with no brand is a perfectly good search.
+    its tier: a text-only search with no brand is a perfectly good search. What is *not* a
+    good search is one where every field is unset, so that case is refused first.
     """
+    _check_something_is_filtered(mapped)
+
     catalog_id: int | None = None
     if mapped.catalog is not None:
         await _check_catalog(mapped.catalog.id, mapped.catalog.name, tld=tld, taxonomy=taxonomy)
@@ -71,6 +79,43 @@ async def validate(mapped: MappedQuery, *, tld: str, taxonomy: Taxonomy) -> None
 
     if mapped.sizes:
         await _check_sizes(mapped.sizes, catalog_id=catalog_id, tld=tld, taxonomy=taxonomy)
+
+
+def _check_something_is_filtered(mapped: MappedQuery) -> None:
+    """Refuse a mapping that narrows nothing at all.
+
+    Every field on `MappedQuery` is optional and unknown keys are ignored, which is what
+    keeps this app and the n8n flow deployable apart — but it also means a flow answering
+    with something unrelated validates into a mapping with nothing set. The per-field tiers
+    below then all skip, `to_params()` emits only the sort order, and what comes out is a
+    search across the whole of Vinted paid for out of the person's triage budget. That is
+    the one thing this gate exists to prevent, so it is caught before any tier runs.
+    """
+    if any(_is_a_constraint(getattr(mapped, field)) for field in _FILTERS):
+        return
+
+    message = (
+        "this search would not narrow anything down: the mapper came back without a "
+        "category, a brand, a size, a price limit or any words to search for. "
+        "Try saying what you are looking for in more detail."
+    )
+    # Its own `kind`, not `unknown_id`: nothing here was wrong about Vinted, the answer
+    # simply had no search in it. An operator grepping the log wants those apart.
+    log.warning("magic.rejected", tier="filters", kind="no_filters", reason=message)
+    raise MappingError(message)
+
+
+def _is_a_constraint(value: object) -> bool:
+    """Is this field actually narrowing the search?
+
+    Emptiness is what disqualifies, not falsiness: `price_to = 0` is a real ceiling — the
+    free listings — while `search_text = ""` and `sizes = []` narrow nothing.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str | list):
+        return bool(value)
+    return True
 
 
 async def _check_catalog(catalog_id: int, name: str, *, tld: str, taxonomy: Taxonomy) -> None:
@@ -162,4 +207,4 @@ def _unavailable(tier: str, message: str) -> NoReturn:
     """
     full = f"{message} — the ids in this search could not be checked"
     log.warning("magic.rejected", tier=tier, kind="lookup_failed", reason=full)
-    raise MappingError(full)
+    raise TaxonomyUnavailableError(full)

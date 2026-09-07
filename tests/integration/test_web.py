@@ -1107,6 +1107,83 @@ def test_a_mapper_that_cannot_be_reached_is_a_422_in_plain_words(
     assert transport.requests == []  # a failed mapping never touches Vinted
 
 
+def test_a_flow_answering_with_nothing_to_search_on_is_refused_not_searched(
+    magic_client: Callable[[FakeFlow], TestClient], transport: ScriptedTransport
+) -> None:
+    """`{"nonsense": true}` parses into an all-unset mapping — a search over all of Vinted.
+
+    Extra keys are ignored and every field is optional, so nothing upstream of here refuses
+    it. Answered 200 it would become a filterless sweep, read and judged at the user's cost.
+    """
+    response = magic_client(FakeFlow({"nonsense": True})).post(
+        "/api/magic-search/map", json={"text": "panska bunda", "tld": "sk"}
+    )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    for missing in ("category", "brand", "size", "price limit", "words to search for"):
+        assert missing in error, f"the refusal never says {missing!r} is missing"
+    assert transport.requests == [], "a search with no search in it never reaches Vinted"
+
+
+def test_a_flow_answering_with_only_a_currency_is_refused_too(
+    magic_client: Callable[[FakeFlow], TestClient], transport: ScriptedTransport
+) -> None:
+    """A unit is not a constraint, and neither are the ranking-only fields (R003)."""
+    response = magic_client(
+        FakeFlow({"currency": "EUR", "keywords": ["torrentshell"], "visual_signature": "a shell"})
+    ).post("/api/magic-search/map", json={"text": "panska bunda", "tld": "sk"})
+
+    assert response.status_code == 422
+    assert transport.requests == []
+
+
+def test_a_search_with_only_words_still_maps(
+    magic_client: Callable[[FakeFlow], TestClient], transport: ScriptedTransport
+) -> None:
+    """The at-least-one rule must not take the text-only search away."""
+    response = magic_client(FakeFlow({"search_text": "patagonia torrentshell"})).post(
+        "/api/magic-search/map", json={"text": "patagonia torrentshell", "tld": "sk"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["params"] == {
+        "search_text": "patagonia torrentshell",
+        "order": "newest_first",
+    }
+
+
+def test_a_vinted_that_cannot_be_reached_during_the_id_check_is_a_502(
+    magic_client: Callable[[FakeFlow], TestClient], transport: ScriptedTransport
+) -> None:
+    """Not the caller's fault and not fixable by rewording, so not a 422."""
+    transport.queue_root(_page_with_jackets())  # session bootstrap
+    transport.queue_root(Response(status_code=503, text="upstream is down", headers={}, cookies={}))
+
+    response = magic_client(FakeFlow()).post(
+        "/api/magic-search/map", json={"text": "panska bunda Patagonia", "tld": "sk"}
+    )
+
+    assert response.status_code == 502
+    assert "could not be checked" in response.json()["error"]
+    assert "Traceback" not in response.text
+
+
+def test_an_invented_id_is_still_a_422_after_the_502_arm_was_added(
+    magic_client: Callable[[FakeFlow], TestClient], transport: ScriptedTransport
+) -> None:
+    """Guards the arm ordering: the 502 arm must not swallow an ordinary wrong id."""
+    transport.queue_root(_page_with_jackets())  # session bootstrap
+    transport.queue_root(_page_with_jackets())  # the tree, which has no catalog 9999
+
+    response = magic_client(
+        FakeFlow({**MAPPED_ANSWER, "catalog": {"id": 9999, "name": "bundy"}})
+    ).post("/api/magic-search/map", json={"text": "panska bunda", "tld": "sk"})
+
+    assert response.status_code == 422
+    assert "9999" in response.json()["error"]
+
+
 def test_an_unknown_site_is_refused_before_the_mapper_is_called(
     magic_client: Callable[[FakeFlow], TestClient],
 ) -> None:

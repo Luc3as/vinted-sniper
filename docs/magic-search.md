@@ -65,22 +65,30 @@ A single JSON object, `200`. `{"output": {…}}` or `{"result": {…}}` also wor
 whole body is one of those two keys wrapping an object, the app unwraps it, because that is
 how an n8n node's output usually arrives.
 
-Every field is optional. An answer of `{}` is valid and means "no filters I am sure of" —
-a perfectly good, very wide search. Fields the app does not know are ignored rather than
+Every field is optional on its own, but **at least one of `catalog`, `brand`, `sizes`,
+`price_to` or `search_text` must be there**. Any one of them is enough — a search with only
+`search_text` is a perfectly good search. An answer of `{}`, or one that sets only
+`currency`, `keywords`, `visual_signature` or `watch_hints`, is refused with a `422`,
+because none of those narrows the search: what would come out is every listing on Vinted,
+read and judged at your expense. Fields the app does not know are ignored rather than
 rejected, so the flow can start answering with something new before the app is redeployed.
 Everything else is strict: a field that is present must be the right shape.
 
 | Field | Type | Required | What it means |
 |---|---|---|---|
-| `catalog` | `{"id": number, "name": text}` | no | The Vinted category. `id` is at least 1, `name` at most 200 characters. |
-| `brand` | `{"id": number, "name": text}` | no | The brand, same shape. |
-| `sizes` | list of `{"id", "name"}`, up to 10 | no | Sizes inside that category. Only meaningful with a `catalog` — see below. |
-| `price_to` | number, 0 or more | no | Price ceiling, in `currency`. There is no `price_from`: the app searches upward from nothing. |
+| `catalog` | `{"id": number, "name": text}` | one of five | The Vinted category. `id` is at least 1, `name` at most 200 characters. |
+| `brand` | `{"id": number, "name": text}` | one of five | The brand, same shape. |
+| `sizes` | list of `{"id", "name"}`, up to 10 | one of five | Sizes inside that category. Only meaningful with a `catalog` — see below. |
+| `price_to` | number, 0 or more | one of five | Price ceiling, in `currency`. There is no `price_from`: the app searches upward from nothing. |
 | `currency` | text, up to 3 characters | no | `EUR`, `CZK`, … Whatever `price_to` is counted in. |
-| `search_text` | text, up to 200 characters | no | Free words handed to Vinted's own search box, on top of the filters. |
+| `search_text` | text, up to 200 characters | one of five | Free words handed to Vinted's own search box, on top of the filters. |
 | `keywords` | list of text, up to 10 | no | The words that matter in a title. The sweep ranks its results by these; it never filters on them. |
 | `visual_signature` | text, up to 1000 characters | no | A short description of what the piece *looks like*, for comparing against photos. |
 | `watch_hints` | `{"required_keywords": list of text (up to 10), "title_pattern": text or null}` | no | Title rules kept for later, if this sweep is ever promoted into a standing watch. Never used as a search filter. |
+
+"One of five" means exactly that: none of those five fields is required by itself, but an
+answer that sets none of them is refused. `currency` does not count — it is the unit
+`price_to` is counted in, not something that narrows anything.
 
 ### Why every id comes with a name
 
@@ -148,8 +156,16 @@ to see everything.
 
 ## What gets rejected
 
-The ids are checked in three steps, cheapest first, and the first failure stops the rest.
-Anything refused comes back as `422` with `{"error": "<the sentence below>"}`.
+Before any id is looked at, the answer has to contain a search at all. An answer with none
+of `catalog`, `brand`, `sizes`, `price_to` or `search_text` set is refused straight away,
+without a single Vinted request:
+
+```
+this search would not narrow anything down: the mapper came back without a category, a brand, a size, a price limit or any words to search for. Try saying what you are looking for in more detail.
+```
+
+Then the ids are checked in three steps, cheapest first, and the first failure stops the
+rest. Anything refused comes back as `422` with `{"error": "<the sentence below>"}`.
 
 1. **The category**, against the tree of Vinted categories the app keeps for a week. Almost
    always zero requests to Vinted, and it catches the thing a model most often invents.
@@ -632,23 +648,30 @@ Jeden JSON objekt, `200`. Funguje aj `{"output": {…}}` alebo `{"result": {…}
 telo jeden z týchto dvoch kľúčov obaľujúcich objekt, aplikácia ho rozbalí, lebo takto výstup
 n8n nodu obvykle prichádza.
 
-Každé pole je voliteľné. Odpoveď `{}` je platná a znamená „žiadne filtre, ktorými by som si
-bol istý" — úplne v poriadku, len veľmi široké vyhľadávanie. Polia, ktoré aplikácia nepozná,
-ignoruje namiesto odmietnutia, takže flow môže začať posielať niečo nové ešte predtým, než
-sa aplikácia nasadí nanovo. Všetko ostatné je prísne: pole, ktoré tam je, musí mať správny
-tvar.
+Každé pole je samo o sebe voliteľné, ale **aspoň jedno z `catalog`, `brand`, `sizes`,
+`price_to` alebo `search_text` tam byť musí**. Stačí ktorékoľvek jedno — vyhľadávanie len
+so `search_text` je úplne v poriadku. Odpoveď `{}`, alebo taká, ktorá nastaví len
+`currency`, `keywords`, `visual_signature` či `watch_hints`, sa odmietne s `422`, lebo ani
+jedno z toho vyhľadávanie nezúži: vyšlo by z toho každé jedno inzerát na Vintede, prečítaný
+a posúdený na tvoje náklady. Polia, ktoré aplikácia nepozná, ignoruje namiesto odmietnutia,
+takže flow môže začať posielať niečo nové ešte predtým, než sa aplikácia nasadí nanovo.
+Všetko ostatné je prísne: pole, ktoré tam je, musí mať správny tvar.
 
 | Pole | Typ | Povinné | Čo znamená |
 |---|---|---|---|
-| `catalog` | `{"id": číslo, "name": text}` | nie | Vintedská kategória. `id` je aspoň 1, `name` najviac 200 znakov. |
-| `brand` | `{"id": číslo, "name": text}` | nie | Značka, ten istý tvar. |
-| `sizes` | zoznam `{"id", "name"}`, najviac 10 | nie | Veľkosti v rámci tej kategórie. Zmysel majú len spolu s `catalog` — pozri nižšie. |
-| `price_to` | číslo, 0 alebo viac | nie | Cenový strop, v mene `currency`. `price_from` neexistuje: aplikácia hľadá zdola nahor. |
+| `catalog` | `{"id": číslo, "name": text}` | jedno z piatich | Vintedská kategória. `id` je aspoň 1, `name` najviac 200 znakov. |
+| `brand` | `{"id": číslo, "name": text}` | jedno z piatich | Značka, ten istý tvar. |
+| `sizes` | zoznam `{"id", "name"}`, najviac 10 | jedno z piatich | Veľkosti v rámci tej kategórie. Zmysel majú len spolu s `catalog` — pozri nižšie. |
+| `price_to` | číslo, 0 alebo viac | jedno z piatich | Cenový strop, v mene `currency`. `price_from` neexistuje: aplikácia hľadá zdola nahor. |
 | `currency` | text, najviac 3 znaky | nie | `EUR`, `CZK`, … V čom je `price_to` počítané. |
-| `search_text` | text, najviac 200 znakov | nie | Voľné slová podané Vintedovmu vlastnému vyhľadávaciemu poľu, navrch k filtrom. |
+| `search_text` | text, najviac 200 znakov | jedno z piatich | Voľné slová podané Vintedovmu vlastnému vyhľadávaciemu poľu, navrch k filtrom. |
 | `keywords` | zoznam textov, najviac 10 | nie | Slová, na ktorých v názve záleží. Sweep podľa nich zoraďuje výsledky; nikdy podľa nich nefiltruje. |
 | `visual_signature` | text, najviac 1000 znakov | nie | Krátky popis toho, ako kus *vyzerá*, na porovnanie s fotkami. |
 | `watch_hints` | `{"required_keywords": zoznam textov (najviac 10), "title_pattern": text alebo null}` | nie | Pravidlá pre názov, odložené na neskôr, keby sa zo sweepu niekedy stalo trvalé striehnutie. Nikdy sa nepoužijú ako filter vyhľadávania. |
+
+„Jedno z piatich" znamená presne to: ani jedno z tých piatich polí nie je povinné samo
+osebe, ale odpoveď, ktorá nenastaví ani jedno z nich, sa odmietne. `currency` sa nepočíta —
+je to mena, v ktorej je `price_to`, nie niečo, čo by vyhľadávanie zužovalo.
 
 ### Prečo ide s každým id aj meno
 
@@ -714,8 +737,16 @@ a vložiť ich do vyhľadávania by zúžilo sweep, ktorý má vidieť všetko.
 
 ## Čo bude odmietnuté
 
-Id sa overujú v troch krokoch, od najlacnejšieho, a prvé zlyhanie zastaví zvyšok. Čokoľvek
-odmietnuté sa vráti ako `422` s `{"error": "<veta nižšie>"}`.
+Ešte pred akýmkoľvek id musí odpoveď vôbec obsahovať nejaké vyhľadávanie. Odpoveď, ktorá
+nemá nastavené ani jedno z `catalog`, `brand`, `sizes`, `price_to` a `search_text`, sa
+odmietne hneď, bez jediného requestu na Vinted:
+
+```
+this search would not narrow anything down: the mapper came back without a category, a brand, a size, a price limit or any words to search for. Try saying what you are looking for in more detail.
+```
+
+Potom sa id overujú v troch krokoch, od najlacnejšieho, a prvé zlyhanie zastaví zvyšok.
+Čokoľvek odmietnuté sa vráti ako `422` s `{"error": "<veta nižšie>"}`.
 
 1. **Kategória**, proti stromu vintedských kategórií, ktorý si aplikácia drží týždeň. Takmer
    vždy nula requestov na Vinted a chytí to, čo si model vymýšľa najčastejšie. Id, ktoré

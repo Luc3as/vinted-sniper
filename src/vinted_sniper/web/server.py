@@ -52,7 +52,7 @@ from vinted_sniper.engine import filters, health, quiet, sweep
 from vinted_sniper.enrichment import Enrichment, EnrichmentIn
 from vinted_sniper.log import get_logger
 from vinted_sniper.magic.client import MapperClient
-from vinted_sniper.magic.errors import MappingError
+from vinted_sniper.magic.errors import MappingError, TaxonomyUnavailableError
 from vinted_sniper.magic.models import WatchHints
 from vinted_sniper.magic.triage import TriageClient
 from vinted_sniper.magic.validate import validate
@@ -765,10 +765,13 @@ def create_app(
 
     # --- Magic Search --------------------------------------------------------------
     # A sentence in, a params dict out. Two steps, and both can refuse: the n8n flow can
-    # be down or answer with a shape this app cannot use, and the ids it does answer with
-    # can be invented. Neither is a server fault, so both come back as 422 with the reason
-    # in words — an id that was never checked would become a search that quietly finds
-    # nothing, which is the one outcome this endpoint exists to prevent.
+    # be down, answer with a shape this app cannot use, or answer with nothing to search
+    # on at all, and the ids it does answer with can be invented. None of those is a server
+    # fault, so they come back as 422 with the reason in words — an id that was never
+    # checked, or a mapping with no filters in it, would become a search that quietly finds
+    # nothing or everything, which is the one outcome this endpoint exists to prevent.
+    # The exception is Vinted itself being unreachable while the ids are checked: that is
+    # nobody's to fix by rewording, so it is a 502.
 
     @app.post("/api/magic-search/map")
     async def magic_search_map(body: MagicSearchIn, _: None = guard) -> JSONResponse:
@@ -785,6 +788,10 @@ def create_app(
         try:
             mapped = await mapper.map_query(body.text, tld)
             await validate(mapped, tld=tld, taxonomy=taxonomy)
+        except TaxonomyUnavailableError as exc:
+            # Before `MappingError`, which it subclasses — caught after its parent this arm
+            # would be dead code, and an unreachable Vinted would be blamed on the caller.
+            return JSONResponse({"error": str(exc)}, status_code=502)
         except MappingError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
         except VintedError as exc:
