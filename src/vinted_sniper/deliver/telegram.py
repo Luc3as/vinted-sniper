@@ -234,9 +234,7 @@ class TelegramSender:
             "link_preview_options": {"is_disabled": True},
         }
 
-    def _verdict_block(
-        self, item: Item, verdict: Enrichment, *, silent: bool
-    ) -> list[str]:
+    def _verdict_block(self, item: Item, verdict: Enrichment, *, silent: bool) -> list[str]:
         """The score line, the one-sentence recommendation, and what the model thinks
         the product is — in that order, right under the title."""
         t = self._t

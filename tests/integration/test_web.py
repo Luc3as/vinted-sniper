@@ -1101,7 +1101,7 @@ def test_a_mapper_that_cannot_be_reached_is_a_422_in_plain_words(
 
 
 def test_an_unknown_site_is_refused_before_the_mapper_is_called(
-    magic_client: Callable[[FakeFlow], TestClient]
+    magic_client: Callable[[FakeFlow], TestClient],
 ) -> None:
     flow = FakeFlow()
 
