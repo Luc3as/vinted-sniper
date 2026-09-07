@@ -867,3 +867,51 @@ async def test_a_judged_and_verdicted_sweep_still_writes_only_to_the_sweep_table
     for table in ("items", "outbox", "market"):
         row = await db.fetch_one(f"SELECT COUNT(*) AS n FROM {table}")
         assert int(row["n"]) == 0, f"a judged sweep wrote to {table}"
+
+
+async def test_the_run_row_stays_open_until_the_judged_stages_are_done(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """Anything polling `status` must not be told a sweep is over while it is still buying.
+
+    `run_sweep()` closes its own row, which is right for a bare sweep. Under `judge_sweep()`
+    it would mean `status='ok'` and a `finished_at` were written before the photo check had
+    seen a single thumbnail — so /magic's poll would stop on the first read and settle the
+    screen on candidates nobody had looked at yet. That is what `close=False` prevents, and
+    this test is that claim: the row is read from inside both AI stages.
+    """
+    ids = list(range(3300, 3304))
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    seen: list[tuple[str, str, int | None]] = []
+
+    async def note(stage: str) -> None:
+        run = (await repo.recent_sweep_runs(limit=1))[0]
+        seen.append((stage, run.status, run.finished_at))
+
+    class WatchingTriage(StubTriage):
+        async def judge(self, items: list[Item], target: TriageTarget) -> TriageBatch:
+            await note("triage")
+            return await super().judge(items, target)
+
+    class WatchingVerdict(StubVerdict):
+        async def judge(self, item: Item, target: TriageTarget) -> VerdictOut:
+            await note("verdict")
+            return await super().judge(item, target)
+
+    result = await judge_over(
+        transport,
+        repo,
+        db,
+        triage=WatchingTriage({i: Answer(matches_target=True, confidence=0.8) for i in ids}),
+        verdict=WatchingVerdict(),
+        max_verdicts=2,
+    )
+
+    assert [stage for stage, _, _ in seen] == ["triage", "verdict", "verdict"]
+    assert {(status, finished) for _, status, finished in seen} == {("running", None)}
+
+    closed = await repo.get_sweep_run(result.sweep_id)
+    assert closed is not None
+    assert closed.status == "ok"
+    assert closed.finished_at is not None
+    assert (closed.pages_fetched, closed.items_seen, closed.candidates) == (1, 4, 4)

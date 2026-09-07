@@ -1,0 +1,489 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, help %}
+{% block title %}Magic Search · vinted-sniper{% endblock %}
+
+{% block header_extra %}
+  {% if auth_enabled %}
+  <form method="post" action="/logout" class="inline">
+    <button class="quiet" type="submit">Sign out</button>
+  </form>
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+{% if missing_sweep %}
+<p class="flash error" role="alert">There is no sweep numbered {{ missing_sweep }} on this
+  dashboard — it was never started here, or it has since been cleared out.</p>
+{% endif %}
+
+{# The results of a finished sweep come first: it is the thing somebody paid for, and on a
+   reload it is what they came back to read. The four-state flow lives underneath, so
+   "look for something else" is always one scroll away and never hides the answer. #}
+{% if sweep %}
+<section id="m-results"
+         data-sweep-id="{{ sweep.id }}"
+         data-tld="{{ sweep.tld }}"
+         data-status="{{ sweep.status }}"
+         data-params='{{ sweep.params | tojson }}'>
+  <div class="section-head">
+    <h2>{{ icon('sparkle') }}Sweep #{{ sweep.id }}</h2>
+    <span class="lede">One look through what is already for sale on vinted.{{ sweep.tld }}. Nothing
+      here is being watched and nobody was notified — that is the button at the bottom.</span>
+  </div>
+
+  <div class="card">
+    <div class="row" style="gap:.6rem;align-items:baseline">
+      <span class="pill {{ 'sent' if sweep.status == 'ok' else ('failed' if sweep.status == 'blocked' else ('pending' if sweep.status in ('running', 'partial') else 'disabled')) }}">{{ sweep.status }}</span>
+      {% if sweep.keywords %}<span class="muted">{{ sweep.keywords }}</span>{% endif %}
+      <span class="muted">{{ sweep.age }}</span>
+    </div>
+    <div class="muted">Read {{ sweep.pages_fetched }} page(s), saw {{ sweep.items_seen }} listing(s), kept {{ sweep.kept }}.</div>
+    <div class="muted">Cost: {{ sweep.kept }} listing(s) through the filters, {{ sweep.triaged }} photo(s) checked,
+      {{ sweep.verdicts }} full opinion(s), {{ sweep.tokens }} tokens billed — €{{ sweep.cost_eur }}</div>
+    {# A sweep that stopped early says so in its own words. Showing "no results" for a run
+       that never finished would be a lie the person acts on. #}
+    {% if sweep.error %}
+    <p class="error error-line" role="alert" style="margin:.5rem 0 0">
+      {% if sweep.status == 'partial' %}This sweep stopped before it had finished:{% else %}This sweep could not run:{% endif %}
+      {{ sweep.error }}
+    </p>
+    {% endif %}
+    {% if sweep.status == 'running' %}
+    <div class="muted" style="margin-top:.5rem">Still running — the numbers above update themselves.</div>
+    {% endif %}
+  </div>
+
+  {% if sweep.matches %}
+  <div class="listing-grid">
+    {% for match in sweep.matches %}
+    <article class="listing">
+      {% if match.photo %}
+      <a class="photo" href="{{ match.url }}" target="_blank" rel="noreferrer" style="cursor:pointer"
+         aria-label="Open {{ match.title }} on Vinted"><img src="{{ match.photo }}" alt="" loading="lazy"></a>
+      {% else %}
+      <div class="no-photo">no photo</div>
+      {% endif %}
+      <div class="body">
+        <a class="title" href="{{ match.url }}" target="_blank" rel="noreferrer"
+           title="{{ match.title }}">{{ match.title }}</a>
+        <div class="price">
+          <span class="total">{{ match.price or '—' }}</span>
+          {% if match.score is not none %}
+          <span class="tag score {{ 'hot' if match.score >= 75 else ('cold' if match.score < 40 else '') }}"
+                data-tip="The agent’s deal score, 0–100 — higher is a better deal.">🤖 {{ match.score }}</span>
+          {% endif %}
+        </div>
+        <div class="says {{ 'yes' if match.matches_target else ('unchecked' if match.matches_target is none else 'no') }}">{{ match.photos }}</div>
+        {% if match.reason %}<div class="why">{{ match.reason }}</div>{% endif %}
+        <div class="meta">title match {{ match.match }}%</div>
+        {% if match.verdict %}<div class="opinion">{{ match.verdict }}</div>{% endif %}
+        {% if match.verdict_text %}<div class="opinion">{{ match.verdict_text }}</div>{% endif %}
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% elif sweep.status == 'running' %}
+  <div class="card"><div class="empty">Nothing to show yet — the first listings appear as they are read.</div></div>
+  {% elif sweep.error %}
+  <div class="card"><div class="empty"><strong>No results, because the sweep did not finish.</strong>
+    The reason is above. Nothing was ruled out — it was never looked at.</div></div>
+  {% else %}
+  <div class="card"><div class="empty"><strong>Nothing survived the filters.</strong>
+    Everything read was either the wrong thing or over the price you gave. Try wider words.</div></div>
+  {% endif %}
+
+  <div class="card" id="m-watch-card">
+    <h3>{{ icon('search') }}Watch this from now on</h3>
+    {% if sweep.query_id %}
+    <p class="muted">This sweep is already being watched — it is
+      <a href="/searches">search #{{ sweep.query_id }}</a>. New listings that match it become alerts.</p>
+    {% else %}
+    <p class="muted">Keeps the same filters as a standing search, checked on a timer. From then on you
+      are told about new listings as they appear, instead of looking again yourself.</p>
+    <div class="row">
+      <input type="text" id="m-watch-name" placeholder="Name it (optional)" style="max-width:18rem"
+             aria-label="Name for the saved search">
+      <button type="button" id="m-watch">Watch this</button>
+      <span class="muted" id="m-watch-hints"></span>
+    </div>
+    <p class="muted" id="m-watch-msg" role="status" style="margin:.5rem 0 0"></p>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+<section id="m-search">
+  <div class="section-head">
+    <h2>{{ icon('sparkle') }}{% if sweep %}Look for something else{% else %}Magic Search{% endif %}</h2>
+    <span class="lede">Say what you are after in ordinary words. It is turned into a real Vinted search,
+      you confirm it, and then the AI looks through what is on sale right now and tells you which photos
+      actually show the thing.</span>
+  </div>
+
+  {% if not mapping_enabled %}
+  <div class="card"><div class="empty"><strong>Magic Search is not set up on this install.</strong>
+    It needs the n8n flow that reads a sentence (<code>VINTED_SNIPER_MAGIC_WEBHOOK_URL</code>) and a
+    signed-in Vinted session to check the ids it returns are real. Until both exist, the box below
+    will answer with that rather than guess.</div></div>
+  {% endif %}
+
+  <!-- (1) Type ------------------------------------------------------------------- -->
+  <div class="card" id="m-step-type">
+    <h3>{{ icon('sparkle') }}What are you looking for?</h3>
+    <div class="grid">
+      <div style="grid-column:1 / -1">
+        <label for="m-text">In your own words {{ help('A whole sentence works better than keywords: say the thing, the brand if you care, the size, and what you are willing to pay.') }}</label>
+        <input type="text" id="m-text" maxlength="500"
+               placeholder="men’s Patagonia rain jacket size M under 60 eur">
+        <span class="hint">Five hundred characters at most. Every sentence is one AI call, so it is worth writing one good one.</span>
+      </div>
+      <div>
+        <label for="m-tld">Site</label>
+        <select id="m-tld">
+          {% for t in known_tlds %}
+          <option value="{{ t }}" {% if t == default_tld %}selected{% endif %}>vinted.{{ t }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top:.75rem">
+      <button type="button" id="m-map">Work out the search</button>
+      <span class="muted">Free — nothing is bought until you confirm the next screen.</span>
+    </div>
+    <p class="error error-line" id="m-type-msg" role="alert" hidden style="margin:.6rem 0 0"></p>
+  </div>
+
+  <!-- (2) Confirm ---------------------------------------------------------------- -->
+  <div class="card" id="m-step-confirm" hidden>
+    <h3>{{ icon('ruler') }}Is this what you meant?</h3>
+    <p class="muted">This is the search it will run. Category, brand and size are shown by name — if one
+      of them is wrong, the sweep will be looking in the wrong place, so change your wording and try again.</p>
+    <div class="row" id="m-labels" style="margin:.6rem 0"></div>
+    <p class="muted" id="m-signature"></p>
+    <p class="muted" id="m-hints"></p>
+    <div class="row" style="margin-top:.75rem">
+      <button type="button" id="m-run">Look through what is for sale</button>
+      <button type="button" class="quiet" id="m-back">Start over</button>
+    </div>
+    {# The ceiling, in words, before the button that spends it. #}
+    <span class="hint">Up to {{ max_items }} listings checked, up to {{ max_verdicts }} full opinions.
+      That is what this dashboard is set to spend on one sweep; it will stop there whatever it has found.</span>
+    <p class="error error-line" id="m-confirm-msg" role="alert" hidden style="margin:.6rem 0 0"></p>
+  </div>
+
+  <!-- (3) Running ---------------------------------------------------------------- -->
+  <div class="card" id="m-step-progress" hidden>
+    <h3>{{ icon('search') }}Looking…</h3>
+    <div class="row" style="gap:.6rem;align-items:baseline">
+      <span class="pill pending" data-field="status">running</span>
+      <span class="muted">A sweep takes a minute or so. It waits its turn behind the searches already
+        being checked, so a quiet screen is normal — these numbers move as it goes.</span>
+    </div>
+    <div class="muted counts" style="margin-top:.5rem">Read <span data-field="pages_fetched">0</span> page(s),
+      saw <span data-field="items_seen">0</span> listing(s), kept <span data-field="kept">0</span>.</div>
+    <div class="muted counts"><span data-field="triaged">0</span> photo(s) checked,
+      <span data-field="verdicts">0</span> full opinion(s) so far.</div>
+    <p class="error error-line" id="m-progress-msg" role="alert" hidden style="margin:.6rem 0 0"></p>
+  </div>
+</section>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  // How often the running sweep is asked where it got to. Slower than the dashboard's own
+  // refresh on purpose: this is a read of a run that takes minutes, not a live feed.
+  const POLL_MS = 3000;
+  // Losing the dashboard for a moment is normal (a restart, a dropped wifi); losing it five
+  // times running is worth saying out loud rather than spinning forever.
+  const POLL_GIVE_UP = 5;
+
+  const typeCard = $("m-step-type");
+  const confirmCard = $("m-step-confirm");
+  const progressCard = $("m-step-progress");
+  const results = $("m-results");
+
+  let mapped = null;   // what /api/magic-search/map last answered
+  let timer = null;
+  let misses = 0;
+
+  function say(el, text) {
+    el.textContent = text;
+    el.hidden = !text;
+  }
+
+  async function callJSON(url, options) {
+    const res = await fetch(url, {
+      headers: { Accept: "application/json", ...(options && options.headers) },
+      ...options,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // Both shapes are in use: handlers that answer with {"error": ...} and FastAPI's own
+      // {"detail": ...}. Either way the person reads a sentence, never a status code.
+      const err = new Error(body.error || body.detail || res.statusText);
+      err.status = res.status;
+      throw err;
+    }
+    return body;
+  }
+
+  const getJSON = (url) => callJSON(url, {});
+  const postJSON = (url, payload) =>
+    callJSON(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+  // --- (1) Type -------------------------------------------------------------------
+
+  function tag(text, strong) {
+    const span = document.createElement("span");
+    span.className = strong ? "tag brand" : "tag";
+    span.textContent = text;
+    return span;
+  }
+
+  // The ids the mapper returned are shown by name above; these are the rest of the search,
+  // in the words a person recognises rather than Vinted's parameter names.
+  const PARAM_WORDS = {
+    search_text: "words",
+    price_from: "price from",
+    price_to: "price to",
+    currency: "currency",
+    status_ids: "condition",
+    color_ids: "colour",
+    material_ids: "material",
+  };
+  const NAMED_BY_LABEL = ["catalog_ids", "brand_ids", "size_ids", "order", "page", "per_page"];
+
+  async function doMap() {
+    const text = $("m-text").value.trim();
+    if (!text) {
+      say($("m-type-msg"), "Type what you are looking for first.");
+      return;
+    }
+    const button = $("m-map");
+    button.disabled = true;
+    say($("m-type-msg"), "");
+    try {
+      mapped = await postJSON("/api/magic-search/map", { text, tld: $("m-tld").value });
+      renderConfirm();
+    } catch (err) {
+      mapped = null;
+      confirmCard.hidden = true;
+      // A deactivated n8n flow times out rather than refusing, and "the mapper did not
+      // answer in time" is the sentence that tells an operator where to look.
+      say($("m-type-msg"),
+        err.status === 503
+          ? "Magic Search is not set up on this install, so there is nothing to ask."
+          : `That could not be turned into a search: ${err.message}`);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  // --- (2) Confirm ----------------------------------------------------------------
+
+  function renderConfirm() {
+    const labels = $("m-labels");
+    labels.replaceChildren();
+    const named = [
+      ["Category", mapped.labels.catalog],
+      ["Brand", mapped.labels.brand],
+      ["Size", (mapped.labels.sizes || []).join(", ")],
+    ];
+    for (const [what, value] of named) labels.append(tag(`${what}: ${value || "any"}`, Boolean(value)));
+    for (const [key, value] of Object.entries(mapped.params || {})) {
+      if (NAMED_BY_LABEL.includes(key)) continue;
+      labels.append(tag(`${PARAM_WORDS[key] || key}: ${value}`, false));
+    }
+
+    const signature = $("m-signature");
+    signature.textContent = mapped.visual_signature
+      ? `The photo check will be told to look for: ${mapped.visual_signature}`
+      : "";
+
+    // Title rules are not search filters — they gate a standing watch later, which is why
+    // they are named separately here (R003).
+    const hints = mapped.watch_hints || {};
+    const words = (hints.required_keywords || []).join(", ");
+    const parts = [];
+    if (words) parts.push(`the title contains ${words}`);
+    if (hints.title_pattern) parts.push(`the title matches ${hints.title_pattern}`);
+    $("m-hints").textContent = parts.length
+      ? `If you later watch this, alerts are held back unless ${parts.join(" and ")}. Those rules are not part of the search itself.`
+      : "";
+
+    say($("m-confirm-msg"), "");
+    confirmCard.hidden = false;
+    confirmCard.scrollIntoView({ block: "nearest" });
+  }
+
+  // --- (3) Sweep and poll ---------------------------------------------------------
+
+  function labelsForSweep() {
+    // SweepLaunchIn.labels is one string per name: it is the wording the photo check is
+    // told to look for, not a structure.
+    const out = {};
+    if (mapped.labels.catalog) out.catalog = mapped.labels.catalog;
+    if (mapped.labels.brand) out.brand = mapped.labels.brand;
+    const sizes = (mapped.labels.sizes || []).join(", ");
+    if (sizes) out.sizes = sizes;
+    return out;
+  }
+
+  async function doSweep() {
+    if (!mapped) return;
+    const button = $("m-run");
+    button.disabled = true;
+    say($("m-confirm-msg"), "");
+    try {
+      const started = await postJSON("/api/magic-search/sweep", {
+        params: mapped.params,
+        tld: mapped.tld,
+        keywords: mapped.keywords || [],
+        visual_signature: mapped.visual_signature,
+        labels: labelsForSweep(),
+      });
+      // The results screen is a page load away (a sweep is worth a link you can keep), and
+      // the title rules only exist in this tab — so park them where the reload finds them.
+      try {
+        sessionStorage.setItem(
+          `magic-hints-${started.sweep_id}`,
+          JSON.stringify(mapped.watch_hints || {}),
+        );
+      } catch { /* private mode, or a full quota: the watch just loses its title rules */ }
+      typeCard.hidden = true;
+      confirmCard.hidden = true;
+      progressCard.hidden = false;
+      progressCard.scrollIntoView({ block: "nearest" });
+      poll(started.sweep_id);
+      timer = setInterval(() => poll(started.sweep_id), POLL_MS);
+    } catch (err) {
+      if (err.status === 409) {
+        say($("m-confirm-msg"),
+          "A sweep is already running. Only one runs at a time, so nothing is billed twice — wait for that one to finish.");
+      } else if (err.status === 503) {
+        say($("m-confirm-msg"),
+          "Magic Search is not set up on this install: the photo check has no address configured, so there is nothing to sweep with.");
+      } else {
+        say($("m-confirm-msg"), `The sweep could not be started: ${err.message}`);
+      }
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function paint(run) {
+    const pill = progressCard.querySelector('[data-field="status"]');
+    if (pill && pill.textContent !== run.status) {
+      pill.textContent = run.status;
+      pill.className = `pill ${run.status === "ok" ? "sent" : (run.status === "blocked" ? "failed" : "pending")}`;
+    }
+    for (const field of ["pages_fetched", "items_seen", "kept", "triaged", "verdicts"]) {
+      const cell = progressCard.querySelector(`[data-field="${field}"]`);
+      if (cell) cell.textContent = run[field];
+    }
+    // An error while it is still going is a real thing that happened, not an empty screen.
+    say($("m-progress-msg"), run.error || "");
+  }
+
+  async function poll(id) {
+    let run;
+    try {
+      run = await getJSON(`/api/sweeps/${id}`);
+    } catch (err) {
+      misses += 1;
+      if (misses >= POLL_GIVE_UP) {
+        clearInterval(timer);
+        say($("m-progress-msg"),
+          `Lost contact with the dashboard while sweep #${id} was running (${err.message}). The sweep itself may still be going — reload this page to see where it got to.`);
+      }
+      return;
+    }
+    misses = 0;
+    paint(run);
+    if (run.status !== "running") {
+      clearInterval(timer);
+      // Everything below is rendered by the server, in the order the sweep ranked it.
+      window.location.replace(`/magic?sweep=${id}`);
+    }
+  }
+
+  // --- (4) Watch this -------------------------------------------------------------
+
+  function storedHints(id) {
+    try {
+      return JSON.parse(sessionStorage.getItem(`magic-hints-${id}`) || "null");
+    } catch {
+      return null;
+    }
+  }
+
+  function wireWatch() {
+    const button = $("m-watch");
+    if (!button) return;  // already watched, or nothing to watch
+    const id = Number(results.dataset.sweepId);
+    const hints = storedHints(id);
+    const words = hints && (hints.required_keywords || []).join(", ");
+    $("m-watch-hints").textContent = hints
+      ? (words || hints.title_pattern
+          ? "Title rules from your description will be kept as a filter on the alerts."
+          : "")
+      : "The title rules from your original description are not in this tab, so the watch is created without them.";
+
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const msg = $("m-watch-msg");
+      msg.textContent = "Saving…";
+      try {
+        const created = await postJSON("/api/magic-search/watch", {
+          params: JSON.parse(results.dataset.params),
+          tld: results.dataset.tld,
+          name: $("m-watch-name").value.trim(),
+          sweep_id: id,
+          ...(hints ? { watch_hints: hints } : {}),
+        });
+        msg.replaceChildren(document.createTextNode("Saved. "));
+        const link = document.createElement("a");
+        link.href = "/searches";
+        link.textContent = `It is now search #${created.query_id} — open Searches`;
+        msg.append(link);
+      } catch (err) {
+        button.disabled = false;
+        msg.textContent =
+          err.status === 409
+            ? "That search is already being watched — open Searches to find it."
+            : `It could not be saved: ${err.message}`;
+      }
+    });
+  }
+
+  $("m-map").addEventListener("click", doMap);
+  $("m-text").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); doMap(); }
+  });
+  $("m-run").addEventListener("click", doSweep);
+  $("m-back").addEventListener("click", () => {
+    mapped = null;
+    confirmCard.hidden = true;
+    $("m-text").focus();
+  });
+
+  if (results) {
+    wireWatch();
+    // A reload while the sweep is still going picks the poll back up rather than freezing
+    // on whatever the page happened to be rendered with.
+    if (results.dataset.status === "running") {
+      const id = Number(results.dataset.sweepId);
+      typeCard.hidden = true;
+      progressCard.hidden = false;
+      poll(id);
+      timer = setInterval(() => poll(id), POLL_MS);
+    }
+  }
+})();
+</script>
+{% endblock %}

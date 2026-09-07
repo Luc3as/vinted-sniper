@@ -1,3 +1,4 @@
+{%- from "_macros.html" import icon -%}
 <!doctype html>
 <html lang="en">
 <head>
@@ -252,6 +253,19 @@
                                   white-space: nowrap; }
     .listing .foot .age { flex-shrink: 0; }
 
+    /* --- Magic Search ------------------------------------------------------------- */
+    /* On a page of look-alikes, what the photo check concluded is the line that decides
+       whether a card is worth opening, so it gets the colour and the weight. */
+    .listing .says { font-size: .78rem; font-weight: 600; }
+    .listing .says.yes { color: var(--ok); }
+    .listing .says.no { color: var(--bad); }
+    .listing .says.unchecked { color: var(--muted); font-weight: 500; }
+    .listing .why { font-size: .76rem; color: var(--muted); }
+    .listing .opinion { font-size: .76rem; color: var(--muted);
+                        border-top: 1px dashed var(--line); padding-top: .35rem; }
+    /* Counts that change under a poll: tabular figures so the line does not twitch. */
+    .counts { font-variant-numeric: tabular-nums; }
+
     /* --- The photo lightbox ------------------------------------------------------ */
     .lightbox { position: fixed; inset: 0; z-index: 50; background: rgb(0 0 0 / .8);
                 display: flex; align-items: center; justify-content: center; }
@@ -312,6 +326,7 @@
     <nav aria-label="Sections">
       <a href="/" {% if nav == 'found' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4Z"/><path d="M19 16.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8Z"/></svg>Found</a>
       <a href="/searches" {% if nav == 'searches' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>Searches</a>
+      <a href="/magic" {% if nav == 'magic' %}aria-current="page"{% endif %}>{{ icon('sparkle') }}Magic</a>
       <a href="/history" {% if nav == 'history' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>History</a>
       <a href="/help" {% if nav == 'help' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .3c0 1.7-2.5 2.2-2.5 3.7"/><path d="M12 17h.01"/></svg>Help</a>
     </nav>

@@ -30,7 +30,17 @@ from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 
 import uvicorn
-from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Request, Response
+from fastapi import (
+    Cookie,
+    Depends,
+    FastAPI,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, SecretStr
@@ -389,6 +399,56 @@ def create_app(
                 "default_tld": (
                     Counter(watched_tlds).most_common(1)[0][0] if watched_tlds else "fr"
                 ),
+            },
+        )
+
+    @app.get("/magic", response_class=HTMLResponse)
+    async def magic_page(
+        request: Request,
+        session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+        sweep_id: Annotated[int | None, Query(alias="sweep")] = None,
+    ) -> Response:
+        """Magic Search: a sentence in, a ranked look at what is already for sale out.
+
+        A sweep's results are rendered here rather than assembled in the browser, so this
+        screen and /history say the same thing about the same run — `_sweep_match_view()`
+        owns that wording — and so something you paid for survives a reload, as a link you
+        can keep. The page's script only polls while a run is still going.
+        """
+        if not _authorised(session, token):
+            return RedirectResponse("/login", status_code=303)
+
+        run = None if sweep_id is None else await repo.get_sweep_run(sweep_id)
+        watched_tlds = [query.tld for query in await repo.list_queries()]
+        return TEMPLATES.TemplateResponse(
+            request,
+            "magic.html",
+            {
+                "nav": "magic",
+                "auth_enabled": token is not None,
+                "known_tlds": sorted(urls.KNOWN_TLDS),
+                "default_tld": (
+                    Counter(watched_tlds).most_common(1)[0][0] if watched_tlds else "fr"
+                ),
+                # What this deployment is willing to spend, said before the button that
+                # spends it — the confirmation step exists for exactly this sentence.
+                "max_items": settings.sweep_max_items,
+                "max_verdicts": settings.sweep_max_verdicts,
+                # Neither half of Magic Search is a server fault when it is missing, but
+                # they fail differently: mapping needs the n8n flow and a taxonomy to check
+                # its ids against, sweeping needs a live Vinted client and the photo check.
+                "mapping_enabled": mapper is not None and taxonomy is not None,
+                "sweeping_enabled": client is not None and triage is not None,
+                "sweep": (
+                    None
+                    if run is None
+                    else _sweep_run_view(
+                        run, await repo.sweep_candidates(run.id), int(time.time()), limit=None
+                    )
+                ),
+                # A link to a sweep this database never had, or one a prune removed: said
+                # plainly rather than dropped into an empty page.
+                "missing_sweep": sweep_id if sweep_id is not None and run is None else None,
             },
         )
 
@@ -1146,6 +1206,37 @@ def _sweep_candidate_view(row: SweepCandidate) -> dict[str, Any]:
     }
 
 
+def _sweep_run_view(
+    run: SweepRun, candidates: list[SweepCandidate], now: int, *, limit: int | None
+) -> dict[str, Any]:
+    """One sweep as a page prints it: counts, the bill, and its matches in triage order.
+
+    Both readers come through here — /history's summary of the last few runs and /magic's
+    screen for the run you just started — so the two pages cannot end up wording the same
+    sweep differently. `limit` is the only thing that separates them: history shows the top
+    few, the page you paid on shows everything.
+    """
+    rows = sweep.triage_order(candidates)
+    return {
+        "id": run.id,
+        "status": run.status,
+        "tld": run.tld,
+        "keywords": ", ".join(run.keywords),
+        "params": run.params,
+        "query_id": run.query_id,
+        "age": _age(max(0, now - run.started_at)),
+        "pages_fetched": run.pages_fetched,
+        "items_seen": run.items_seen,
+        "kept": run.candidates,
+        "triaged": sum(1 for row in rows if row.matches_target is not None),
+        "verdicts": sum(1 for row in rows if row.judged_at is not None),
+        "tokens": run.tokens,
+        "cost_eur": f"{run.cost_eur:.4f}",
+        "error": run.error,
+        "matches": [_sweep_match_view(row) for row in (rows if limit is None else rows[:limit])],
+    }
+
+
 def _sweep_views(
     runs: list[SweepRun], candidates: dict[int, list[SweepCandidate]], now: int
 ) -> list[dict[str, Any]]:
@@ -1157,29 +1248,10 @@ def _sweep_views(
     """
     views: list[dict[str, Any]] = []
     for run in runs:
-        rows = sweep.triage_order(candidates.get(run.id, []))
-        triaged = sum(1 for row in rows if row.matches_target is not None)
-        verdicts = sum(1 for row in rows if row.judged_at is not None)
-        if not triaged and not verdicts:
+        view = _sweep_run_view(run, candidates.get(run.id, []), now, limit=SWEEP_HISTORY_MATCHES)
+        if not view["triaged"] and not view["verdicts"]:
             continue
-        views.append(
-            {
-                "id": run.id,
-                "status": run.status,
-                "tld": run.tld,
-                "keywords": ", ".join(run.keywords),
-                "age": _age(max(0, now - run.started_at)),
-                "pages_fetched": run.pages_fetched,
-                "items_seen": run.items_seen,
-                "kept": run.candidates,
-                "triaged": triaged,
-                "verdicts": verdicts,
-                "tokens": run.tokens,
-                "cost_eur": f"{run.cost_eur:.4f}",
-                "error": run.error,
-                "matches": [_sweep_match_view(row) for row in rows[:SWEEP_HISTORY_MATCHES]],
-            }
-        )
+        views.append(view)
     return views
 
 

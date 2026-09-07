@@ -163,6 +163,32 @@ def funnel(
     )
 
 
+async def _store_run(
+    repo: Repo,
+    sweep_id: int,
+    candidates: list[SweepCandidate],
+    result: SweepResult,
+    *,
+    pages_fetched: int,
+    status: str,
+    error: str | None,
+    close: bool,
+) -> None:
+    """Write what the paging found, and close the row unless the caller owns more of the run."""
+    await repo.record_sweep_candidates(sweep_id, candidates)
+    if not close:
+        return
+    await repo.finish_sweep_run(
+        sweep_id,
+        status=status,
+        pages_fetched=pages_fetched,
+        items_seen=result.items_seen,
+        candidates=len(candidates),
+        funnel=result.funnel,
+        error=error,
+    )
+
+
 async def run_sweep(
     *,
     tld: str,
@@ -176,6 +202,7 @@ async def run_sweep(
     gates_query: Query | None = None,
     sessions: SessionManager | None = None,
     sweep_id: int | None = None,
+    close: bool = True,
 ) -> SweepResult:
     """Read up to `max_pages` of existing stock in relevance order and store the best of it.
 
@@ -194,6 +221,13 @@ async def run_sweep(
     succeeded are funnelled and stored, the run is closed with `status='partial'` (or
     `'blocked'`), and no Vinted error escapes to the caller — a one-shot read failing is not
     a reason to take down whoever asked for it.
+
+    `close=False` is for a caller that owns more of the run than this function does — the
+    photo check and the verdicts in `judge_sweep()` run for minutes after the last page is
+    read. Closing the row here would set `status='ok'` and `finished_at` while those stages
+    are still spending money, and anything reading the row (the browser polling
+    `GET /api/sweeps/{id}` above all) would call the sweep finished before it was. The
+    candidates are still written either way; only the row's closing is deferred.
 
     `sweep_id` is for callers that need the id *before* the sweep starts — an HTTP handler
     that has to answer 202 with something the browser can poll, when the run itself will
@@ -254,15 +288,15 @@ async def run_sweep(
 
     result = funnel(collected, gates, keywords, max_items=max_items)
     stored = [_to_candidate(ranked, pos) for pos, ranked in enumerate(result.candidates)]
-    await repo.record_sweep_candidates(sweep_id, stored)
-    await repo.finish_sweep_run(
+    await _store_run(
+        repo,
         sweep_id,
-        status=status,
+        stored,
+        result,
         pages_fetched=pages_fetched,
-        items_seen=result.items_seen,
-        candidates=len(stored),
-        funnel=result.funnel,
+        status=status,
         error=error,
+        close=close,
     )
     # One line per run, carrying the whole funnel. A sweep that returned little is
     # explained by grepping this event rather than by re-running it: the per-reason drop
@@ -282,6 +316,25 @@ async def run_sweep(
         pages_fetched=pages_fetched,
         sweep_id=sweep_id,
         status=status,
+        error=error,
+    )
+
+
+async def _close_run(repo: Repo, result: SweepResult, status: str, error: str | None) -> None:
+    """Close a judged run's row with the counts `run_sweep()` established.
+
+    Only `judge_sweep()` calls this, and it calls it exactly once, on every path out. The
+    row therefore reads `running` for as long as the run is running — including the minutes
+    the photo check and the verdicts take, which is the whole reason `run_sweep(close=False)`
+    exists. A poller that stops at "no longer running" can be believed.
+    """
+    await repo.finish_sweep_run(
+        result.sweep_id,
+        status=status,
+        pages_fetched=result.pages_fetched,
+        items_seen=result.items_seen,
+        candidates=len(result.candidates),
+        funnel=result.funnel,
         error=error,
     )
 
@@ -363,8 +416,12 @@ async def judge_sweep(
         gates_query=gates_query,
         sessions=sessions,
         sweep_id=sweep_id,
+        # This function closes the row, once, at whichever point the run actually ends.
+        close=False,
     )
     if result.status != "ok" or not result.candidates:
+        # Nothing to judge: this is that point.
+        await _close_run(repo, result, result.status, result.error)
         return result
 
     run_log = log.bind(sweep_id=result.sweep_id, tld=tld)
@@ -454,16 +511,7 @@ async def judge_sweep(
         if failure is not None:
             status, error = "partial", failure
 
-    if status != result.status:
-        await repo.finish_sweep_run(
-            result.sweep_id,
-            status=status,
-            pages_fetched=result.pages_fetched,
-            items_seen=result.items_seen,
-            candidates=len(result.candidates),
-            funnel=result.funnel,
-            error=error,
-        )
+    await _close_run(repo, result, status, error)
 
     matched = sum(1 for ranked in judged if ranked.matches_target)
     run_log.info(

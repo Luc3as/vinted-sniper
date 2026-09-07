@@ -1320,6 +1320,113 @@ async def test_an_unjudged_sweep_stays_off_the_history_page(
     assert "Judged sweeps" not in page.text
 
 
+# --- The Magic Search page ------------------------------------------------------------
+#
+# Four states on one page: type a sentence, confirm what it mapped to, watch the sweep run,
+# read the results and turn them into a watch. Only the last is rendered by the server —
+# deliberately, so a run somebody paid for survives a reload as a link, and so this screen
+# and /history cannot word the same sweep differently.
+
+
+def test_the_magic_page_sends_you_to_the_login_page(client: TestClient) -> None:
+    response = client.get("/magic", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_the_magic_page_is_in_the_nav_and_says_what_a_sweep_will_cost(
+    signed_in: TestClient, web_settings: Settings
+) -> None:
+    """The ceiling is on the page in words, before the button that spends it is pressed."""
+    page = signed_in.get("/magic")
+
+    assert page.status_code == 200
+    assert '<a href="/magic" aria-current="page"' in page.text
+    assert (
+        f"Up to {web_settings.sweep_max_items} listings checked, "
+        f"up to {web_settings.sweep_max_verdicts} full opinions."
+    ) in page.text
+
+
+async def test_a_judged_sweep_is_rendered_on_the_magic_page(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """The whole point of the photo check, on screen: the title alone never says what it is.
+
+    "Panska bunda M" is a men's jacket, size M, and nothing else — the listing that leads
+    this page does so because the photos were looked at, not because its words scored well.
+    """
+    sweep_id = await _seed_judged_sweep(repo)
+
+    page = signed_in.get(f"/magic?sweep={sweep_id}")
+
+    assert page.status_code == 200
+    # The card leads with a title that names no model at all; what puts it first is the
+    # photo check's answer, printed right under it.
+    assert "Panska bunda M" in page.text
+    assert "looks like it, 86% sure" in page.text
+    assert "Grey three-layer shell with the hood described." in page.text
+    # The opinion that was bought for it, in the same words every alert uses.
+    assert "deal 82/100" in page.text
+    assert "Genuine, and well under what it usually goes for." in page.text
+    # The rejection is shown as a rejection rather than quietly dropped.
+    assert "not this, 71% sure" in page.text
+    # Ranked as the API ranked it: the photo check's match first, despite the worse title.
+    assert page.text.index("Panska bunda M") < page.text.index("Torrentshell fleece")
+    assert "41840 tokens billed — €0.0421" in page.text
+
+
+async def test_a_sweep_that_stopped_early_shows_why_instead_of_an_empty_page(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """`partial` is not "no results": nothing was ruled out, it was never looked at."""
+    sweep_id = await repo.create_sweep_run(tld="sk", params={"search_text": "bunda"}, keywords=[])
+    await repo.finish_sweep_run(
+        sweep_id,
+        status="partial",
+        pages_fetched=1,
+        items_seen=12,
+        candidates=0,
+        funnel={},
+        error="Vinted stopped answering after the first page",
+    )
+
+    page = signed_in.get(f"/magic?sweep={sweep_id}")
+
+    assert page.status_code == 200
+    assert "Vinted stopped answering after the first page" in page.text
+    assert "This sweep stopped before it had finished" in page.text
+    assert "Nothing survived the filters" not in page.text
+
+
+def test_a_link_to_a_sweep_that_is_gone_says_so(signed_in: TestClient) -> None:
+    page = signed_in.get("/magic?sweep=4242")
+
+    assert page.status_code == 200
+    assert "There is no sweep numbered 4242" in page.text
+
+
+async def test_a_sweep_already_promoted_offers_its_search_rather_than_the_button(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """Watching the same sweep twice is not a thing the page should let you try."""
+    sweep_id = await _seed_judged_sweep(repo)
+    query_id = await repo.add_query(
+        name="torrentshell",
+        url="https://www.vinted.sk/catalog?search_text=torrentshell",
+        tld="sk",
+        params={"search_text": "torrentshell"},
+        poll_interval_s=300,
+    )
+    await repo.attach_sweep_to_query(sweep_id, query_id)
+
+    page = signed_in.get(f"/magic?sweep={sweep_id}")
+
+    assert f"search #{query_id}" in page.text
+    assert 'id="m-watch"' not in page.text
+
+
 # --- The sweep's dependencies ---------------------------------------------------------
 
 
