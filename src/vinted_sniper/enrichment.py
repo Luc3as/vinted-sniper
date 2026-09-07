@@ -68,6 +68,34 @@ class Enrichment:
             enriched_at=int(row["enriched_at"]),
         )
 
+    @classmethod
+    def from_candidate(cls, candidate: Any) -> Enrichment | None:
+        """The same answer, read off a sweep candidate instead of an `items` row.
+
+        A sweep's verdict is the same shape as a standing watch's — that is the point of
+        reusing the enrichment flow (D009) — but it lives in `sweep_candidates`, because a
+        sweep candidate has no `items` row and must never gain one (D005/MEM007). So the
+        two stores need two readers and share one renderer: whatever calls this gets the
+        same `summary()` and `lines()` every sender already uses, in every language.
+
+        Typed `Any` rather than `db.repo.SweepCandidate` on purpose: `repo.py` imports
+        `EnrichmentIn` from this module, so naming its types here would close a cycle.
+        `from_row` is loose for the same reason, one level down.
+        """
+        if candidate.judged_at is None:
+            return None
+        retail = candidate.verdict_retail_price
+        return cls(
+            score=candidate.verdict_score,
+            model=candidate.verdict_model,
+            retail_price=Decimal(str(retail)) if retail is not None else None,
+            retail_source=candidate.verdict_retail_source,
+            matches_query=candidate.verdict_matches_query,
+            risk=candidate.verdict_risk,
+            verdict=candidate.verdict_text,
+            enriched_at=int(candidate.judged_at),
+        )
+
     def discount_percent(self, payable: Decimal | None) -> int | None:
         if self.retail_price is None or payable is None or self.retail_price <= 0:
             return None

@@ -13,11 +13,15 @@ from decimal import Decimal, InvalidOperation
 from vinted_sniper import __version__, app, backup, log
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
 from vinted_sniper.db import Database, apply_pending
-from vinted_sniper.db.repo import Repo
+from vinted_sniper.db.repo import Repo, SweepCandidate
 from vinted_sniper.engine import filters, health, quiet, sweep
+from vinted_sniper.enrichment import Enrichment
+from vinted_sniper.magic.triage import TriageClient
+from vinted_sniper.magic.verdict import VerdictClient
 from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.errors import BlockedError, VintedError
+from vinted_sniper.vinted.models import Item
 from vinted_sniper.vinted.session import SessionManager
 from vinted_sniper.vinted.transport import TransportSession
 
@@ -75,6 +79,14 @@ def build_parser() -> argparse.ArgumentParser:
         dest="keywords",
         help="A word that makes a listing a better match. Repeat it for more words. "
         "Missing words never remove a listing, they only push it down the list.",
+    )
+    sweep_cmd.add_argument(
+        "--judge",
+        action="store_true",
+        help="Also look at the photos: every listing that survives the filters goes to the "
+        "photo check, the best matches are ranked by what they look like rather than by "
+        "what the seller called them, and the top few get a full opinion. Costs money and "
+        "needs the photo check set up.",
     )
 
     watch = sub.add_parser("watch", help="Add a search.")
@@ -238,6 +250,7 @@ async def _cmd_sweep(
     pages: int,
     max_items: int,
     keywords: list[str],
+    judge: bool = False,
 ) -> int:
     """One read of stock already on sale, ranked. Nothing is watched and nobody is told.
 
@@ -248,7 +261,22 @@ async def _cmd_sweep(
     (`db/repo.py`, woken from `engine/poller.py`), and a sweep touching any of it would
     turn a read-only look around into notifications nobody asked for. A sweep writes only
     to the `sweep_runs` / `sweep_candidates` tables, which the poller never reads.
+
+    `--judge` adds the two paid stages on top of exactly that: the same pieces, plus a
+    photo check and a few full opinions, still written only to the sweep tables. Without
+    the flag not one byte of this changes — no client is built, no request is made.
     """
+    if judge and not settings.magic_triage_webhook_url:
+        # Refused rather than quietly downgraded to a free sweep. Somebody who typed
+        # --judge asked for the photo check; running without it would look like it worked.
+        print(
+            "The photo check is not set up, so --judge has nothing to ask. Set "
+            "VINTED_SNIPER_MAGIC_TRIAGE_WEBHOOK_URL to the n8n flow that looks at listing "
+            "photos, or run the same command without --judge for a free sweep.",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         normalised = urls.normalise_search_url(url)
         tld = urls.extract_tld(normalised)
@@ -262,6 +290,7 @@ async def _cmd_sweep(
     # With no --keyword the words you typed into Vinted are the ones that rank. They are a
     # hint either way: a listing missing all of them still gets stored, just last.
     ranking = keywords or params.get("search_text", "").split()
+    triage_url = settings.magic_triage_webhook_url
 
     print(f"Site:   vinted.{tld}")
     print(f"Search: {normalised}")
@@ -282,18 +311,104 @@ async def _cmd_sweep(
                 impersonate=settings.http_impersonate,
             )
             client = VintedClient(transport, sessions)
+            repo = Repo(db)
 
-            result = await sweep.run_sweep(
-                tld=tld,
-                params=params,
-                keywords=ranking,
-                client=client,
-                repo=Repo(db),
-                max_pages=max_pages,
-                max_items=ceiling,
-                sessions=sessions,
+            # Built here rather than in a helper so the source-level guard in
+            # tests/unit/test_cli_sweep.py, which walks this function's own AST, keeps
+            # covering the judging path too.
+            triage_client = (
+                TriageClient(
+                    triage_url,
+                    token=settings.magic_webhook_token,
+                    timeout_s=settings.magic_timeout_s,
+                )
+                if judge and triage_url
+                else None
+            )
+            verdict_client = (
+                VerdictClient(
+                    settings.magic_verdict_webhook_url,
+                    token=settings.magic_webhook_token,
+                    timeout_s=settings.magic_timeout_s,
+                )
+                if triage_client is not None and settings.magic_verdict_webhook_url
+                else None
             )
 
+            try:
+                if triage_client is not None:
+                    result = await sweep.judge_sweep(
+                        tld=tld,
+                        params=params,
+                        keywords=ranking,
+                        # A sweep from a URL has no mapped query behind it, so there is no
+                        # description of what the thing looks like and no id names to hand
+                        # over. The photo check gets the words and nothing invented.
+                        visual_signature=None,
+                        labels={},
+                        client=client,
+                        repo=repo,
+                        triage=triage_client,
+                        verdict=verdict_client,
+                        max_pages=max_pages,
+                        max_items=ceiling,
+                        batch_size=settings.sweep_triage_batch,
+                        max_verdicts=settings.sweep_max_verdicts,
+                        sessions=sessions,
+                        cost_per_mtok_in=settings.magic_cost_per_mtok_in,
+                        cost_per_mtok_out=settings.magic_cost_per_mtok_out,
+                    )
+                else:
+                    result = await sweep.run_sweep(
+                        tld=tld,
+                        params=params,
+                        keywords=ranking,
+                        client=client,
+                        repo=repo,
+                        max_pages=max_pages,
+                        max_items=ceiling,
+                        sessions=sessions,
+                    )
+            finally:
+                if triage_client is not None:
+                    await triage_client.aclose()
+                if verdict_client is not None:
+                    await verdict_client.aclose()
+
+            # The full opinions were written to the candidate rows, not onto the ranking,
+            # so they are read back before the database closes.
+            stored = (
+                {row.item_id: row for row in await repo.sweep_candidates(result.sweep_id)}
+                if judge and result.sweep_id
+                else {}
+            )
+
+    _print_sweep(result, stored, judge=judge)
+
+    if result.status == "blocked":
+        print(f"Stopped early: the site refused the request ({result.error}).", file=sys.stderr)
+        print(f"See {TROUBLESHOOTING}", file=sys.stderr)
+        return 1
+    if result.status != "ok":
+        print(f"Stopped early: {result.error}", file=sys.stderr)
+        print("What you see above is only what it managed to read.", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _print_sweep(
+    result: sweep.SweepResult,
+    stored: dict[int, SweepCandidate],
+    *,
+    judge: bool,
+) -> None:
+    """Everything one sweep has to say, in the order somebody reads it.
+
+    Split out of `_cmd_sweep` for length, and only the printing was split: every call that
+    touches the database or the site stays inside the function the source-level guard in
+    `tests/unit/test_cli_sweep.py` walks. The judged lines are additive — with `judge`
+    false this prints exactly what it always printed, byte for byte.
+    """
     print(
         f"Sweep #{result.sweep_id}: read {result.pages_fetched} page(s), "
         f"saw {result.items_seen} listing(s), kept {len(result.candidates)}."
@@ -309,19 +424,55 @@ async def _cmd_sweep(
             item = ranked.item
             print(f"  {item.title}")
             print(f"    match {round(ranked.rank_score * 100)}% · {item.price_line()}")
+            if judge:
+                print(f"    {_triage_line(ranked)}")
+                if ranked.triage_reason:
+                    print(f"    {ranked.triage_reason}")
+                for line in _verdict_lines(stored.get(item.item_id), item):
+                    print(f"    {line}")
             print(f"    {item.url}\n")
     else:
         print("\nNothing survived the filters. Try a broader search or a higher budget.")
 
-    if result.status == "blocked":
-        print(f"Stopped early: the site refused the request ({result.error}).", file=sys.stderr)
-        print(f"See {TROUBLESHOOTING}", file=sys.stderr)
-        return 1
-    if result.status != "ok":
-        print(f"Stopped early: {result.error}", file=sys.stderr)
-        print("What you see above is only what it managed to read.", file=sys.stderr)
-        return 1
-    return 0
+    if judge:
+        # One line saying what the whole run spent, matching the `sweep.cost` log line the
+        # engine emits. Four counts and a price, because that is what deciding whether to
+        # run it again actually needs.
+        print(
+            f"Cost: {len(result.candidates)} listing(s) through the filters, "
+            f"{result.triaged} photo(s) checked, {result.verdicts} full opinion(s), "
+            f"{result.tokens} tokens billed — €{result.cost_eur:.4f}"
+        )
+
+
+def _triage_line(ranked: sweep.RankedItem) -> str:
+    """What the photo check made of one listing, in words rather than a boolean.
+
+    Three-valued, like the column behind it: "not checked" is not "not this". A batch that
+    never came back must not read as a rejection (T02/T05).
+    """
+    if ranked.matches_target is None:
+        return "photos: not checked"
+    verdict = "looks like it" if ranked.matches_target else "not this"
+    return f"photos: {verdict}, {round((ranked.confidence or 0.0) * 100)}% sure"
+
+
+def _verdict_lines(candidate: SweepCandidate | None, item: Item) -> list[str]:
+    """The full opinion, rendered by the same code every notification uses.
+
+    `Enrichment.summary()` / `.lines()` are what Telegram, Discord and the webhooks already
+    print, and they take a `Translator`, so a second renderer here would be a second thing
+    to translate and a second thing to keep in step. A sweep candidate is not an `items`
+    row, which is the only reason `from_candidate` exists beside `from_row`.
+    """
+    enrichment = Enrichment.from_candidate(candidate) if candidate is not None else None
+    if enrichment is None:
+        return []
+    payable = item.total_price if item.total_price is not None else item.price
+    summary, details = enrichment.lines(payable, item.currency)
+    if not summary and not details:
+        return []
+    return [f"verdict: {summary}" if summary else "verdict:", *(f"  {line}" for line in details)]
 
 
 async def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
@@ -585,6 +736,7 @@ async def _run(args: argparse.Namespace) -> int:
                 pages=args.pages,
                 max_items=args.max_items,
                 keywords=list(args.keywords),
+                judge=args.judge,
             )
         case "watch":
             return await _cmd_watch(settings, args)

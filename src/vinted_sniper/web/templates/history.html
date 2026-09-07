@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import icon %}
 {% block title %}vinted-sniper · history{% endblock %}
 
 {% block header_extra %}
@@ -77,4 +78,56 @@
   </div>
   {% endif %}
 </section>
+
+{% if sweeps %}
+<section>
+  <div class="section-head">
+    <h2>{{ icon('sparkle') }}Judged sweeps</h2>
+    <span class="lede">Looks once through what is already for sale and has the AI check the photos. Nobody is notified and nothing is watched — these are one-off looks around.</span>
+  </div>
+  {% for sweep in sweeps %}
+  <div class="card">
+    <div class="row" style="gap:.6rem;align-items:baseline">
+      <strong>Sweep #{{ sweep.id }}</strong>
+      <span class="pill {{ 'sent' if sweep.status == 'ok' else ('failed' if sweep.status == 'blocked' else 'pending') }}">{{ sweep.status }}</span>
+      <span class="muted">vinted.{{ sweep.tld }}{% if sweep.keywords %} · {{ sweep.keywords }}{% endif %}</span>
+      <span class="muted">{{ sweep.age }}</span>
+    </div>
+    <div class="muted">Read {{ sweep.pages_fetched }} page(s), saw {{ sweep.items_seen }} listing(s), kept {{ sweep.kept }}.</div>
+    <div class="muted">Cost: {{ sweep.kept }} listing(s) through the filters, {{ sweep.triaged }} photo(s) checked, {{ sweep.verdicts }} full opinion(s), {{ sweep.tokens }} tokens billed — €{{ sweep.cost_eur }}</div>
+    {% if sweep.error %}<div class="muted error-line">{{ sweep.error[:160] }}</div>{% endif %}
+    {% if sweep.matches %}
+    <div class="table-wrap">
+    <table>
+      <tr><th></th><th>Listing</th><th>Photos say</th><th>Full opinion</th></tr>
+      {% for match in sweep.matches %}
+      <tr>
+        <td>{% if match.photo %}<img src="{{ match.photo }}" alt="" loading="lazy">{% endif %}</td>
+        <td>
+          <a href="{{ match.url }}" target="_blank" rel="noreferrer">{{ match.title }}</a>
+          <div class="muted">
+            {% if match.price %}{{ match.price }} · {% endif %}title match {{ match.match }}%
+          </div>
+        </td>
+        <td class="muted">
+          {{ match.photos }}
+          {% if match.reason %}<div>{{ match.reason }}</div>{% endif %}
+        </td>
+        <td class="muted">
+          {% if match.score is not none %}<span class="tag score {{ 'hot' if match.score >= 75 else ('cold' if match.score < 40 else '') }}" data-tip="The agent’s deal score, 0–100 — higher is a better deal.">🤖 {{ match.score }}</span>{% endif %}
+          {% if match.verdict %}<div>{{ match.verdict }}</div>{% endif %}
+          {% if match.verdict_text %}<div>{{ match.verdict_text }}</div>{% endif %}
+          {% if not match.verdict and match.score is none %}not bought{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    </div>
+    {% else %}
+    <div class="muted">Nothing survived the filters.</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
 {% endblock %}

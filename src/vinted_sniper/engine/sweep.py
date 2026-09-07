@@ -618,6 +618,10 @@ def _to_candidate(ranked: RankedItem, position: int) -> SweepCandidate:
         condition=item.condition,
         photo_url=item.photo_url,
         photo_urls=list(item.photo_urls),
+        # The small variant T01 parsed. Without it the column 0015 added is NULL on every
+        # stored row, and every reader — the API, the history page — has to fall back to a
+        # full-size photo it did not need.
+        thumb_url=item.thumb_url,
         seller_login=item.seller_login,
         promoted=item.promoted,
     )
@@ -693,12 +697,50 @@ def _triage_rank_key(ranked: RankedItem) -> tuple[int, float, float, Decimal, in
     """
     item = ranked.item
     payable = item.total_price if item.total_price is not None else item.price
+    return _triage_key(
+        ranked.matches_target, ranked.confidence, ranked.rank_score, payable, item.item_id
+    )
+
+
+def triage_order(candidates: Sequence[SweepCandidate]) -> list[SweepCandidate]:
+    """Stored rows put back into the order `judge_sweep()` handed them over in.
+
+    T05 deliberately kept `sweep_candidates.position` as the funnel's order rather than
+    rewriting it to the triage order, so that the ranking has one source of truth. This is
+    the other half of that decision: the triage order is *derived* on read, from the
+    `matches_target`, `confidence` and `rank_score` that were persisted per candidate, by
+    the same rule `judge_sweep()` sorted with. A reader — the API, the history page —
+    therefore never has to reimplement the ordering, and cannot drift from it.
+    """
+    return sorted(candidates, key=_stored_triage_key)
+
+
+def _stored_triage_key(candidate: SweepCandidate) -> tuple[int, float, float, Decimal, int]:
+    """`_triage_rank_key` for a database row: same rule, different accessors."""
+    payable = candidate.total_price if candidate.total_price is not None else candidate.price
+    return _triage_key(
+        candidate.matches_target,
+        candidate.confidence,
+        candidate.rank_score,
+        Decimal(str(payable)) if payable is not None else None,
+        candidate.item_id,
+    )
+
+
+def _triage_key(
+    matches_target: bool | None,
+    confidence: float | None,
+    rank_score: float,
+    payable: Decimal | None,
+    item_id: int,
+) -> tuple[int, float, float, Decimal, int]:
+    """The one place the post-triage order is written down. Read it in `_triage_rank_key`."""
     return (
-        -_match_rank(ranked.matches_target),
-        -(ranked.confidence or 0.0),
-        -ranked.rank_score,
+        -_match_rank(matches_target),
+        -(confidence or 0.0),
+        -rank_score,
         payable if payable is not None else Decimal("Infinity"),
-        item.item_id,
+        item_id,
     )
 
 

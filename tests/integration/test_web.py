@@ -22,7 +22,10 @@ from tests.conftest import ScriptedTransport
 from vinted_sniper.config import Settings
 from vinted_sniper.db import Database
 from vinted_sniper.db.repo import Repo
+from vinted_sniper.engine import sweep
+from vinted_sniper.enrichment import EnrichmentIn
 from vinted_sniper.magic.client import MapperClient
+from vinted_sniper.magic.models import TriageItem
 from vinted_sniper.vinted.models import parse_item
 from vinted_sniper.vinted.session import SessionManager
 from vinted_sniper.vinted.taxonomy import Taxonomy
@@ -1111,3 +1114,203 @@ def test_an_unknown_site_is_refused_before_the_mapper_is_called(
 
     assert response.status_code == 404
     assert flow.calls == 0
+
+
+# --- Judged sweeps ------------------------------------------------------------------
+#
+# The read surface for the milestone: one endpoint S04 will poll while a sweep is still
+# running, and a plain section on /history so a judged sweep is visible without SQLite.
+
+
+async def _seed_judged_sweep(repo: Repo) -> int:
+    """One sweep, two candidates: a photo-check match with a full opinion, and a rejection.
+
+    Written through the repo writers the engine uses, not with raw SQL, so this seeds the
+    same rows a real judged run would leave behind.
+    """
+    sweep_id = await repo.create_sweep_run(
+        tld="sk", params={"search_text": "torrentshell"}, keywords=["torrentshell"]
+    )
+    match = parse_item(
+        {
+            "id": 5551234,
+            # The title never names the model — the whole reason the photo check exists.
+            "title": "Panska bunda M",
+            "url": "https://www.vinted.sk/items/5551234",
+            "price": {"amount": "48.0", "currency_code": "EUR"},
+            "photo": {
+                "full_size_url": "https://images.vinted.net/5551234.jpeg",
+                "high_resolution": {"timestamp": 1},
+                "thumbnails": [
+                    {
+                        "type": "thumb310x430",
+                        "width": 310,
+                        "height": 430,
+                        "url": "https://images.vinted.net/5551234-310.jpeg",
+                    }
+                ],
+            },
+        },
+        "sk",
+    )
+    reject = parse_item(
+        {
+            "id": 5559876,
+            "title": "Torrentshell fleece",
+            "url": "https://www.vinted.sk/items/5559876",
+            "price": {"amount": "20.0", "currency_code": "EUR"},
+            "photo": {
+                "full_size_url": "https://images.vinted.net/5559876.jpeg",
+                "high_resolution": {"timestamp": 1},
+            },
+        },
+        "sk",
+    )
+    await repo.record_sweep_candidates(
+        sweep_id,
+        [
+            sweep._to_candidate(sweep.RankedItem(item=match, rank_score=0.0), 0),
+            sweep._to_candidate(sweep.RankedItem(item=reject, rank_score=1.0), 1),
+        ],
+    )
+    await repo.record_triage(
+        sweep_id,
+        [
+            TriageItem(
+                id=5551234,
+                matches_target=True,
+                confidence=0.86,
+                reason="Grey three-layer shell with the hood described.",
+            ),
+            TriageItem(
+                id=5559876,
+                matches_target=False,
+                confidence=0.71,
+                reason="A fleece, not a shell jacket.",
+            ),
+        ],
+    )
+    await repo.record_verdict(
+        sweep_id,
+        5551234,
+        EnrichmentIn(
+            score=82,
+            model="Patagonia Torrentshell 3L",
+            retail_price=Decimal("180"),
+            matches_query=True,
+            verdict="Genuine, and well under what it usually goes for.",
+        ),
+        1_760_000_000,
+    )
+    await repo.add_sweep_cost(sweep_id, 41840, 0.0421)
+    await repo.finish_sweep_run(
+        sweep_id,
+        status="ok",
+        pages_fetched=2,
+        items_seen=40,
+        candidates=2,
+        funnel={"over budget": 6},
+    )
+    return sweep_id
+
+
+async def test_a_sweep_cannot_be_read_without_signing_in(client: TestClient, repo: Repo) -> None:
+    sweep_id = await _seed_judged_sweep(repo)
+
+    response = client.get(f"/api/sweeps/{sweep_id}")
+
+    assert response.status_code == 401
+
+
+def test_an_unknown_sweep_is_a_404(signed_in: TestClient) -> None:
+    assert signed_in.get("/api/sweeps/4242").status_code == 404
+
+
+async def test_a_judged_sweep_comes_back_whole(signed_in: TestClient, repo: Repo) -> None:
+    sweep_id = await _seed_judged_sweep(repo)
+
+    body = signed_in.get(f"/api/sweeps/{sweep_id}").json()
+
+    assert body["status"] == "ok"
+    assert (body["pages_fetched"], body["items_seen"], body["kept"]) == (2, 40, 2)
+    assert (body["triaged"], body["verdicts"]) == (2, 1)
+    assert (body["tokens"], body["cost_eur"]) == (41840, 0.0421)
+    assert body["funnel"] == {"over budget": 6}
+
+    # The photo check's match leads, even though its title scored 0.0 and the rejected
+    # listing's title scored 1.0. That inversion is the slice.
+    first, second = body["candidates"]
+    assert (first["item_id"], first["rank_score"]) == (5551234, 0.0)
+    assert (second["item_id"], second["rank_score"]) == (5559876, 1.0)
+
+    assert first["matches_target"] is True
+    assert first["confidence"] == 0.86
+    assert first["triage_reason"] == "Grey three-layer shell with the hood described."
+    assert first["thumb_url"] == "https://images.vinted.net/5551234-310.jpeg"
+    assert first["url"] == "https://www.vinted.sk/items/5551234"
+    assert first["price"] == 48.0
+    assert first["verdict"]["score"] == 82
+    assert first["verdict"]["model"] == "Patagonia Torrentshell 3L"
+    assert first["verdict"]["matches_query"] is True
+    assert "deal 82/100" in first["verdict"]["summary"]
+
+    # Rejected, and no opinion was bought for it — `None`, not an object full of nulls.
+    assert second["matches_target"] is False
+    assert second["verdict"] is None
+
+
+async def test_an_untriaged_candidate_keeps_its_third_value(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """`null` is "nobody looked", which is not "looked and said no"."""
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    item = parse_item(
+        {
+            "id": 42,
+            "title": "Bunda",
+            "url": "https://www.vinted.sk/items/42",
+            "price": {"amount": "10.0", "currency_code": "EUR"},
+            "photo": {"full_size_url": "x", "high_resolution": {"timestamp": 1}},
+        },
+        "sk",
+    )
+    await repo.record_sweep_candidates(
+        sweep_id, [sweep._to_candidate(sweep.RankedItem(item=item, rank_score=0.5), 0)]
+    )
+
+    body = signed_in.get(f"/api/sweeps/{sweep_id}").json()
+
+    assert body["triaged"] == 0
+    assert body["candidates"][0]["matches_target"] is None
+    assert body["candidates"][0]["verdict"] is None
+
+
+async def test_the_history_page_shows_a_judged_sweep_with_its_scores_and_cost(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    await _seed_judged_sweep(repo)
+
+    page = signed_in.get("/history")
+
+    assert page.status_code == 200
+    assert "Judged sweeps" in page.text
+    assert "Panska bunda M" in page.text
+    assert "https://www.vinted.sk/items/5551234" in page.text
+    assert "looks like it, 86% sure" in page.text
+    assert "Grey three-layer shell with the hood described." in page.text
+    assert "82" in page.text
+    assert "41840 tokens billed — €0.0421" in page.text
+
+
+async def test_an_unjudged_sweep_stays_off_the_history_page(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """A `sweep` run without --judge has no scores and no bill, so it has no row here."""
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=["nike"])
+    await repo.finish_sweep_run(
+        sweep_id, status="ok", pages_fetched=1, items_seen=3, candidates=0, funnel={}
+    )
+
+    page = signed_in.get("/history")
+
+    assert "Judged sweeps" not in page.text

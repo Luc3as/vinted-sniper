@@ -37,9 +37,9 @@ from pydantic import BaseModel, Field, SecretStr
 
 from vinted_sniper import backup, i18n
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
-from vinted_sniper.db.repo import Repo
-from vinted_sniper.engine import filters, health, quiet
-from vinted_sniper.enrichment import EnrichmentIn
+from vinted_sniper.db.repo import Repo, SweepCandidate, SweepRun
+from vinted_sniper.engine import filters, health, quiet, sweep
+from vinted_sniper.enrichment import Enrichment, EnrichmentIn
 from vinted_sniper.log import get_logger
 from vinted_sniper.magic.client import MapperClient
 from vinted_sniper.magic.errors import MappingError
@@ -58,6 +58,11 @@ log = get_logger(__name__)
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 SESSION_COOKIE = "vinted_sniper_session"
+# How much of the sweep history one page load is allowed to cost. The page fetches each
+# run's candidates separately, so these two numbers are what stop a growing sweep_runs
+# table turning /history into a fan-out of queries.
+SWEEP_HISTORY_RUNS = 5
+SWEEP_HISTORY_MATCHES = 3
 
 
 def _authorised(supplied: str | None, expected: SecretStr | None) -> bool:
@@ -264,12 +269,18 @@ def create_app(
         # would reject that outright with a bare 422, so parse leniently instead.
         query_id = _int_or_none(search or "")
         rows = await repo.delivery_history(limit=200, query_id=query_id, status=status or None)
+        now = int(time.time())
+        # Bounded on both axes: the last few runs, and each one's candidates once. A sweep
+        # is something a person runs by hand, so this is a handful of small reads.
+        runs = await repo.recent_sweep_runs(limit=SWEEP_HISTORY_RUNS)
+        candidates = {run.id: await repo.sweep_candidates(run.id) for run in runs}
         return TEMPLATES.TemplateResponse(
             request,
             "history.html",
             {
                 "nav": "history",
-                "rows": _history_views(rows, now=int(time.time())),
+                "rows": _history_views(rows, now=now),
+                "sweeps": _sweep_views(runs, candidates, now=now),
                 "queries": await repo.list_queries(),
                 "selected_search": query_id,
                 "selected_status": status or "",
@@ -582,6 +593,44 @@ def create_app(
             }
         )
 
+    @app.get("/api/sweeps/{sweep_id}")
+    async def sweep_detail(sweep_id: int, _: None = guard) -> JSONResponse:
+        """One sweep, whole: what it read, what it kept, what it judged and what it spent.
+
+        Deliberately complete rather than minimal — S04's screen polls this while a sweep
+        is still running, so a `running` run with three triaged candidates has to be as
+        readable as a finished one. The candidates come back in the post-triage order,
+        derived by `sweep.triage_order()` from the columns that were persisted rather than
+        re-sorted here, so this endpoint cannot drift from what `judge_sweep()` returned.
+        """
+        run = await repo.get_sweep_run(sweep_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"no sweep numbered {sweep_id}")
+        candidates = sweep.triage_order(await repo.sweep_candidates(sweep_id))
+        return JSONResponse(
+            {
+                "id": run.id,
+                "status": run.status,
+                "tld": run.tld,
+                "query_id": run.query_id,
+                "params": run.params,
+                "keywords": run.keywords,
+                "started_at": run.started_at,
+                "finished_at": run.finished_at,
+                "pages_fetched": run.pages_fetched,
+                "items_seen": run.items_seen,
+                # `kept` rather than `candidates`: the list below owns that name.
+                "kept": run.candidates,
+                "triaged": sum(1 for row in candidates if row.matches_target is not None),
+                "verdicts": sum(1 for row in candidates if row.judged_at is not None),
+                "funnel": run.funnel,
+                "tokens": run.tokens,
+                "cost_eur": run.cost_eur,
+                "error": run.error,
+                "candidates": [_sweep_candidate_view(row) for row in candidates],
+            }
+        )
+
     # --- Destinations --------------------------------------------------------------
 
     @app.post("/destinations")
@@ -768,6 +817,119 @@ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
             }
         )
     return views
+
+
+def _payable(row: SweepCandidate) -> Decimal | None:
+    """What a buyer actually hands over: the total when there is one, the price otherwise."""
+    amount = row.total_price if row.total_price is not None else row.price
+    return None if amount is None else Decimal(str(amount))
+
+
+def _sweep_candidate_view(row: SweepCandidate) -> dict[str, Any]:
+    """One candidate as JSON: the listing, what the photo check said, and any full opinion.
+
+    `verdict` is `None` until one has been bought, rather than an object full of nulls, so
+    "nobody paid for an opinion on this" and "the opinion said nothing" stay distinguishable
+    — the same three-valued care `matches_target` needs one field up.
+    """
+    enrichment = Enrichment.from_candidate(row)
+    return {
+        "item_id": row.item_id,
+        "title": row.title,
+        "url": row.url,
+        "price": row.price,
+        "total_price": row.total_price,
+        "currency": row.currency,
+        "brand": row.brand,
+        "size": row.size,
+        "condition": row.condition,
+        "photo_url": row.photo_url,
+        "thumb_url": row.thumb_url,
+        "seller": row.seller_login,
+        "stage": row.stage,
+        "position": row.position,
+        "rank_score": row.rank_score,
+        "matches_target": row.matches_target,
+        "confidence": row.confidence,
+        "triage_reason": row.triage_reason,
+        "verdict": None
+        if enrichment is None
+        else {
+            "score": row.verdict_score,
+            "model": row.verdict_model,
+            "retail_price": row.verdict_retail_price,
+            "retail_source": row.verdict_retail_source,
+            "matches_query": row.verdict_matches_query,
+            "risk": row.verdict_risk,
+            "text": row.verdict_text,
+            "judged_at": row.judged_at,
+            # Rendered by the same code every notification uses, so the API says the same
+            # thing the CLI and the alerts do rather than a fourth wording of it.
+            "summary": enrichment.summary(_payable(row), row.currency),
+        },
+    }
+
+
+def _sweep_views(
+    runs: list[SweepRun], candidates: dict[int, list[SweepCandidate]], now: int
+) -> list[dict[str, Any]]:
+    """Recent judged sweeps for the history page: counts, top matches, and the bill.
+
+    Only runs that were actually judged appear. An unjudged sweep is a `sweep` command
+    somebody ran without `--judge`; it has no scores and no cost, so a row for it here
+    would be an empty row on a page about what the AI concluded.
+    """
+    views: list[dict[str, Any]] = []
+    for run in runs:
+        rows = sweep.triage_order(candidates.get(run.id, []))
+        triaged = sum(1 for row in rows if row.matches_target is not None)
+        verdicts = sum(1 for row in rows if row.judged_at is not None)
+        if not triaged and not verdicts:
+            continue
+        views.append(
+            {
+                "id": run.id,
+                "status": run.status,
+                "tld": run.tld,
+                "keywords": ", ".join(run.keywords),
+                "age": _age(max(0, now - run.started_at)),
+                "pages_fetched": run.pages_fetched,
+                "items_seen": run.items_seen,
+                "kept": run.candidates,
+                "triaged": triaged,
+                "verdicts": verdicts,
+                "tokens": run.tokens,
+                "cost_eur": f"{run.cost_eur:.4f}",
+                "error": run.error,
+                "matches": [_sweep_match_view(row) for row in rows[:SWEEP_HISTORY_MATCHES]],
+            }
+        )
+    return views
+
+
+def _sweep_match_view(row: SweepCandidate) -> dict[str, Any]:
+    """One of a sweep's top matches, in the words the page prints."""
+    enrichment = Enrichment.from_candidate(row)
+    payable = _payable(row)
+    currency = row.currency or ""
+    if row.matches_target is None:
+        photos = "not checked"
+    else:
+        sure = round((row.confidence or 0.0) * 100)
+        photos = f"{'looks like it' if row.matches_target else 'not this'}, {sure}% sure"
+    return {
+        "title": row.title,
+        "url": row.url,
+        "photo": row.thumb_url or row.photo_url,
+        "price": f"{payable:.2f} {currency}".strip() if payable is not None else None,
+        "match": round(row.rank_score * 100),
+        "photos": photos,
+        "matches_target": row.matches_target,
+        "reason": row.triage_reason,
+        "score": row.verdict_score,
+        "verdict": None if enrichment is None else enrichment.summary(payable, row.currency),
+        "verdict_text": row.verdict_text,
+    }
 
 
 def _history_views(rows: list[Any], now: int) -> list[dict[str, Any]]:

@@ -1457,6 +1457,19 @@ class Repo:
         row = await self._db.fetch_one("SELECT * FROM sweep_runs WHERE id = ?", (sweep_id,))
         return None if row is None else self._to_sweep_run(row)
 
+    async def recent_sweep_runs(self, limit: int = 5) -> list[SweepRun]:
+        """The last few sweeps, newest first, for the history page and the API.
+
+        Bounded by the caller rather than paged: a sweep is something a person runs by
+        hand a handful of times, and the page that shows these also fetches each run's
+        candidates, so the limit here is what stops that turning into a fan-out.
+        """
+        rows = await self._db.fetch_all(
+            "SELECT * FROM sweep_runs ORDER BY started_at DESC, id DESC LIMIT ?",
+            (max(0, int(limit)),),
+        )
+        return [self._to_sweep_run(row) for row in rows]
+
     async def sweep_candidates(self, sweep_id: int) -> list[SweepCandidate]:
         """Best first, which is the only order a sweep result is ever read in."""
         rows = await self._db.fetch_all(

@@ -124,6 +124,7 @@ The other way round is fine — the photo check on its own is the cheap setup.
 vinted-sniper run                      start watching (what the container runs)
 vinted-sniper check --url <url>        fetch one search once and print the result
 vinted-sniper sweep <url> [options]    look once through what is already for sale
+vinted-sniper sweep <url> --judge      the same, but have the AI check the photos too
 vinted-sniper watch <url> [options]    add a search
 vinted-sniper searches                 list searches
 vinted-sniper unwatch <id>             remove one
@@ -416,6 +417,7 @@ možnosť.
 vinted-sniper run                      spusti sledovanie (to, čo beží v kontajneri)
 vinted-sniper check --url <url>        stiahni jedno vyhľadávanie raz a vypíš výsledok
 vinted-sniper sweep <url> [voľby]      pozri sa raz na to, čo je už na predaj
+vinted-sniper sweep <url> --judge      to isté, ale nech AI skontroluje aj fotky
 vinted-sniper watch <url> [voľby]      pridaj vyhľadávanie
 vinted-sniper searches                 vypíš vyhľadávania
 vinted-sniper unwatch <id>             odstráň jedno

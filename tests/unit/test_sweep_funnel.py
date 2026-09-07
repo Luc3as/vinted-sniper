@@ -292,3 +292,21 @@ def test_sweep_gates_omit_the_three_gates_that_would_sabotage_a_sweep() -> None:
         "_seller_rating",
         "_seller_reviews",
     }
+
+
+def test_a_stored_candidate_carries_the_thumbnail_the_photo_check_is_billed_on(
+    listing: Callable[..., Item],
+) -> None:
+    """0015 gave the row a `thumb_url` column; the copy into it has to actually happen.
+
+    Missed once already: the parser produced it and the writer wrote it, but the object in
+    between left it at None, so every stored candidate had a NULL thumbnail and every
+    reader — the API, the history page — silently fell back to a full-size photo.
+    """
+    item = listing(5551234)
+    assert item.thumb_url is not None, "the fixture should carry a small variant"
+
+    candidate = sweep._to_candidate(sweep.RankedItem(item=item, rank_score=0.0), 0)
+
+    assert candidate.thumb_url == item.thumb_url
+    assert candidate.thumb_url != item.photo_url
