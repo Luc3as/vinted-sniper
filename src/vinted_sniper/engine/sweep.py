@@ -13,24 +13,31 @@ What does eliminate a listing is a real constraint — banned words, budget, con
 seller — which is exactly the subset `filters.SWEEP_GATES` runs.
 
 `funnel()` and everything under it is pure: parsed listings in, a ranking out. `run_sweep()`
-is the one impure thing here — it pages the API in relevance order, funnels what it read and
-writes the result to the sweep tables. `engine/dedup.py` is deliberately not used — its
-freshness window is newest-first semantics and would discard nearly all of an existing-stock
-sweep.
+pages the API in relevance order, funnels what it read and writes the result to the sweep
+tables. `judge_sweep()` is the whole point of the milestone: it runs that sweep and then
+sends every survivor's *thumbnail* to the photo check, so what comes back is ordered by
+what the listings look like rather than by what the sellers called them.
+
+`engine/dedup.py` is deliberately not used — its freshness window is newest-first semantics
+and would discard nearly all of an existing-stock sweep.
 """
 
 from __future__ import annotations
 
 import time
 import unicodedata
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import structlog
 
 from vinted_sniper.db.repo import Query, Repo, SweepCandidate
 from vinted_sniper.engine import filters
 from vinted_sniper.log import get_logger
+from vinted_sniper.magic.errors import MappingError
+from vinted_sniper.magic.models import TriageItem, TriageTarget
 from vinted_sniper.vinted.client import PER_PAGE, VintedClient
 from vinted_sniper.vinted.errors import (
     AuthExpiredError,
@@ -43,6 +50,9 @@ from vinted_sniper.vinted.errors import (
 from vinted_sniper.vinted.models import Item
 from vinted_sniper.vinted.session import SessionManager
 
+if TYPE_CHECKING:  # pragma: no cover - the stage is duck-typed at runtime, see judge_sweep()
+    from vinted_sniper.magic.triage import TriageClient
+
 log = get_logger(__name__)
 
 # How long a sweep holds the whole site after a refusal. The poller scales its backoff by
@@ -54,10 +64,22 @@ BLOCKED_COOLDOWN_S = 300.0
 
 @dataclass(frozen=True, slots=True)
 class RankedItem:
-    """A listing the funnel kept, with the score that decided where it sits."""
+    """A listing the funnel kept, with the scores that decide where it sits.
+
+    `rank_score` is what the seller's title earned. The three triage fields are what the
+    photo check said about it and stay at their defaults until `judge_sweep()` fills them
+    in, so `funnel()` and `run_sweep()` keep producing exactly the object they always did.
+
+    `matches_target` is three-valued for the same reason the column is (MEM/T02): `None`
+    means nobody looked, `False` means the model looked and said no. Collapsing the two
+    would let a batch that never came back rank as a rejection.
+    """
 
     item: Item
     rank_score: float
+    matches_target: bool | None = None
+    confidence: float | None = None
+    triage_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +101,15 @@ class SweepResult:
     # counts as a complete picture.
     status: str = "ok"
     error: str | None = None
+    # How many candidates came back from the photo check with an answer. Never more than
+    # len(candidates), and lower than it whenever a batch failed or a flow skipped an id.
+    triaged: int = 0
+    # Full photo verdicts paid for. Filled by T06; carried here so one object still
+    # describes the whole run rather than the caller stitching two together.
+    verdicts: int = 0
+    # What the AI stages spent, as the flows reported it. Additive across batches.
+    tokens: int = 0
+    cost_eur: float = 0.0
 
 
 def score_title(title: str, keywords: list[str]) -> float:
@@ -243,6 +274,198 @@ async def run_sweep(
     )
 
 
+async def judge_sweep(
+    *,
+    tld: str,
+    params: dict[str, str],
+    keywords: list[str],
+    visual_signature: str | None,
+    labels: dict[str, str],
+    client: VintedClient,
+    repo: Repo,
+    triage: TriageClient,
+    max_pages: int,
+    max_items: int,
+    batch_size: int,
+    query_id: int | None = None,
+    gates_query: Query | None = None,
+    sessions: SessionManager | None = None,
+    cost_per_mtok_in: float = 0.0,
+    cost_per_mtok_out: float = 0.0,
+) -> SweepResult:
+    """Run a sweep, then re-rank what it found by what the photos actually show.
+
+    This is the point of the milestone in one function. `run_sweep()` can only rank what a
+    seller typed, and in the reference sweep not one of the 89 real matches named the model
+    in its title (R003/R005). So every survivor goes to the photo check, and the order that
+    comes back out puts a listing triage *recognised* above a listing whose title matched
+    and which triage rejected. Confidence ranks; it never gates — dropping a low-confidence
+    listing before the verdict stage would recreate exactly the failure R003 is about.
+
+    Two things it deliberately does not do:
+
+    * **It does not touch `run_sweep()`.** It calls it and adds stages after it, so the
+      isolation guarantees pinned in `tests/integration/test_sweep_isolation.py` keep
+      testing the same code they were written against.
+    * **It does not run the batches concurrently.** They are independent and could, but
+      concurrency against a single n8n instance is a new failure mode (partial batches,
+      rate limits, an unclear execution history) and this slice is not the place to take it
+      on. If a sweep of a few hundred items ever needs to be faster, that is an S04
+      concern and belongs behind a bounded gather, not a bare `asyncio.gather`.
+
+    A sweep never raises. A refused or partial `run_sweep()` comes straight back
+    untouched — a run that could not read the site must not then go and spend money on it —
+    and a batch that fails closes the run `status='partial'` and returns what was triaged
+    so far. Nothing already stored is discarded: it was paid for.
+
+    Ordering note: the stored `position` column stays the funnel's order. The triage order
+    is the returned `candidates` list, and it is reproducible from the database at any time
+    because `matches_target`, `confidence` and `rank_score` are all persisted per candidate.
+    """
+    result = await run_sweep(
+        tld=tld,
+        params=params,
+        keywords=keywords,
+        client=client,
+        repo=repo,
+        max_pages=max_pages,
+        max_items=max_items,
+        query_id=query_id,
+        gates_query=gates_query,
+        sessions=sessions,
+    )
+    if result.status != "ok" or not result.candidates:
+        return result
+
+    run_log = log.bind(sweep_id=result.sweep_id, tld=tld)
+    target = TriageTarget(
+        keywords=list(keywords), visual_signature=visual_signature, labels=dict(labels)
+    )
+
+    outcomes: dict[int, TriageItem] = {}
+    tokens = 0
+    cost_eur = 0.0
+    status, error = result.status, result.error
+
+    for batch in _batches(result.candidates, batch_size):
+        sent = {ranked.item.item_id for ranked in batch}
+        try:
+            answer = await triage.judge([ranked.item for ranked in batch], target)
+        except MappingError as exc:
+            # S01's discipline: the sweep degrades, it does not raise. Earlier batches are
+            # already on disk and stay there.
+            status, error = "partial", str(exc)
+            run_log.warning("sweep.triage_failed", error=error, triaged=len(outcomes))
+            break
+
+        keep = [item for item in answer.results if item.id in sent]
+        returned = {item.id for item in answer.results}
+        unknown = sorted(returned - sent)
+        missing = sorted(sent - returned)
+        if unknown or missing:
+            # Neither is fatal — an id nobody sent is dropped and an id nobody answered
+            # stays un-triaged — but both silently change the ranking, so both are said out
+            # loud once per batch rather than being inferred from a short result list.
+            run_log.warning(
+                "magic.triage_mismatch",
+                sent=len(sent),
+                returned=len(returned),
+                unknown=unknown,
+                missing=missing,
+            )
+
+        # Written per batch, not at the end: a run that dies on batch 7 of 10 leaves six
+        # batches' worth of answers on disk instead of none.
+        await repo.record_triage(result.sweep_id, keep)
+        for item in keep:
+            outcomes[item.id] = item
+
+        batch_tokens, batch_cost = _batch_cost(answer.usage, cost_per_mtok_in, cost_per_mtok_out)
+        tokens += batch_tokens
+        cost_eur += batch_cost
+        if batch_tokens or batch_cost:
+            await repo.add_sweep_cost(result.sweep_id, batch_tokens, batch_cost)
+
+    judged = [
+        replace(
+            ranked,
+            matches_target=outcome.matches_target if outcome else None,
+            confidence=outcome.confidence if outcome else None,
+            triage_reason=outcome.reason if outcome else None,
+        )
+        for ranked in result.candidates
+        for outcome in (outcomes.get(ranked.item.item_id),)
+    ]
+    judged.sort(key=_triage_rank_key)
+
+    if status != result.status:
+        await repo.finish_sweep_run(
+            result.sweep_id,
+            status=status,
+            pages_fetched=result.pages_fetched,
+            items_seen=result.items_seen,
+            candidates=len(result.candidates),
+            funnel=result.funnel,
+            error=error,
+        )
+
+    matched = sum(1 for ranked in judged if ranked.matches_target)
+    run_log.info(
+        "sweep.judged",
+        candidates=len(judged),
+        triaged=len(outcomes),
+        matched=matched,
+        batches=_batch_count(len(result.candidates), batch_size),
+        tokens=tokens,
+        cost_eur=round(cost_eur, 4),
+        status=status,
+    )
+    return replace(
+        result,
+        candidates=judged,
+        triaged=len(outcomes),
+        tokens=tokens,
+        cost_eur=cost_eur,
+        status=status,
+        error=error,
+    )
+
+
+def _batches(candidates: Sequence[RankedItem], size: int) -> Iterator[list[RankedItem]]:
+    """Chunk the survivors into the groups one request each will carry.
+
+    A size of zero or less would loop forever rather than fail loudly, so it is clamped to
+    one batch of everything — the config field is bounded `ge=1`, and a caller passing 0 by
+    hand should get one expensive request, not a hang.
+    """
+    step = max(1, size) if size > 0 else len(candidates) or 1
+    for start in range(0, len(candidates), step):
+        yield list(candidates[start : start + step])
+
+
+def _batch_count(total: int, size: int) -> int:
+    step = max(1, size) if size > 0 else total or 1
+    return -(-total // step)
+
+
+def _batch_cost(usage: object, per_mtok_in: float, per_mtok_out: float) -> tuple[int, float]:
+    """What one batch cost: the flow's own figure when it gave one, arithmetic otherwise.
+
+    A flow that reports nothing is not an error — it just means the run's cost line is an
+    estimate from the configured per-million rates. The rates default to 0.0 so a caller
+    that has not wired them in reports tokens and no money, rather than a made-up price.
+    """
+    if usage is None:
+        return 0, 0.0
+    tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
+    tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
+    reported = getattr(usage, "cost_eur", None)
+    if reported is not None:
+        return tokens_in + tokens_out, float(reported)
+    estimated = (tokens_in * per_mtok_in + tokens_out * per_mtok_out) / 1_000_000
+    return tokens_in + tokens_out, estimated
+
+
 async def _hold_site(
     tld: str,
     *,
@@ -342,6 +565,41 @@ def _rank_key(ranked: RankedItem) -> tuple[float, Decimal, int]:
         payable if payable is not None else Decimal("Infinity"),
         item.item_id,
     )
+
+
+def _triage_rank_key(ranked: RankedItem) -> tuple[int, float, float, Decimal, int]:
+    """Recognised first, then un-triaged, then rejected — and never a coin flip.
+
+    The whole slice is this tuple. A listing whose title said nothing but whose photo the
+    model recognised outranks a listing whose title matched and whose photo it rejected,
+    because `matches_target` is the first term and `rank_score` only the third.
+
+    The same total-ordering discipline as `_rank_key`: two items with equal confidence and
+    equal title score still order by price and then by id, so "the top 3" means the same
+    three listings on a re-run. Un-triaged sorts as 0 — below a confirmed match, above a
+    rejection — so a batch that never came back costs a listing its place in the queue
+    without costing it the run.
+
+    Within the rejected band `-confidence` puts the confidently-rejected first, which is
+    inert: nothing downstream reads past the matches, and it keeps the tuple one rule
+    rather than one rule with an exception in it.
+    """
+    item = ranked.item
+    payable = item.total_price if item.total_price is not None else item.price
+    return (
+        -_match_rank(ranked.matches_target),
+        -(ranked.confidence or 0.0),
+        -ranked.rank_score,
+        payable if payable is not None else Decimal("Infinity"),
+        item.item_id,
+    )
+
+
+def _match_rank(matches_target: bool | None) -> int:
+    """True -> 1, never looked -> 0, rejected -> -1. The three-valued column, ordered."""
+    if matches_target is None:
+        return 0
+    return 1 if matches_target else -1
 
 
 def _fold(text: str) -> str:
