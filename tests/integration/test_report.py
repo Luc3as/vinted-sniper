@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -61,8 +62,8 @@ async def test_the_report_reads_like_a_summary(repo: Repo) -> None:
             tld="sk",
             title=f"Bunda {i}",
             url=f"https://www.vinted.sk/items/{i}",
-            price=40,
-            total_price=45,
+            price=Decimal(40),
+            total_price=Decimal(45),
             currency="EUR",
             photo_ts=now,
         )

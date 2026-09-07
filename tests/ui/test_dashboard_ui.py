@@ -12,6 +12,7 @@ import os
 import urllib.request
 
 import pytest
+from playwright.sync_api import Page, ViewportSize
 
 BASE_URL = os.environ.get("VINTED_SNIPER_UI_BASE_URL", "http://127.0.0.1:8000")
 
@@ -19,7 +20,7 @@ BASE_URL = os.environ.get("VINTED_SNIPER_UI_BASE_URL", "http://127.0.0.1:8000")
 def _server_is_up() -> bool:
     try:
         with urllib.request.urlopen(BASE_URL + "/", timeout=3) as resp:
-            return resp.status == 200
+            return bool(resp.status == 200)
     except OSError:
         return False
 
@@ -37,8 +38,8 @@ VIEWPORTS = [
 
 
 @pytest.fixture
-def errors_page(page):
-    """A page that records console errors and failed requests."""
+def errors_page(page: Page) -> tuple[Page, list[str], list[str]]:
+    """A page plus lists that record its console errors and failed requests."""
     console_errors: list[str] = []
     failed_requests: list[str] = []
     page.on(
@@ -46,26 +47,26 @@ def errors_page(page):
         lambda msg: console_errors.append(msg.text) if msg.type == "error" else None,
     )
     page.on("requestfailed", lambda req: failed_requests.append(req.url))
-    page.console_errors = console_errors
-    page.failed_requests = failed_requests
-    return page
+    return page, console_errors, failed_requests
 
 
 # --- Every page loads cleanly ------------------------------------------------------
 
 
 @pytest.mark.parametrize("path", PAGES)
-def test_page_loads_without_errors(errors_page, path):
-    page = errors_page
+def test_page_loads_without_errors(
+    errors_page: tuple[Page, list[str], list[str]], path: str
+) -> None:
+    page, console_errors, failed_requests = errors_page
     resp = page.goto(BASE_URL + path)
-    assert resp.status == 200
+    assert resp is not None and resp.status == 200
     page.wait_for_load_state("networkidle")
     assert "vinted-sniper" in page.title()
-    assert page.console_errors == []
-    assert page.failed_requests == []
+    assert console_errors == []
+    assert failed_requests == []
 
 
-def test_navigation_links(page):
+def test_navigation_links(page: Page) -> None:
     page.goto(BASE_URL + "/")
     page.get_by_role("link", name="Searches").click()
     assert page.url.rstrip("/").endswith("/searches")
@@ -75,7 +76,7 @@ def test_navigation_links(page):
     assert page.url.rstrip("/").endswith("/help")
 
 
-def test_nav_and_section_icons_present(page):
+def test_nav_and_section_icons_present(page: Page) -> None:
     page.goto(BASE_URL + "/searches")
     assert page.locator("nav a svg").count() == 4  # Found, Searches, History, Help
     assert page.locator("h2 svg").count() >= 2  # Searches, Destinations
@@ -84,18 +85,18 @@ def test_nav_and_section_icons_present(page):
 # --- Dashboard structure ------------------------------------------------------------
 
 
-def test_found_page_is_the_landing_page(page):
+def test_found_page_is_the_landing_page(page: Page) -> None:
     page.goto(BASE_URL + "/")
     assert page.get_by_role("heading", name="Found").is_visible()
 
 
-def test_settings_sections_present(page):
+def test_settings_sections_present(page: Page) -> None:
     page.goto(BASE_URL + "/searches")
     for heading in ["Searches", "Add a search", "Destinations", "Add a destination"]:
         assert page.get_by_role("heading", name=heading).is_visible(), heading
 
 
-def test_heading_hierarchy(page):
+def test_heading_hierarchy(page: Page) -> None:
     """h2 must be meaningfully larger than body text (≥ 25 %)."""
     page.goto(BASE_URL + "/")
     sizes = page.evaluate(
@@ -107,7 +108,7 @@ def test_heading_hierarchy(page):
     assert sizes["h2"] >= sizes["body"] * 1.25, sizes
 
 
-def test_add_search_form_fields(page):
+def test_add_search_form_fields(page: Page) -> None:
     page.goto(BASE_URL + "/searches")
     form = page.locator("form:has(input[name=url])").first
     assert form.locator("input[name=url]").first.is_visible()
@@ -115,7 +116,7 @@ def test_add_search_form_fields(page):
         assert form.locator(f"input[name={name}]").count() >= 1, name
 
 
-def test_destination_type_options(page):
+def test_destination_type_options(page: Page) -> None:
     page.goto(BASE_URL + "/searches")
     options = page.locator("form select[name=kind] option").all_text_contents()
     joined = " ".join(options)
@@ -123,7 +124,7 @@ def test_destination_type_options(page):
         assert kind in joined, f"missing destination type {kind}: {options}"
 
 
-def test_explainers_toggle(page):
+def test_explainers_toggle(page: Page) -> None:
     page.goto(BASE_URL + "/searches")
     explain = page.locator("details.explain").first
     summary = explain.locator("summary").first
@@ -132,7 +133,7 @@ def test_explainers_toggle(page):
     assert explain.get_attribute("open") is not None
 
 
-def test_action_buttons_are_labeled(page):
+def test_action_buttons_are_labeled(page: Page) -> None:
     """Icon-only row buttons must carry an accessible name and a tooltip."""
     page.goto(BASE_URL + "/searches")
     buttons = page.locator("td.actions button.iconbtn")
@@ -146,7 +147,7 @@ def test_action_buttons_are_labeled(page):
 # --- Tables fit their container -----------------------------------------------------
 
 
-def test_tables_fit_without_horizontal_scroll(page):
+def test_tables_fit_without_horizontal_scroll(page: Page) -> None:
     """At desktop width no table should force its wrapper to scroll sideways."""
     page.set_viewport_size({"width": 1280, "height": 800})
     overflowing = []
@@ -165,7 +166,7 @@ def test_tables_fit_without_horizontal_scroll(page):
     assert not overflowing, "tables overflow their wrapper:\n" + "\n".join(overflowing)
 
 
-def test_search_name_is_single_line(page):
+def test_search_name_is_single_line(page: Page) -> None:
     page.set_viewport_size({"width": 1280, "height": 800})
     page.goto(BASE_URL + "/searches")
     name = page.locator("td .name").first
@@ -181,13 +182,13 @@ def test_search_name_is_single_line(page):
 # --- Real data renders (prod DB copy) ----------------------------------------------
 
 
-def test_searches_table_has_rows(page):
+def test_searches_table_has_rows(page: Page) -> None:
     page.goto(BASE_URL + "/searches")
     body = page.locator("body").inner_text()
     assert "Nothing is being watched yet" not in body, "expected prod searches, dashboard is empty"
 
 
-def test_history_shows_listings(page):
+def test_history_shows_listings(page: Page) -> None:
     page.goto(BASE_URL + "/history")
     body = page.locator("body").inner_text()
     assert "Nothing" not in body.split("\n")[0] or len(body) > 200
@@ -196,13 +197,15 @@ def test_history_shows_listings(page):
 # --- Recently found: filter and paging ---------------------------------------------
 
 
-def _visible_cards(page) -> int:
-    return page.evaluate(
-        "() => [...document.querySelectorAll('.listing')].filter(c => !c.hidden).length"
+def _visible_cards(page: Page) -> int:
+    return int(
+        page.evaluate(
+            "() => [...document.querySelectorAll('.listing')].filter(c => !c.hidden).length"
+        )
     )
 
 
-def test_recent_paging(page):
+def test_recent_paging(page: Page) -> None:
     page.goto(BASE_URL + "/")
     total = page.locator(".listing").count()
     if total == 0:
@@ -218,7 +221,7 @@ def test_recent_paging(page):
         assert not more.is_visible()
 
 
-def test_recent_filter(page):
+def test_recent_filter(page: Page) -> None:
     page.goto(BASE_URL + "/")
     if page.locator(".listing").count() == 0:
         pytest.skip("no recent listings in the database")
@@ -235,7 +238,7 @@ def test_recent_filter(page):
     assert _visible_cards(page) > 0
 
 
-def test_recent_drops_only(page):
+def test_recent_drops_only(page: Page) -> None:
     page.goto(BASE_URL + "/")
     if page.locator(".listing").count() == 0:
         pytest.skip("no recent listings in the database")
@@ -254,7 +257,7 @@ def test_recent_drops_only(page):
 
 @pytest.mark.parametrize("viewport", VIEWPORTS)
 @pytest.mark.parametrize("path", PAGES)
-def test_tooltips_visible_in_viewport(page, path, viewport):
+def test_tooltips_visible_in_viewport(page: Page, path: str, viewport: ViewportSize) -> None:
     """Hover every ? icon; the shared #tip element must appear fully on screen.
 
     #tip is position:fixed on <body>, so this also proves no scroll container
@@ -299,7 +302,7 @@ def test_tooltips_visible_in_viewport(page, path, viewport):
     assert not problems, "tooltips broken:\n" + "\n".join(problems)
 
 
-def test_tooltip_inside_table_not_clipped(page):
+def test_tooltip_inside_table_not_clipped(page: Page) -> None:
     """The specific regression: a ? icon inside a scrollable table wrapper."""
     page.set_viewport_size({"width": 1280, "height": 800})
     page.goto(BASE_URL + "/searches")
@@ -322,7 +325,7 @@ def test_tooltip_inside_table_not_clipped(page):
 # --- Theme toggle and state-pill colours -------------------------------------------
 
 
-def test_paused_pill_not_amber(page):
+def test_paused_pill_not_amber(page: Page) -> None:
     """Paused is the user's choice; it must not share the warning colour with stale."""
     page.goto(BASE_URL + "/searches")
     if page.locator(".pill.paused").count() == 0 or page.locator(".pill.stale").count() == 0:
@@ -336,7 +339,7 @@ def test_paused_pill_not_amber(page):
     assert colours["paused"] != colours["stale"], f"paused and stale share {colours['stale']}"
 
 
-def test_theme_toggle_cycles_and_persists(page):
+def test_theme_toggle_cycles_and_persists(page: Page) -> None:
     """system → light → dark → system; the choice survives a reload."""
     page.goto(BASE_URL + "/")
     state = """() => ({
@@ -375,7 +378,7 @@ def test_theme_toggle_cycles_and_persists(page):
 # --- History filter form -----------------------------------------------------------
 
 
-def test_history_filter_all_all_returns_the_page(page):
+def test_history_filter_all_all_returns_the_page(page: Page) -> None:
     """Regression: search= (empty, meaning "all") used to 422 with a raw JSON error."""
     page.goto(BASE_URL + "/history")
     page.get_by_role("button", name="Filter").click()
@@ -385,7 +388,7 @@ def test_history_filter_all_all_returns_the_page(page):
     assert "int_parsing" not in page.locator("body").inner_text()
 
 
-def test_history_filter_by_search_keeps_the_choice(page):
+def test_history_filter_by_search_keeps_the_choice(page: Page) -> None:
     page.goto(BASE_URL + "/history")
     options = page.locator("select[name=search] option:not([value=''])")
     if options.count() == 0:
@@ -398,7 +401,7 @@ def test_history_filter_by_search_keeps_the_choice(page):
     assert page.get_by_role("heading", name="Delivery history").is_visible()
 
 
-def test_brand_lockup_renders_full_size(page):
+def test_brand_lockup_renders_full_size(page: Page) -> None:
     """The header carries the full lockup SVG, not the old 1rem mini-mark."""
     page.goto(BASE_URL + "/")
     box = page.locator(".brand svg.lockup").bounding_box()
@@ -407,7 +410,7 @@ def test_brand_lockup_renders_full_size(page):
     assert box["width"] > box["height"] * 4, "lockup aspect wrong"
 
 
-def test_listing_price_hierarchy(page):
+def test_listing_price_hierarchy(page: Page) -> None:
     """The total (what you pay) leads in bold; the bare asking price is a muted footnote."""
     page.goto(BASE_URL + "/")
     if page.locator(".listing .price .total").count() == 0:
@@ -436,7 +439,7 @@ def test_listing_price_hierarchy(page):
         assert result["baseBelow"], "base price is not on its own line below the total"
 
 
-def test_listing_tags_carry_icons(page):
+def test_listing_tags_carry_icons(page: Page) -> None:
     """Brand/size/condition tags each show an inline glyph; the size tag is explicit."""
     page.goto(BASE_URL + "/")
     if page.locator(".listing").count() == 0:
@@ -462,7 +465,7 @@ def test_listing_tags_carry_icons(page):
     assert result["brandIcon"], "brand tag has no icon"
 
 
-def test_destination_rows_have_edit_and_delete(page):
+def test_destination_rows_have_edit_and_delete(page: Page) -> None:
     """Every destination row — active or disabled — offers edit and delete; the edit
     row opens with the current name and target prefilled."""
     page.goto(BASE_URL + "/searches")
@@ -474,7 +477,9 @@ def test_destination_rows_have_edit_and_delete(page):
     assert first.locator("form[action$='/delete'] button").count() == 1, "delete button missing"
     edit = first.locator("button[data-edit]")
     edit.click()
-    row_id = "edit-" + edit.get_attribute("data-edit")
+    edit_key = edit.get_attribute("data-edit")
+    assert edit_key, "edit button missing its data-edit attribute"
+    row_id = "edit-" + edit_key
     edit_row = page.locator(f"#{row_id}")
     assert edit_row.is_visible(), "destination edit row did not open"
     assert edit_row.locator("input[name=name]").input_value(), "name not prefilled"

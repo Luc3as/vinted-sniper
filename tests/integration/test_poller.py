@@ -614,7 +614,8 @@ async def test_the_market_filter_keeps_only_the_cheapest_share_once_it_knows_the
     assert queued.item.item_id == 100
     assert queued.market_percentile is not None and queued.market_percentile <= 25
     assert queued.market_n == 22
-    assert queued.market_line() is not None and "similar listings" in queued.market_line()
+    market_line = queued.market_line()
+    assert market_line is not None and "similar listings" in market_line
 
 
 async def test_the_market_filter_waits_until_there_is_a_market(

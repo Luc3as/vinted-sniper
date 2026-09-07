@@ -133,6 +133,8 @@ known_first_party = ["vinted_sniper"]
 [tool.deptry.per_rule_ignores]
 # Optional extras are imported lazily behind config flags.
 DEP002 = ["curl_cffi", "fastapi", "uvicorn", "jinja2", "python-multipart"]
+# starlette is FastAPI's foundation; its types (ASGIApp) have no fastapi re-export.
+DEP003 = ["starlette"]
 
 [tool.vulture]
 min_confidence = 80

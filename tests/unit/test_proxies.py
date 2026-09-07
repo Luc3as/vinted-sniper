@@ -117,6 +117,7 @@ async def test_discarding_a_route_hands_out_a_fresh_client_next_time() -> None:
 
     pool = TransportPool(build)
     first = pool.get(None)
+    assert isinstance(first, ScriptedTransport)
 
     await pool.discard(None)
 
