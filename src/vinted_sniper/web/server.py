@@ -420,7 +420,9 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         return _redirect_with_notice("Saved. The new settings apply from the next check.")
 
     @app.post("/searches/interval")
-    async def set_every_interval(interval: Annotated[str, Form()] = "", _: None = guard) -> Response:
+    async def set_every_interval(
+        interval: Annotated[str, Form()] = "", _: None = guard
+    ) -> Response:
         value = _int_or_none(interval)
         if value is None:
             return _redirect_with_error("the check interval must be a number of seconds")
@@ -607,7 +609,7 @@ def _redirect_with_error(message: str) -> RedirectResponse:
     return RedirectResponse(f"/searches?error={quote(message)}", status_code=303)
 
 
-def _destination_config(kind: str, target: str) -> dict[str, Any] | str:
+def _destination_config(kind: str, target: str) -> dict[str, Any] | str:  # noqa: PLR0911
     """The config dict a destination of this kind stores, or a human-readable complaint."""
     match kind:
         case "discord":

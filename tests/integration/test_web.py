@@ -792,7 +792,9 @@ async def test_a_destination_can_be_edited(signed_in: TestClient, repo: Repo) ->
 
 async def test_editing_keeps_kind_validation(signed_in: TestClient, repo: Repo) -> None:
     destination_id = await repo.add_destination(
-        kind="discord", name="server", config={"webhook_url": "https://discord.com/api/webhooks/1/a"}
+        kind="discord",
+        name="server",
+        config={"webhook_url": "https://discord.com/api/webhooks/1/a"},
     )
 
     response = signed_in.post(
@@ -812,9 +814,7 @@ async def test_a_disabled_destination_can_be_enabled_again(
     destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
     await repo.deactivate_destination(destination_id, "the far end vanished")
 
-    response = signed_in.post(
-        f"/destinations/{destination_id}/enable", follow_redirects=False
-    )
+    response = signed_in.post(f"/destinations/{destination_id}/enable", follow_redirects=False)
 
     assert response.status_code == 303 and "ok=" in response.headers["location"]
     destination = await repo.get_destination(destination_id)
@@ -827,9 +827,7 @@ async def test_deleting_a_destination_removes_it_even_when_disabled(
     destination_id = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
     await repo.deactivate_destination(destination_id, "gone")
 
-    response = signed_in.post(
-        f"/destinations/{destination_id}/delete", follow_redirects=False
-    )
+    response = signed_in.post(f"/destinations/{destination_id}/delete", follow_redirects=False)
 
     assert response.status_code == 303 and "ok=" in response.headers["location"]
     assert await repo.list_destinations() == []

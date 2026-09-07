@@ -18,7 +18,7 @@ BASE_URL = os.environ.get("VINTED_SNIPER_UI_BASE_URL", "http://127.0.0.1:8000")
 
 def _server_is_up() -> bool:
     try:
-        with urllib.request.urlopen(BASE_URL + "/", timeout=3) as resp:  # noqa: S310
+        with urllib.request.urlopen(BASE_URL + "/", timeout=3) as resp:
             return resp.status == 200
     except OSError:
         return False
@@ -285,7 +285,12 @@ def test_tooltips_visible_in_viewport(page, path, viewport):
         if box is None:
             problems.append(f"{path} [{viewport['width']}px] tip #{i}: never became visible")
             continue
-        if box["left"] < 0 or box["right"] > box["vw"] or box["top"] < 0 or box["bottom"] > box["vh"]:
+        if (
+            box["left"] < 0
+            or box["right"] > box["vw"]
+            or box["top"] < 0
+            or box["bottom"] > box["vh"]
+        ):
             problems.append(
                 f"{path} [{viewport['width']}px] tip #{i} ({box['text']!r}): "
                 f"x {box['left']:.0f}..{box['right']:.0f} y {box['top']:.0f}..{box['bottom']:.0f} "
