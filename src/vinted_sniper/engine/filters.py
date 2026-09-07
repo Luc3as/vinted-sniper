@@ -169,16 +169,27 @@ def matches(item: Item, query: Query) -> bool:
     return check(item, query) is None
 
 
-def _missing_keyword(item: Item, required: list[str]) -> str | None:
-    """The first required word that is not in the title. Every listed word must appear."""
+def missing_keyword_in_title(title: str, required: list[str]) -> str | None:
+    """The first required word that is not in the title. Every listed word must appear.
+
+    Public because a sweep needs this gate twice over: `SWEEP_GATES` deliberately leaves
+    it out (a sweep ranks on the title rather than eliminating on it), and the reporting
+    baseline in engine/sweep_report.py re-applies exactly this switched-off gate to the
+    candidates a sweep kept. Sharing the one implementation is what stops the baseline
+    from quietly disagreeing with the filter it is supposed to be measuring against.
+    """
     if not required:
         return None
-    haystack = item.title.lower()
+    haystack = title.lower()
     for word in required:
         candidate = word.strip().lower()
         if candidate and candidate not in haystack:
             return word
     return None
+
+
+def _missing_keyword(item: Item, required: list[str]) -> str | None:
+    return missing_keyword_in_title(item.title, required)
 
 
 @functools.lru_cache(maxsize=256)
