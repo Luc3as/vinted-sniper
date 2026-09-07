@@ -17,6 +17,10 @@ from vinted_sniper import i18n
 from vinted_sniper.i18n import Translator
 from vinted_sniper.vinted import urls
 
+# The width we want out of the thumbnail array. Vinted's ~310x430 variant is what the
+# AI cost model prices against, so the selector aims at it and takes the nearest match.
+THUMB_TARGET_WIDTH = 310
+
 
 class ParseError(ValueError):
     """A listing was missing something we cannot sensibly invent, such as its id."""
@@ -43,6 +47,11 @@ class Item(BaseModel):
     currency: str | None = None
 
     photo_url: str | None = None
+    # The small cover variant. The AI stages are billed by pixel area, so a sweep sends
+    # this one and never the full-size photo: a ~310x430 thumbnail costs roughly 180
+    # image tokens where an f800 costs about six times that. Falls back to photo_url
+    # when the response carries no thumbnail array.
+    thumb_url: str | None = None
     # Every photo of the listing in order, cover first. The search response carries the
     # full set, so a gallery costs no extra requests.
     photo_urls: tuple[str, ...] = ()
@@ -174,6 +183,7 @@ def parse_item(payload: dict[str, Any], tld: str, *, keep_raw: bool = False) -> 
         total_price=total_price,
         currency=currency or total_currency,
         photo_url=photo_url,
+        thumb_url=_thumb_url(photo) or photo_url,
         photo_urls=photo_urls,
         photo_ts=_coerce_int(_first(photo, "high_resolution.timestamp")),
         seller_login=_text(_first(user, "login")),
@@ -201,6 +211,39 @@ def _photo_urls(photos: Any, cover: str | None) -> tuple[str, ...]:
     if not urls_in_order and cover:
         urls_in_order.append(cover)
     return tuple(urls_in_order)
+
+
+def _thumb_url(photo: Any) -> str | None:
+    """Pick the photo variant closest to THUMB_TARGET_WIDTH out of ``photo['thumbnails']``.
+
+    Selection is numeric on purpose. Vinted names its variants (``thumb310x430`` and
+    friends) but renames them without warning, so matching a type string would break
+    silently; a width comparison keeps working across a rename and makes "send a bigger
+    variant for the top few" a one-constant change. Unusable entries are skipped and an
+    absent or entirely unusable array returns None, leaving the caller to fall back to
+    the full-size cover rather than sending the model nothing.
+    """
+    if not isinstance(photo, dict):
+        return None
+    thumbnails = photo.get("thumbnails")
+    if not isinstance(thumbnails, list):
+        return None
+
+    best_url: str | None = None
+    best_distance: int | None = None
+    for entry in thumbnails:
+        if not isinstance(entry, dict):
+            continue
+        url = _first(entry, "url")
+        if not isinstance(url, str) or not url:
+            continue
+        width = _coerce_int(entry.get("width"))
+        if width is None:
+            continue
+        distance = abs(width - THUMB_TARGET_WIDTH)
+        if best_distance is None or distance < best_distance:
+            best_url, best_distance = url, distance
+    return best_url
 
 
 def _coerce_int(value: Any) -> int | None:

@@ -165,3 +165,75 @@ def test_action_links_follow_the_country_site() -> None:
 
     assert item.message_url.startswith("https://www.vinted.co.uk/")
     assert item.buy_url.startswith("https://www.vinted.co.uk/")
+
+
+def thumbnails() -> list[dict[str, Any]]:
+    """The variant array as the catalog response carries it, smallest first."""
+    return [
+        {
+            "type": "thumb70x100",
+            "width": 70,
+            "height": 100,
+            "url": "https://images.vinted.net/70.jpeg",
+        },
+        {
+            "type": "thumb310x430",
+            "width": 310,
+            "height": 430,
+            "url": "https://images.vinted.net/310.jpeg",
+        },
+        {
+            "type": "thumb800x1120",
+            "width": 800,
+            "height": 1120,
+            "url": "https://images.vinted.net/800.jpeg",
+        },
+    ]
+
+
+def entry_with_thumbnails(variants: Any) -> dict[str, Any]:
+    entry = catalog_entry()
+    entry["photo"] = {**entry["photo"], "thumbnails": variants}
+    return entry
+
+
+def test_thumb_url_picks_the_variant_closest_to_the_target_width() -> None:
+    item = parse_item(entry_with_thumbnails(thumbnails()), "fr")
+
+    assert item.thumb_url == "https://images.vinted.net/310.jpeg"
+    assert item.photo_url == "https://images.vinted.net/full.jpeg"
+
+
+def test_thumb_url_takes_the_nearest_width_when_the_exact_size_is_absent() -> None:
+    variants = [v for v in thumbnails() if v["width"] != 310]
+    variants.append({"type": "thumbXL", "width": 364, "url": "https://images.vinted.net/364.jpeg"})
+
+    assert parse_item(entry_with_thumbnails(variants), "fr").thumb_url == (
+        "https://images.vinted.net/364.jpeg"
+    )
+
+
+def test_thumb_url_falls_back_to_the_full_photo_when_there_are_no_thumbnails() -> None:
+    item = parse_item(catalog_entry(), "fr")
+
+    assert item.thumb_url == item.photo_url == "https://images.vinted.net/full.jpeg"
+
+
+def test_malformed_thumbnail_entries_are_skipped_rather_than_raising() -> None:
+    variants: list[Any] = [
+        "https://images.vinted.net/bare-string.jpeg",
+        {"type": "thumb310x430", "url": "https://images.vinted.net/no-width.jpeg"},
+        {"width": 320, "url": None},
+        {"width": "310", "url": "https://images.vinted.net/string-width.jpeg"},
+    ]
+
+    assert parse_item(entry_with_thumbnails(variants), "fr").thumb_url == (
+        "https://images.vinted.net/string-width.jpeg"
+    )
+
+
+def test_an_entirely_unusable_thumbnail_array_falls_back_to_the_full_photo() -> None:
+    for variants in ([], ["nope", {"width": 310}, {"url": "https://x/y.jpeg"}], "not-a-list"):
+        item = parse_item(entry_with_thumbnails(variants), "fr")
+
+        assert item.thumb_url == "https://images.vinted.net/full.jpeg"
