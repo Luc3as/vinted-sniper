@@ -90,10 +90,11 @@ fit.
 
 ## How the verdict shows
 
-**Telegram.** A top line: `🔥 HOT DEAL · deal 87/100 · retail ~160 EUR · -60%` when the score
-is at least `ENRICHMENT_HIGHLIGHT_SCORE`; `🤖 …` otherwise; `💤 …` and no notification sound
-when the score is below `ENRICHMENT_SILENT_BELOW` or `matches_query` is false. Then the
-listing as usual, then "Looks like: …" and the verdict in italics.
+**Telegram.** The listing title leads, then the verdict block:
+`🔥 HOT DEAL · deal 87/100 · retail ~160 EUR · -60%` when the score is at least
+`ENRICHMENT_HIGHLIGHT_SCORE`; `🤖 …` otherwise; `💤 …` and no notification sound when the
+score is below `ENRICHMENT_SILENT_BELOW` or `matches_query` is false — followed by the
+verdict sentence and "Looks like: …" in italics, then the price and the other facts.
 
 **Discord.** A "🤖 Verdict" field on the embed.
 
@@ -207,10 +208,11 @@ ktorý už nie je uložený (mazané po `ITEM_RETENTION_DAYS`), `422` pre telo, 
 
 ## Ako sa verdikt zobrazí
 
-**Telegram.** Horný riadok: `🔥 HOT DEAL · deal 87/100 · retail ~160 EUR · -60%` pri skóre
-aspoň `ENRICHMENT_HIGHLIGHT_SCORE`; inak `🤖 …`; `💤 …` bez zvuku notifikácie pri skóre pod
-`ENRICHMENT_SILENT_BELOW` alebo pri `matches_query: false`. Potom inzerát ako obvykle, potom
-„Looks like: …" a verdikt kurzívou.
+**Telegram.** Najprv názov inzerátu, potom blok verdiktu:
+`🔥 HOT DEAL · deal 87/100 · retail ~160 EUR · -60%` pri skóre aspoň
+`ENRICHMENT_HIGHLIGHT_SCORE`; inak `🤖 …`; `💤 …` bez zvuku notifikácie pri skóre pod
+`ENRICHMENT_SILENT_BELOW` alebo pri `matches_query: false` — za ním veta verdiktu a
+„Looks like: …" kurzívou, potom cena a ostatné fakty.
 
 **Discord.** Pole „🤖 Verdict" na embede.
 
