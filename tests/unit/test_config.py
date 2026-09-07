@@ -60,3 +60,26 @@ def test_poll_interval_below_floor_is_rejected() -> None:
 def test_unknown_environment_keys_are_rejected() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, wat_is_this=True)  # type: ignore[call-arg]
+
+
+def test_sweep_defaults_are_bounded() -> None:
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.sweep_max_pages == 4
+    assert settings.sweep_max_items == 200
+
+
+def test_a_sweep_cannot_ask_for_zero_pages() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, sweep_max_pages=0)  # type: ignore[call-arg]
+
+
+def test_a_sweep_page_count_has_a_ceiling() -> None:
+    """Ten pages is already a lot of requests for one read; more is a typo, not a wish."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, sweep_max_pages=50)  # type: ignore[call-arg]
+
+
+def test_an_item_ceiling_below_the_page_count_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="SWEEP_MAX_ITEMS"):
+        Settings(_env_file=None, sweep_max_pages=4, sweep_max_items=2)  # type: ignore[call-arg]

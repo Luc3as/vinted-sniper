@@ -60,6 +60,20 @@ was found, so you can see the real delay yourself.
 | `ENRICHMENT_SILENT_BELOW` | `40` | Deal scores below this, or a verdict that the listing is not what was searched for, are delivered without a notification sound (Telegram). |
 | `OUTBOX_EXPIRY_MINUTES` | `60` | Discard notifications that could not be delivered within this window. |
 
+### Magic Search
+
+A sweep is a one-off look at stock already listed on Vinted, best matches first — separate
+from the searches that keep watching for new listings. These two settings bound how much one
+sweep reads before any of it reaches the AI.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SWEEP_MAX_PAGES` | `4` | How many pages of best-matching listings one sweep reads. Each page is one more request to Vinted, so raising this makes a sweep slower and heavier. |
+| `SWEEP_MAX_ITEMS` | `200` | The most listings one sweep will look at, counted before anything is sent to the AI. A hard stop: it wins over the page count. |
+
+`SWEEP_MAX_ITEMS` has to be at least `SWEEP_MAX_PAGES`, otherwise a sweep would stop before
+finishing even one page and asking for several pages would mean nothing.
+
 ### Telegram
 
 | Variable | Default | What it does |
@@ -297,6 +311,20 @@ nájdený, takže skutočné oneskorenie vidíš sám.
 | `ENRICHMENT_HIGHLIGHT_SCORE` | `75` | Deal skóre od tejto hodnoty dostane hlavičku hot deal. |
 | `ENRICHMENT_SILENT_BELOW` | `40` | Deal skóre pod touto hodnotou, alebo verdikt „nie je to, čo sa hľadalo", sa doručí bez zvuku notifikácie (Telegram). |
 | `OUTBOX_EXPIRY_MINUTES` | `60` | Zahoď notifikácie, ktoré sa nepodarilo doručiť v tomto okne. |
+
+### Magic Search
+
+Sweep je jednorazový pohľad na to, čo už na Vintede visí, od najlepšie sediacich inzerátov —
+oddelene od vyhľadávaní, ktoré stále striehnu na nové. Tieto dve nastavenia ohraničujú, koľko
+toho jeden sweep prečíta predtým, než sa čokoľvek z toho dostane k AI.
+
+| Premenná | Predvolené | Čo robí |
+|---|---|---|
+| `SWEEP_MAX_PAGES` | `4` | Koľko stránok najlepšie sediacich inzerátov jeden sweep prečíta. Každá stránka je ďalší request na Vinted, takže vyššia hodnota robí sweep pomalším a ťažším. |
+| `SWEEP_MAX_ITEMS` | `200` | Najviac inzerátov, na ktoré sa jeden sweep pozrie, počítané ešte predtým, než sa čokoľvek pošle AI. Tvrdý strop: prebíja počet stránok. |
+
+`SWEEP_MAX_ITEMS` musí byť aspoň `SWEEP_MAX_PAGES`, inak by sweep skončil skôr, než dočíta
+čo i len jednu stránku, a pýtať si viac stránok by nedávalo zmysel.
 
 ### Telegram
 

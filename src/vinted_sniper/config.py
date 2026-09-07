@@ -160,6 +160,22 @@ class Settings(BaseSettings):
         "platform allows it (Telegram).",
     )
 
+    # --- Magic Search ----------------------------------------------------------------
+    sweep_max_pages: int = Field(
+        default=4,
+        ge=1,
+        le=10,
+        description="How many pages of listings already on Vinted one sweep reads, best "
+        "matches first. More pages reach further back, but every page is another request.",
+    )
+    sweep_max_items: int = Field(
+        default=200,
+        ge=1,
+        le=2000,
+        description="The most listings one sweep will look at, counted before anything is "
+        "sent to the AI. A hard stop, whatever the page count would otherwise allow.",
+    )
+
     # --- Delivery ------------------------------------------------------------------
     outbox_expiry_minutes: int = Field(
         default=60,
@@ -241,6 +257,14 @@ class Settings(BaseSettings):
         if self.fetch_mode == "mock" and self.mock_scenario_dir is None:
             raise ValueError(
                 "VINTED_SNIPER_FETCH_MODE is 'mock' but VINTED_SNIPER_MOCK_SCENARIO_DIR is not set."
+            )
+        if self.sweep_max_items < self.sweep_max_pages:
+            # A ceiling smaller than the page count stops the sweep before it has read a
+            # single page through, which makes asking for several pages meaningless.
+            raise ValueError(
+                f"VINTED_SNIPER_SWEEP_MAX_ITEMS ({self.sweep_max_items}) is below "
+                f"VINTED_SNIPER_SWEEP_MAX_PAGES ({self.sweep_max_pages}); a sweep cannot "
+                "read fewer listings than the pages it is asked to fetch."
             )
         return self
 
