@@ -30,7 +30,7 @@ import time
 import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
 import structlog
@@ -241,7 +241,13 @@ async def run_sweep(
         sweep_id = await repo.create_sweep_run(
             tld=tld, params=params, keywords=keywords, query_id=query_id
         )
-    gates = gates_query if gates_query is not None else ephemeral_query(tld=tld, params=params)
+    gates = (
+        gates_query
+        if gates_query is not None
+        else ephemeral_query(
+            tld=tld, params=params, max_total_price=_price_cap(params.get("price_to"))
+        )
+    )
     run_log = log.bind(sweep_id=sweep_id, tld=tld)
 
     seen: set[int] = set()
@@ -688,6 +694,34 @@ def _to_candidate(ranked: RankedItem, position: int) -> SweepCandidate:
         seller_login=item.seller_login,
         promoted=item.promoted,
     )
+
+
+def _price_cap(price_to: str | None) -> Decimal | None:
+    """The `price_to` a search URL already carries, read as the gate's budget.
+
+    Vinted filters on the *asking* price; `filters._price` compares the *payable* one
+    (asking plus buyer protection), so feeding this through is what makes a price-capped
+    sweep report an honest `over_budget` count instead of a silent pass.
+
+    `run_sweep` never raises to its caller, so anything unreadable here — absent, empty,
+    or "abc" — means "no cap" rather than an exception.
+
+    Non-finite is rejected for the same reason, one step later: `Decimal("NaN")` parses
+    happily, but the `payable > cap` in `filters._price` then raises `InvalidOperation`
+    out of a gate that has no handler for it. A hand-edited URL should not be able to
+    take a sweep down that way.
+    """
+    if not price_to:
+        return None
+    try:
+        cap = Decimal(price_to)
+    except (InvalidOperation, ArithmeticError, ValueError, TypeError):
+        log.warning("sweep.price_cap_unreadable", price_to=price_to)
+        return None
+    if not cap.is_finite():
+        log.warning("sweep.price_cap_unreadable", price_to=price_to)
+        return None
+    return cap
 
 
 def ephemeral_query(

@@ -290,3 +290,111 @@ async def test_run_sweep_is_awaitable_without_a_session_manager(
     )
 
     assert result.status == "blocked"
+
+
+# --- The price cap the search URL already carries -------------------------------------
+
+
+async def test_a_price_capped_sweep_reports_what_the_cap_dropped(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """`price_to` in the params has to reach the gate, or the funnel is silently empty.
+
+    Vinted filters on the *asking* price and `filters._price` compares the *payable* one,
+    so item 2 — asking exactly the cap, 33.70 once buyer protection is on it — is a listing
+    the API happily returns and the gate is right to drop. That difference is the whole
+    reason the gate exists, and before this was wired the run reported `funnel == {}` and
+    the CLI printed no `Skipped:` block at all.
+    """
+    transport.queue_catalog(
+        [
+            make_item(1, photo_ts=PHOTO_TS, price="10.0"),
+            make_item(2, photo_ts=PHOTO_TS, price="30.0"),
+            make_item(3, photo_ts=PHOTO_TS, price="90.0"),
+        ]
+    )
+
+    result = await sweep_over(
+        transport,
+        repo,
+        db,
+        params={"search_text": "torrentshell", "price_to": "30"},
+    )
+
+    assert result.funnel == {"over_budget": 2}, "the cap is live, and says what it cost"
+    assert [c.item.item_id for c in result.candidates] == [1]
+    run = await repo.get_sweep_run(result.sweep_id)
+    assert run is not None
+    assert run.funnel == {"over_budget": 2}, "the per-reason counts are persisted too"
+
+
+async def test_an_unreadable_price_cap_means_no_cap_rather_than_a_crash(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """`run_sweep` never raises to its caller — `judge_sweep` is built on that.
+
+    A hand-edited URL can put anything in `price_to`; `Decimal("abc")` raises
+    `InvalidOperation`, which would come out of a function whose contract says it returns a
+    recorded result instead. Unreadable means "no cap".
+    """
+    transport.queue_catalog([make_item(1, photo_ts=PHOTO_TS, price="900.0")])
+
+    result = await sweep_over(
+        transport,
+        repo,
+        db,
+        params={"search_text": "torrentshell", "price_to": "abc"},
+    )
+
+    assert result.status == "ok"
+    assert result.funnel == {}, "nothing was capped"
+    assert [c.item.item_id for c in result.candidates] == [1]
+
+
+@pytest.mark.parametrize("raw", ["abc", "", "NaN", "Infinity", "-Infinity", "30,50"])
+async def test_no_hand_edited_price_cap_can_raise_out_of_a_sweep(
+    transport: ScriptedTransport,
+    repo: Repo,
+    db: Any,
+    make_item: Callable[..., dict[str, Any]],
+    raw: str,
+) -> None:
+    """Every unreadable shape has to land on "no cap", including the ones that parse.
+
+    `Decimal("NaN")` is the nasty one: it constructs without complaint and only blows up
+    at the `payable > cap` comparison inside `filters._price`, one layer below anything
+    that could catch it. `-Infinity` is the mirror image — it compares fine and would
+    silently drop every listing a sweep read.
+    """
+    transport.queue_catalog([make_item(1, photo_ts=PHOTO_TS, price="900.0")])
+
+    result = await sweep_over(
+        transport, repo, db, params={"search_text": "torrentshell", "price_to": raw}
+    )
+
+    assert result.status == "ok"
+    assert result.funnel == {}
+    assert [c.item.item_id for c in result.candidates] == [1]
+
+
+async def test_an_explicit_gates_query_still_wins_over_the_params_cap(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """The `gates_query` seam is for callers who own their limits; `price_to` must not leak in."""
+    transport.queue_catalog([make_item(1, photo_ts=PHOTO_TS, price="90.0")])
+    client, sessions = client_for(transport, db)
+
+    result = await sweep.run_sweep(
+        tld="fr",
+        params={"search_text": "torrentshell", "price_to": "30"},
+        keywords=KEYWORDS,
+        client=client,
+        repo=repo,
+        max_pages=1,
+        max_items=10,
+        gates_query=sweep.ephemeral_query(tld="fr"),
+        sessions=sessions,
+    )
+
+    assert result.funnel == {}, "the caller's own gates said nothing about price"
+    assert [c.item.item_id for c in result.candidates] == [1]
