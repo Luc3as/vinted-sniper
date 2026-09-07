@@ -1470,6 +1470,17 @@ class Repo:
         )
         return [self._to_sweep_run(row) for row in rows]
 
+    async def attach_sweep_to_query(self, sweep_id: int, query_id: int) -> None:
+        """Record that a sweep was promoted into a standing watch.
+
+        The only writer of `sweep_runs.query_id`, which is None until this runs. Nothing
+        else on the row changes: what the sweep read and cost stays exactly as it finished,
+        and only the watch it turned into is added.
+        """
+        await self._db.execute(
+            "UPDATE sweep_runs SET query_id = ? WHERE id = ?", (query_id, sweep_id)
+        )
+
     async def sweep_candidates(self, sweep_id: int) -> list[SweepCandidate]:
         """Best first, which is the only order a sweep result is ever read in."""
         rows = await self._db.fetch_all(

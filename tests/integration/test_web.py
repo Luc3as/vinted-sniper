@@ -28,6 +28,7 @@ from vinted_sniper.magic.client import MapperClient
 from vinted_sniper.magic.models import TriageBatch, TriageItem
 from vinted_sniper.magic.triage import TriageClient
 from vinted_sniper.magic.verdict import VerdictClient
+from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.client import PER_PAGE, VintedClient
 from vinted_sniper.vinted.models import parse_item
 from vinted_sniper.vinted.session import SessionManager
@@ -1670,3 +1671,153 @@ def test_a_sweep_without_the_params_it_needs_is_refused_by_shape(
 
     assert response.status_code == 422
     assert launcher.pending == []
+
+
+# --- Turning a sweep into a standing watch ---------------------------------------------
+#
+# The last step of the Magic Search story. What matters is that the row it leaves behind is
+# an ordinary watch — same canonical URL, same params — and that the title rules land as
+# gates on that watch rather than as filters on the search.
+
+
+WATCH_BODY = {
+    "params": {
+        "catalog_ids": "1206",
+        "brand_ids": "7",
+        "size_ids": "207,208",
+        "price_to": "120",
+        "search_text": "torrentshell",
+        "order": "newest_first",
+    },
+    "tld": "sk",
+    "watch_hints": {"required_keywords": ["torrentshell"], "title_pattern": "(?i)torrentshell"},
+}
+
+
+def test_creating_a_watch_needs_a_login(client: TestClient) -> None:
+    response = client.post("/api/magic-search/watch", json=WATCH_BODY)
+
+    assert response.status_code == 401
+
+
+async def test_a_sweep_becomes_a_watch_with_its_title_rules_as_gates_not_filters(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """R003: `watch_hints` gate the saved watch and never reach its search parameters."""
+    sweep_id = await repo.create_sweep_run(
+        tld="sk", params=dict(WATCH_BODY["params"]), keywords=["torrentshell"]
+    )
+
+    response = signed_in.post("/api/magic-search/watch", json={**WATCH_BODY, "sweep_id": sweep_id})
+
+    assert response.status_code == 201
+    query = await repo.get_query(response.json()["query_id"])
+    assert query is not None
+    assert query.required_keywords == ["torrentshell"]
+    assert query.title_pattern == "(?i)torrentshell"
+    assert "required_keywords" not in query.params
+    assert "title_pattern" not in query.params
+    # The params are exactly what was swept — no hint arrived under any name.
+    assert query.params == WATCH_BODY["params"]
+    assert "(?i)torrentshell" not in json.dumps(query.params)
+
+
+async def test_a_watch_made_from_a_sweep_is_the_same_row_a_paste_would_make(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """'Indistinguishable in the queries table' — so a paste of it is refused as a dupe."""
+    created = signed_in.post("/api/magic-search/watch", json=WATCH_BODY)
+    query = await repo.get_query(created.json()["query_id"])
+    assert query is not None
+
+    pasted = signed_in.post("/searches", data={"url": query.url}, follow_redirects=False)
+
+    assert "already+being+watched" in pasted.headers["location"].replace("%20", "+")
+    # The URL is canonical on its own terms and its params agree with it, which is what
+    # makes the collision above possible at all.
+    assert query.url == urls.normalise_search_url(query.url)
+    assert urls.parse_search_params(query.url) == query.params
+    assert query.params["order"] == "newest_first"
+
+
+async def test_the_sweep_row_learns_which_watch_it_became(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    sweep_id = await repo.create_sweep_run(tld="sk", params={"catalog_ids": "1206"}, keywords=[])
+    assert (await repo.get_sweep_run(sweep_id)) is not None
+    assert (await repo.get_sweep_run(sweep_id)).query_id is None  # type: ignore[union-attr]
+
+    response = signed_in.post("/api/magic-search/watch", json={**WATCH_BODY, "sweep_id": sweep_id})
+
+    run = await repo.get_sweep_run(sweep_id)
+    assert run is not None
+    assert run.query_id == response.json()["query_id"]
+
+
+async def test_a_watch_can_be_created_without_a_sweep_behind_it(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """Promoting straight off the confirmation screen, before anyone paid for a sweep."""
+    body = {k: v for k, v in WATCH_BODY.items() if k != "watch_hints"}
+
+    response = signed_in.post("/api/magic-search/watch", json=body)
+
+    assert response.status_code == 201
+    query = await repo.get_query(response.json()["query_id"])
+    assert query is not None
+    assert query.required_keywords == []
+    assert query.title_pattern is None
+
+
+async def test_a_blank_name_is_filled_in_from_what_was_searched_for(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    response = signed_in.post("/api/magic-search/watch", json=WATCH_BODY)
+
+    query = await repo.get_query(response.json()["query_id"])
+    assert query is not None
+    assert query.name == "torrentshell (sk)"
+
+
+async def test_watching_the_same_search_twice_is_refused_in_plain_words(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    first = signed_in.post("/api/magic-search/watch", json=WATCH_BODY)
+    assert first.status_code == 201
+
+    second = signed_in.post("/api/magic-search/watch", json=WATCH_BODY)
+
+    assert second.status_code == 409
+    assert second.json()["error"] == "that search is already being watched"
+    assert len(await repo.list_queries()) == 1
+
+
+async def test_a_title_pattern_that_does_not_compile_is_refused_with_the_reason(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    response = signed_in.post(
+        "/api/magic-search/watch",
+        json={**WATCH_BODY, "watch_hints": {"required_keywords": [], "title_pattern": "(unclosed"}},
+    )
+
+    assert response.status_code == 422
+    assert "does not compile" in response.json()["error"]
+    assert await repo.list_queries() == []
+
+
+async def test_params_with_no_filter_on_them_are_refused_before_anything_is_saved(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    response = signed_in.post(
+        "/api/magic-search/watch", json={**WATCH_BODY, "params": {"order": "newest_first"}}
+    )
+
+    assert response.status_code == 422
+    assert "no search filters" in response.json()["error"]
+    assert await repo.list_queries() == []
+
+
+def test_watching_on_an_unknown_country_site_is_refused(signed_in: TestClient) -> None:
+    response = signed_in.post("/api/magic-search/watch", json={**WATCH_BODY, "tld": "xx"})
+
+    assert response.status_code == 404

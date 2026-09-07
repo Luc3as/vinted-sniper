@@ -96,3 +96,55 @@ def test_deep_links_stay_on_the_search_country_site_and_resolve() -> None:
     assert urls.message_seller_url("de", 42) == "https://www.vinted.de/items/42"
     assert urls.buy_url("de", 42) == "https://www.vinted.de/items/42"
     assert urls.member_url("de", 7) == "https://www.vinted.de/member/7"
+
+
+# --- Params back into a URL -----------------------------------------------------------
+#
+# The direction Magic Search needs: it produces parameters without anyone ever pasting a
+# URL, but a standing watch is keyed on its canonical URL. What matters is that the two
+# directions agree, so a swept watch and a pasted one collide on duplicates.
+
+
+def test_params_round_trip_through_a_built_url() -> None:
+    params = {
+        "catalog_ids": "1206",
+        "brand_ids": "7",
+        "size_ids": "207,208,209",
+        "price_to": "120",
+        "currency": "EUR",
+        "search_text": "torrentshell",
+        "order": "newest_first",
+    }
+
+    built = urls.build_search_url("sk", params)
+
+    assert urls.parse_search_params(built) == params
+    # Comma-joined id lists must survive as commas: %2C would be read back as one id.
+    assert "size_ids=207,208,209" in built
+
+
+def test_a_built_url_is_already_canonical() -> None:
+    """Built once and pasted back gives the same string, which is what dedup relies on."""
+    built = urls.build_search_url("fr", {"search_text": "nike air", "price_to": "30"})
+
+    assert urls.normalise_search_url(built) == built
+    assert built.startswith("https://www.vinted.fr/catalog?")
+    assert "%2B" not in built, "a re-encoded plus turns the search into a literal '+'"
+
+
+def test_a_built_url_still_asks_for_the_newest_first() -> None:
+    """The poller's dedup reads 'what appeared since last time', so the order is pinned."""
+    built = urls.build_search_url("de", {"catalog_ids": "1206"})
+
+    assert "order=newest_first" in built
+    assert urls.parse_search_params(built)["order"] == "newest_first"
+
+
+def test_building_for_an_unknown_country_site_is_refused() -> None:
+    with pytest.raises(urls.InvalidSearchURLError, match="not a Vinted country site"):
+        urls.build_search_url("xx", {"search_text": "nike"})
+
+
+def test_building_from_nothing_but_an_order_is_refused() -> None:
+    with pytest.raises(urls.InvalidSearchURLError, match="no search filters"):
+        urls.build_search_url("fr", {"order": "newest_first"})

@@ -43,6 +43,7 @@ from vinted_sniper.enrichment import Enrichment, EnrichmentIn
 from vinted_sniper.log import get_logger
 from vinted_sniper.magic.client import MapperClient
 from vinted_sniper.magic.errors import MappingError
+from vinted_sniper.magic.models import WatchHints
 from vinted_sniper.magic.triage import TriageClient
 from vinted_sniper.magic.validate import validate
 from vinted_sniper.magic.verdict import VerdictClient
@@ -110,6 +111,26 @@ class SweepLaunchIn(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)
     max_pages: int | None = Field(default=None, ge=1)
     max_items: int | None = Field(default=None, ge=1)
+
+
+class WatchCreateIn(BaseModel):
+    """A swept search, posted back to become a standing watch.
+
+    `watch_hints` is a field of its own rather than more keys in `params` for the reason
+    `/api/magic-search/map` returned it that way: those are title rules a saved watch
+    applies after Vinted answers, and folding them into the search request would narrow the
+    very stock the sweep exists to see (R003).
+
+    `sweep_id` is optional because a mapping can be promoted straight from the confirmation
+    screen without anyone paying for a sweep first; when it is given, the run row is marked
+    with the watch it became.
+    """
+
+    params: dict[str, str]
+    tld: str = Field(min_length=2, max_length=8)
+    name: str = Field(default="", max_length=200)
+    watch_hints: WatchHints = Field(default_factory=WatchHints)
+    sweep_id: int | None = Field(default=None, ge=1)
 
 
 async def _run_magic_sweep(
@@ -842,6 +863,49 @@ def create_app(
         )
         start_sweep_task(run())
         return JSONResponse({"sweep_id": sweep_id}, status_code=202)
+
+    @app.post("/api/magic-search/watch")
+    async def magic_search_watch(body: WatchCreateIn, _: None = guard) -> JSONResponse:
+        """Promote a mapped (and usually swept) search into a standing watch.
+
+        The end of the Magic Search story: from here on the ordinary poller owns it, so
+        what lands in `queries` has to be indistinguishable from a pasted URL. That is why
+        the params are re-read out of the canonical URL rather than stored as posted — the
+        URL is the uniqueness key, and a row whose params disagreed with its own URL would
+        be a watch nobody could have created by pasting.
+        """
+        tld = _known_tld(body.tld)
+        try:
+            url = urls.build_search_url(tld, body.params)
+        except urls.InvalidSearchURLError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=422)
+
+        if await repo.find_query_by_url(url) is not None:
+            # The same wording `POST /searches` uses, because it is the same situation.
+            return JSONResponse({"error": "that search is already being watched"}, status_code=409)
+
+        title_pattern = (body.watch_hints.title_pattern or "").strip()
+        if title_pattern and (problem := filters.validate_pattern(title_pattern)):
+            return JSONResponse(
+                {"error": f"title pattern does not compile: {problem}"}, status_code=422
+            )
+
+        params = urls.parse_search_params(url)
+        query_id = await repo.add_query(
+            name=body.name.strip() or _name_from(params, tld),
+            url=url,
+            tld=tld,
+            params=params,
+            poll_interval_s=max(settings.poll_default_interval_s, MIN_POLL_INTERVAL_S),
+            # The hints become gates on the watch and nothing else — they are deliberately
+            # absent from `params` above.
+            required_keywords=[word for word in body.watch_hints.required_keywords if word.strip()],
+            title_pattern=title_pattern or None,
+        )
+        if body.sweep_id is not None:
+            await repo.attach_sweep_to_query(body.sweep_id, query_id)
+        log.info("magic.watch_created", sweep_id=body.sweep_id, query_id=query_id)
+        return JSONResponse({"query_id": query_id}, status_code=201)
 
     # --- Destinations --------------------------------------------------------------
 

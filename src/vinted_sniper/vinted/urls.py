@@ -143,6 +143,26 @@ def normalise_search_url(url: str) -> str:
     return f"https://www.vinted.{tld}/catalog?{query}"
 
 
+def build_search_url(tld: str, params: dict[str, str]) -> str:
+    """The other direction: a params dict back into a canonical search URL.
+
+    Magic Search produces parameters without a URL ever existing — nobody pasted one — but
+    a standing watch is keyed on its canonical URL, so promoting a sweep needs this way
+    round. The result is handed straight to `normalise_search_url()` rather than returned
+    as built, so a watch created from a sweep and one created from a paste land on exactly
+    the same string and the duplicate check between them actually works.
+
+    `safe="+,"` keeps comma-joined id lists (`size_ids=207,208`) and the site's own
+    encoding of spaces intact; every key `MappedQuery.to_params()` emits is recognised by
+    `parse_search_params()`, so this round-trips.
+
+    Raises `InvalidSearchURLError` for an unknown country site, or for params that carry no
+    filter at all — both via the canonicaliser, so the wording matches the paste path.
+    """
+    query = urlencode(sorted(params.items()), safe="+,")
+    return normalise_search_url(f"https://www.vinted.{tld}/catalog?{query}")
+
+
 def catalog_endpoint(tld: str) -> str:
     return f"https://www.vinted.{tld}/api/v2/catalog/items"
 
