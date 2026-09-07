@@ -71,7 +71,7 @@ turns a sentence like "men's Patagonia jacket size M under 60 eur" into search f
 |---|---|---|
 | `SWEEP_MAX_PAGES` | `4` | How many pages of best-matching listings one sweep reads. Each page is one more request to Vinted, so raising this makes a sweep slower and heavier. |
 | `SWEEP_MAX_ITEMS` | `200` | The most listings one sweep will look at, counted before anything is sent to the AI. A hard stop: it wins over the page count. |
-| `MAGIC_WEBHOOK_URL` | unset | The n8n flow that turns plain words into the filters a search needs. Leave it unset and Magic Search stays off — the endpoint says so plainly instead of guessing. |
+| `MAGIC_WEBHOOK_URL` | unset | The n8n flow that turns plain words into the filters a search needs. Leave it unset and Magic Search stays off — the endpoint says so plainly instead of guessing. See [magic-search.md](magic-search.md). |
 | `MAGIC_WEBHOOK_TOKEN` | unset | Sent to that flow as a bearer token, so a stranger who finds the URL cannot use it. Set it only if the flow asks for one. |
 | `MAGIC_TIMEOUT_S` | `30` | How long to wait for the flow to answer before giving up. An AI reading a sentence takes a few seconds; a minute means something is wrong. |
 
@@ -350,7 +350,7 @@ filtre vyhľadávania.
 |---|---|---|
 | `SWEEP_MAX_PAGES` | `4` | Koľko stránok najlepšie sediacich inzerátov jeden sweep prečíta. Každá stránka je ďalší request na Vinted, takže vyššia hodnota robí sweep pomalším a ťažším. |
 | `SWEEP_MAX_ITEMS` | `200` | Najviac inzerátov, na ktoré sa jeden sweep pozrie, počítané ešte predtým, než sa čokoľvek pošle AI. Tvrdý strop: prebíja počet stránok. |
-| `MAGIC_WEBHOOK_URL` | nenastavené | n8n flow, ktorý z bežných slov spraví filtre, aké vyhľadávanie potrebuje. Keď ho nenastavíš, Magic Search je vypnutý — endpoint to rovno povie namiesto hádania. |
+| `MAGIC_WEBHOOK_URL` | nenastavené | n8n flow, ktorý z bežných slov spraví filtre, aké vyhľadávanie potrebuje. Keď ho nenastavíš, Magic Search je vypnutý — endpoint to rovno povie namiesto hádania. Pozri [magic-search.md](magic-search.md). |
 | `MAGIC_WEBHOOK_TOKEN` | nenastavené | Posiela sa tomu flowu ako bearer token, aby ho cudzí človek, ktorý natrafí na URL, nemohol používať. Nastav ho len vtedy, ak si ho flow pýta. |
 | `MAGIC_TIMEOUT_S` | `30` | Ako dlho čakať na odpoveď flowu, kým to vzdáme. AI prečíta vetu za pár sekúnd; minúta znamená, že je niečo zle. |
 

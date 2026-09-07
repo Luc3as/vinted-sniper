@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from vinted_sniper.cli import build_parser
 from vinted_sniper.config import Settings
+from vinted_sniper.magic.models import MappedQuery, WatchHints
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DOC = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+MAGIC_DOC = (ROOT / "docs" / "magic-search.md").read_text(encoding="utf-8")
 ENV_EXAMPLE = (ROOT / ".env.example").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 
@@ -77,3 +82,40 @@ def test_the_readme_does_not_promise_buying() -> None:
         or "does not log into your" in lowered
         or "never logs in, buys" in lowered
     )
+
+
+def _english_half(doc: str) -> str:
+    """Everything before the Slovak anchor. The examples only need checking once."""
+    return doc.split('<a name="slovensky">', maxsplit=1)[0]
+
+
+def _json_blocks(doc: str) -> list[Any]:
+    return [json.loads(block) for block in re.findall(r"```json\n(.*?)```", doc, re.S)]
+
+
+@pytest.mark.parametrize(
+    "field", sorted(set(MappedQuery.model_fields) | set(WatchHints.model_fields))
+)
+def test_the_mapper_contract_documents_every_field(field: str) -> None:
+    """docs/magic-search.md is the interface the n8n flow is built against.
+
+    A field that exists in the model but is missing from the page is a field the flow
+    author never learns about — which, since every field is optional, fails silently.
+    """
+    assert field in MAGIC_DOC, (
+        f"{field} exists in MappedQuery but is missing from docs/magic-search.md"
+    )
+
+
+def test_the_documented_worked_example_is_a_valid_answer() -> None:
+    """The example answer must parse, and must produce the params printed beside it."""
+    blocks = _json_blocks(_english_half(MAGIC_DOC))
+    answers = [b for b in blocks if isinstance(b, dict) and "catalog" in b]
+    responses = [b for b in blocks if isinstance(b, dict) and "params" in b]
+
+    assert answers and responses, "the worked example lost its request or its answer"
+
+    mapped = MappedQuery.model_validate(answers[0])
+
+    assert mapped.to_params() == responses[0]["params"]
+    assert responses[0]["labels"]["catalog"] == answers[0]["catalog"]["name"]
