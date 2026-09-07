@@ -19,7 +19,7 @@
 <section id="recent">
   <div class="section-head">
     <h2>{{ icon('sparkle') }}Found</h2>
-    <span class="lede">The latest listings any search recorded. Badges: <span class="tag drop">📉 dropped</span> price fell since found · <span class="tag score">🤖 87</span> agent’s deal score (hover for its one-line verdict).</span>
+    <span class="lede">The latest listings any search recorded. Hover a badge on a card for what it means.</span>
   </div>
   {% if not recent %}
   <div class="card"><div class="empty"><strong>Nothing recorded yet.</strong> The first check of each search will fill this in.
@@ -56,10 +56,10 @@
           {% else %}
           <span class="total">{{ row.price or '—' }}</span>
           {% endif %}
-          {% if row.price_dropped %}<span class="tag drop">📉 dropped</span>{% endif %}
+          {% if row.price_dropped %}<span class="tag drop" data-tip="The price fell after this listing was first seen.">📉 dropped</span>{% endif %}
           {% if row.deal_score is not none %}
           <span class="tag score {{ 'hot' if row.deal_score >= 75 else ('cold' if row.deal_score < 40 else '') }}"
-                {% if row.verdict %}data-tip="{{ row.verdict }}"{% endif %}>🤖 {{ row.deal_score }}</span>
+                data-tip="{{ row.verdict or 'The agent’s deal score, 0–100 — higher is a better deal.' }}">🤖 {{ row.deal_score }}</span>
           {% endif %}
           {% if row.total_price and row.price %}
           <span class="base" data-tip="The seller’s asking price, before the buyer-protection fee.">{{ row.price }} + fee</span>

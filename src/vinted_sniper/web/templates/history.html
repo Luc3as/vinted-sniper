@@ -13,7 +13,7 @@
 <section>
   <div class="section-head">
     <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>Delivery history</h2>
-    <span class="lede">Every alert, newest first: what it was, where it went, and whether it got there. The answer to “did my alert go out?”.</span>
+    <span class="lede">Every alert, newest first — what it was, where it went, and whether it arrived.</span>
   </div>
   <div class="card">
     <form method="get" action="/history" class="row" style="gap:.6rem">
@@ -31,7 +31,7 @@
         {% endfor %}
       </select>
       <button class="quiet" type="submit">Filter</button>
-      <span class="muted">Last 200. <span class="pill sent">sent</span> delivered · <span class="pill pending">pending</span> waiting (paired? quiet hours? held for a verdict?) · <span class="pill failed">failed</span> gave up, reason shown · <span class="pill cancelled">cancelled</span> expired or discarded on purpose.</span>
+      <span class="muted">Last 200 shown.</span>
     </form>
   </div>
 
@@ -51,7 +51,7 @@
           <div class="muted">
             {% if row.price %}{{ row.price }}{% endif %}
             {% if row.previous_price %}<span class="tag drop">📉 was {{ row.previous_price }}</span>{% endif %}
-            {% if row.score is not none %}<span class="tag score {{ 'hot' if row.score >= 75 else ('cold' if row.score < 40 else '') }}">🤖 {{ row.score }}</span>{% endif %}
+            {% if row.score is not none %}<span class="tag score {{ 'hot' if row.score >= 75 else ('cold' if row.score < 40 else '') }}" data-tip="The agent’s deal score, 0–100 — higher is a better deal.">🤖 {{ row.score }}</span>{% endif %}
           </div>
         </td>
         <td class="muted">{{ row.kind.replace('_', ' ') }}</td>
@@ -68,6 +68,12 @@
       {% endfor %}
     </table>
     </div>
+  </div>
+  <div class="legend">
+    <span><span class="pill sent">sent</span> delivered</span>
+    <span><span class="pill pending">pending</span> waiting — pairing, quiet hours, or held for a verdict</span>
+    <span><span class="pill failed">failed</span> gave up, reason shown in the row</span>
+    <span><span class="pill cancelled">cancelled</span> expired or discarded on purpose</span>
   </div>
   {% endif %}
 </section>
