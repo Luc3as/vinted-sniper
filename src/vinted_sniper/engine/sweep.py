@@ -12,20 +12,44 @@ gets stored.
 What does eliminate a listing is a real constraint — banned words, budget, condition,
 seller — which is exactly the subset `filters.SWEEP_GATES` runs.
 
-Everything in this module is pure: it takes parsed listings and returns a ranking. No HTTP,
-no database, no asyncio. `engine/dedup.py` is deliberately not used — its freshness window
-is newest-first semantics and would discard nearly all of an existing-stock sweep.
+`funnel()` and everything under it is pure: parsed listings in, a ranking out. `run_sweep()`
+is the one impure thing here — it pages the API in relevance order, funnels what it read and
+writes the result to the sweep tables. `engine/dedup.py` is deliberately not used — its
+freshness window is newest-first semantics and would discard nearly all of an existing-stock
+sweep.
 """
 
 from __future__ import annotations
 
+import time
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
-from vinted_sniper.db.repo import Query
+import structlog
+
+from vinted_sniper.db.repo import Query, Repo, SweepCandidate
 from vinted_sniper.engine import filters
+from vinted_sniper.log import get_logger
+from vinted_sniper.vinted.client import PER_PAGE, VintedClient
+from vinted_sniper.vinted.errors import (
+    AuthExpiredError,
+    BlockedError,
+    MalformedResponseError,
+    NetworkError,
+    RateLimitedError,
+    VintedError,
+)
 from vinted_sniper.vinted.models import Item
+from vinted_sniper.vinted.session import SessionManager
+
+log = get_logger(__name__)
+
+# How long a sweep holds the whole site after a refusal. The poller scales its backoff by
+# the search's poll interval; a sweep has no interval to scale, so it takes a flat middle
+# figure — long enough to be a real hold, short enough that one refused sweep does not
+# silence the standing pollers for the rest of the hour.
+BLOCKED_COOLDOWN_S = 300.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +71,14 @@ class SweepResult:
     funnel: dict[str, int] = field(default_factory=dict)
     # Best match first. See funnel() for the ordering.
     candidates: list[RankedItem] = field(default_factory=list)
+    # The sweep_runs row this result was written to, or 0 for a funnel() call that never
+    # touched the database.
+    sweep_id: int = 0
+    # "ok", "partial" (an error cut the paging short) or "blocked". A sweep that stopped
+    # early still returns whatever it managed to read; the status says not to read the
+    # counts as a complete picture.
+    status: str = "ok"
+    error: str | None = None
 
 
 def score_title(title: str, keywords: list[str]) -> float:
@@ -94,6 +126,163 @@ def funnel(
         items_seen=len(items),
         funnel=drops,
         candidates=survivors[:max_items] if max_items >= 0 else survivors,
+    )
+
+
+async def run_sweep(
+    *,
+    tld: str,
+    params: dict[str, str],
+    keywords: list[str],
+    client: VintedClient,
+    repo: Repo,
+    max_pages: int,
+    max_items: int,
+    query_id: int | None = None,
+    gates_query: Query | None = None,
+    sessions: SessionManager | None = None,
+) -> SweepResult:
+    """Read up to `max_pages` of existing stock in relevance order and store the best of it.
+
+    The relevance ordering is a per-request override and nothing more: `order=relevance`
+    goes into the dict handed to `VintedClient.search()`, which passes unknown keys straight
+    through. The caller's `params` — usually a stored search's — is never mutated, and the
+    canonical stored URL keeps saying `newest_first`, because that is what the standing
+    poller's "only what appeared since last time" semantics are built on.
+
+    Paging stops at the first of three things: the page ceiling, a short page (Vinted asks
+    for 96 at a time and `_parse_catalog` drops the pagination block, so a short page is the
+    only "that was the end" signal available), or the item ceiling that caps what the later
+    AI stages will be asked to look at.
+
+    A sweep that dies partway is a recorded result, not an exception. Whatever pages already
+    succeeded are funnelled and stored, the run is closed with `status='partial'` (or
+    `'blocked'`), and no Vinted error escapes to the caller — a one-shot read failing is not
+    a reason to take down whoever asked for it.
+    """
+    sweep_id = await repo.create_sweep_run(
+        tld=tld, params=params, keywords=keywords, query_id=query_id
+    )
+    gates = gates_query if gates_query is not None else ephemeral_query(tld=tld, params=params)
+    run_log = log.bind(sweep_id=sweep_id, tld=tld)
+
+    seen: set[int] = set()
+    collected: list[Item] = []
+    pages_fetched = 0
+    status = "ok"
+    error: str | None = None
+
+    for page in range(1, max_pages + 1):
+        # Built fresh every iteration: `params` may be a stored query's own dict, and a
+        # sweep must not leave `order=relevance` behind in it.
+        request = {**params, "order": "relevance", "page": str(page)}
+        try:
+            items = await client.search(tld, request)
+        except BlockedError as exc:
+            status, error = "blocked", str(exc)
+            await _hold_site(tld, sessions=sessions, repo=repo, run_log=run_log, error=error)
+            break
+        except (AuthExpiredError, RateLimitedError, MalformedResponseError, NetworkError) as exc:
+            # No retrying here, deliberately. The poller retries because it has to keep
+            # watching; a sweep is one-shot, and the honest answer to "the site would not
+            # talk to me" is a partial result the caller can re-run.
+            status, error = "partial", str(exc)
+            run_log.warning("sweep.failed", page=page, error=error, kind=type(exc).__name__)
+            break
+        except VintedError as exc:  # pragma: no cover - future error types land here
+            status, error = "partial", str(exc)
+            run_log.warning("sweep.failed", page=page, error=error, kind=type(exc).__name__)
+            break
+
+        pages_fetched += 1
+        for item in items:
+            # Relevance paging is not a stable window: the same listing can appear on two
+            # consecutive pages as the ranking shifts under us.
+            if item.item_id not in seen:
+                seen.add(item.item_id)
+                collected.append(item)
+        run_log.info("sweep.page", page=page, returned=len(items), total=len(collected))
+
+        if len(items) < PER_PAGE:
+            break
+        if len(collected) >= max_items:
+            break
+
+    result = funnel(collected, gates, keywords, max_items=max_items)
+    stored = [_to_candidate(ranked, pos) for pos, ranked in enumerate(result.candidates)]
+    await repo.record_sweep_candidates(sweep_id, stored)
+    await repo.finish_sweep_run(
+        sweep_id,
+        status=status,
+        pages_fetched=pages_fetched,
+        items_seen=result.items_seen,
+        candidates=len(stored),
+        funnel=result.funnel,
+        error=error,
+    )
+    run_log.info(
+        "sweep.finished",
+        status=status,
+        pages=pages_fetched,
+        items_seen=result.items_seen,
+        candidates=len(stored),
+    )
+    return replace(
+        result,
+        pages_fetched=pages_fetched,
+        sweep_id=sweep_id,
+        status=status,
+        error=error,
+    )
+
+
+async def _hold_site(
+    tld: str,
+    *,
+    sessions: SessionManager | None,
+    repo: Repo,
+    run_log: structlog.stdlib.BoundLogger,
+    error: str,
+) -> None:
+    """Leave the shared site cooldown exactly as a refused poller would leave it.
+
+    A sweep and the standing pollers share one address and one cooldown gate. If a sweep
+    could be refused without closing that gate, every poller on the site would carry on
+    asking straight through the refusal — so this mirrors `Poller.tick`'s BlockedError arm:
+    drop the session, close the gate, and write the deadline down so a restart still knows
+    about it.
+    """
+    if sessions is None:
+        run_log.warning("sweep.blocked", error=error, cooldown_applied=False)
+        return
+    await sessions.discard_blocked(tld)
+    sessions.cooldown.close(tld, BLOCKED_COOLDOWN_S)
+    await repo.set_state_value(f"cooldown_until:{tld}", str(int(time.time() + BLOCKED_COOLDOWN_S)))
+    run_log.warning(
+        "sweep.blocked", error=error, cooldown_applied=True, retry_in_s=round(BLOCKED_COOLDOWN_S)
+    )
+
+
+def _to_candidate(ranked: RankedItem, position: int) -> SweepCandidate:
+    """Copy enough of a listing into the sweep tables to show it without re-fetching."""
+    item = ranked.item
+    return SweepCandidate(
+        item_id=item.item_id,
+        title=item.title,
+        url=item.url,
+        rank_score=ranked.rank_score,
+        position=position,
+        stage="funnel",
+        price=float(item.price) if item.price is not None else None,
+        total_price=float(item.total_price) if item.total_price is not None else None,
+        currency=item.currency,
+        brand=item.brand,
+        size=item.size,
+        condition=item.condition,
+        photo_url=item.photo_url,
+        photo_urls=list(item.photo_urls),
+        seller_login=item.seller_login,
+        promoted=item.promoted,
     )
 
 
