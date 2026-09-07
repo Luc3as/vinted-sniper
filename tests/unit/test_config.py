@@ -104,3 +104,50 @@ def test_the_mapper_token_does_not_leak_through_repr() -> None:
 
     assert settings.magic_webhook_token is not None
     assert "n8n-s3cret" not in repr(settings)
+
+
+def test_the_judging_stages_are_off_until_their_flows_are_named() -> None:
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.magic_triage_webhook_url is None
+    assert settings.magic_verdict_webhook_url is None
+    assert settings.sweep_triage_batch == 20
+    assert settings.sweep_max_verdicts == 3
+    assert settings.magic_cost_per_mtok_in == 1.0
+    assert settings.magic_cost_per_mtok_out == 5.0
+
+
+def test_a_verdict_flow_without_a_photo_check_is_rejected() -> None:
+    """Verdicts are picked from what triage ranked, so alone it has nothing to pick from."""
+    with pytest.raises(ValidationError, match="MAGIC_TRIAGE_WEBHOOK_URL"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            magic_verdict_webhook_url="https://n8n.example/webhook/verdict",
+        )
+
+
+def test_a_photo_check_without_a_verdict_flow_is_a_legitimate_setup() -> None:
+    """The cheap configuration: rank everything, pay for no full opinions."""
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        magic_triage_webhook_url="https://n8n.example/webhook/triage",
+    )
+
+    assert settings.magic_triage_webhook_url is not None
+    assert settings.magic_verdict_webhook_url is None
+
+
+def test_zero_verdicts_is_a_real_setting_not_a_mistake() -> None:
+    settings = Settings(_env_file=None, sweep_max_verdicts=0)  # type: ignore[call-arg]
+
+    assert settings.sweep_max_verdicts == 0
+
+
+def test_a_photo_check_batch_of_nothing_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, sweep_triage_batch=0)  # type: ignore[call-arg]
+
+
+def test_a_negative_price_estimate_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, magic_cost_per_mtok_in=-1.0)  # type: ignore[call-arg]

@@ -74,9 +74,21 @@ turns a sentence like "men's Patagonia jacket size M under 60 eur" into search f
 | `MAGIC_WEBHOOK_URL` | unset | The n8n flow that turns plain words into the filters a search needs. Leave it unset and Magic Search stays off — the endpoint says so plainly instead of guessing. See [magic-search.md](magic-search.md). |
 | `MAGIC_WEBHOOK_TOKEN` | unset | Sent to that flow as a bearer token, so a stranger who finds the URL cannot use it. Set it only if the flow asks for one. |
 | `MAGIC_TIMEOUT_S` | `30` | How long to wait for the flow to answer before giving up. An AI reading a sentence takes a few seconds; a minute means something is wrong. |
+| `MAGIC_TRIAGE_WEBHOOK_URL` | unset | The n8n flow that looks at listing photos and says which ones are the thing you asked for. Leave it unset and the judging stages stay off — a sweep stops after the free filters. |
+| `MAGIC_VERDICT_WEBHOOK_URL` | unset | The flow that gives a full opinion on the best few finds. Point it at a copy of the enrichment flow. |
+| `SWEEP_TRIAGE_BATCH` | `20` | How many listings go to the photo check in one go. |
+| `SWEEP_MAX_VERDICTS` | `3` | The most full opinions one sweep will pay for. `0` is a real setting: it means stop after the photo check. |
+| `MAGIC_COST_PER_MTOK_IN` | `1.0` | What a million words of input costs in euros. Only an estimate, used when the flow does not report a price of its own — when it does, its figure wins. |
+| `MAGIC_COST_PER_MTOK_OUT` | `5.0` | What a million words of answer costs in euros. Only an estimate, used when the flow does not report a price of its own — when it does, its figure wins. |
 
 `SWEEP_MAX_ITEMS` has to be at least `SWEEP_MAX_PAGES`, otherwise a sweep would stop before
 finishing even one page and asking for several pages would mean nothing.
+
+All three flows share `MAGIC_WEBHOOK_TOKEN` and `MAGIC_TIMEOUT_S` — one credential and one
+patience setting, which is what running all three in the same n8n expects. Setting
+`MAGIC_VERDICT_WEBHOOK_URL` without `MAGIC_TRIAGE_WEBHOOK_URL` is refused: full opinions are
+picked from what the photo check ranked, so the verdict flow alone has nothing to pick from.
+The other way round is fine — the photo check on its own is the cheap setup.
 
 ### Telegram
 
@@ -353,9 +365,22 @@ filtre vyhľadávania.
 | `MAGIC_WEBHOOK_URL` | nenastavené | n8n flow, ktorý z bežných slov spraví filtre, aké vyhľadávanie potrebuje. Keď ho nenastavíš, Magic Search je vypnutý — endpoint to rovno povie namiesto hádania. Pozri [magic-search.md](magic-search.md). |
 | `MAGIC_WEBHOOK_TOKEN` | nenastavené | Posiela sa tomu flowu ako bearer token, aby ho cudzí človek, ktorý natrafí na URL, nemohol používať. Nastav ho len vtedy, ak si ho flow pýta. |
 | `MAGIC_TIMEOUT_S` | `30` | Ako dlho čakať na odpoveď flowu, kým to vzdáme. AI prečíta vetu za pár sekúnd; minúta znamená, že je niečo zle. |
+| `MAGIC_TRIAGE_WEBHOOK_URL` | nenastavené | n8n flow, ktorý sa pozrie na fotky inzerátov a povie, ktoré z nich sú to, čo si hľadal. Keď ho nenastavíš, posudzovacie kroky sú vypnuté — sweep skončí po bezplatných filtroch. |
+| `MAGIC_VERDICT_WEBHOOK_URL` | nenastavené | Flow, ktorý dá plný názor na tých pár najlepších nálezov. Nasmeruj ho na kópiu enrichment flowu. |
+| `SWEEP_TRIAGE_BATCH` | `20` | Koľko inzerátov ide na kontrolu fotiek naraz. |
+| `SWEEP_MAX_VERDICTS` | `3` | Najviac plných názorov, ktoré jeden sweep zaplatí. `0` je platné nastavenie: znamená skončiť po kontrole fotiek. |
+| `MAGIC_COST_PER_MTOK_IN` | `1.0` | Koľko stojí milión slov na vstupe v eurách. Len odhad, použije sa vtedy, keď flow sám nenahlási cenu — keď ju nahlási, platí jeho číslo. |
+| `MAGIC_COST_PER_MTOK_OUT` | `5.0` | Koľko stojí milión slov odpovede v eurách. Len odhad, použije sa vtedy, keď flow sám nenahlási cenu — keď ju nahlási, platí jeho číslo. |
 
 `SWEEP_MAX_ITEMS` musí byť aspoň `SWEEP_MAX_PAGES`, inak by sweep skončil skôr, než dočíta
 čo i len jednu stránku, a pýtať si viac stránok by nedávalo zmysel.
+
+Všetky tri flowy zdieľajú `MAGIC_WEBHOOK_TOKEN` a `MAGIC_TIMEOUT_S` — jedny prihlasovacie
+údaje a jedno nastavenie trpezlivosti, čo je presne to, čo čaká niekto, kto beží všetky tri
+v jednom n8n. Nastaviť `MAGIC_VERDICT_WEBHOOK_URL` bez `MAGIC_TRIAGE_WEBHOOK_URL` aplikácia
+odmietne: plné názory sa vyberajú z toho, čo zoradila kontrola fotiek, takže samotný verdict
+flow nemá z čoho vyberať. Naopak je to v poriadku — samotná kontrola fotiek je tá lacná
+možnosť.
 
 ### Telegram
 

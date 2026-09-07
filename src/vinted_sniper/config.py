@@ -193,6 +193,44 @@ class Settings(BaseSettings):
         description="How long to wait for the flow to answer before giving up. An AI "
         "reading a sentence takes a few seconds; a minute means something is wrong.",
     )
+    magic_triage_webhook_url: str | None = Field(
+        default=None,
+        description="The n8n flow that looks at listing photos and says which ones are the "
+        "thing you asked for. Leave it unset and the judging stages are off: a sweep stops "
+        "after the free filters.",
+    )
+    magic_verdict_webhook_url: str | None = Field(
+        default=None,
+        description="The flow that gives a full opinion on the best few finds. Point it at a "
+        "copy of the enrichment flow.",
+    )
+    sweep_triage_batch: int = Field(
+        default=20,
+        ge=1,
+        le=50,
+        description="How many listings go to the photo check in one go.",
+    )
+    sweep_max_verdicts: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="The most full opinions one sweep will pay for. 0 means the sweep stops "
+        "after the photo check.",
+    )
+    magic_cost_per_mtok_in: float = Field(
+        default=1.0,
+        ge=0,
+        description="What a million words of input costs in euros, used only to estimate what "
+        "a sweep spent when the flow does not report a price itself. The flow's own figure "
+        "always wins. The default is the list rate of the model the example flows use.",
+    )
+    magic_cost_per_mtok_out: float = Field(
+        default=5.0,
+        ge=0,
+        description="What a million words of answer costs in euros, used only to estimate what "
+        "a sweep spent when the flow does not report a price itself. The flow's own figure "
+        "always wins. The default is the list rate of the model the example flows use.",
+    )
 
     # --- Delivery ------------------------------------------------------------------
     outbox_expiry_minutes: int = Field(
@@ -283,6 +321,15 @@ class Settings(BaseSettings):
                 f"VINTED_SNIPER_SWEEP_MAX_ITEMS ({self.sweep_max_items}) is below "
                 f"VINTED_SNIPER_SWEEP_MAX_PAGES ({self.sweep_max_pages}); a sweep cannot "
                 "read fewer listings than the pages it is asked to fetch."
+            )
+        if self.magic_verdict_webhook_url and not self.magic_triage_webhook_url:
+            # Not symmetric on purpose: a photo check with no verdict flow is a legitimate
+            # cheap setup, but full opinions are picked from what the photo check ranked.
+            raise ValueError(
+                "VINTED_SNIPER_MAGIC_VERDICT_WEBHOOK_URL is set but "
+                "VINTED_SNIPER_MAGIC_TRIAGE_WEBHOOK_URL is not; full opinions are chosen from "
+                "what the photo check ranked, so the verdict flow on its own has nothing to "
+                "pick from."
             )
         return self
 
