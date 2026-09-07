@@ -9,6 +9,7 @@ from tests.conftest import ScriptedTransport
 from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.pacing import RequestBudget, SiteCooldown
 from vinted_sniper.vinted.session import SessionManager
+from vinted_sniper.vinted.transport import TransportPool
 
 
 async def test_searches_starting_together_share_one_handshake(
@@ -25,6 +26,26 @@ async def test_searches_starting_together_share_one_handshake(
     assert len(homepage_loads) == 1
     assert len({id(session) for session in results}) == 1, "everyone gets the same session"
     assert len({session.identity.user_agent for session in results}) == 1
+
+
+async def test_a_replacement_session_starts_on_a_fresh_client(db: Any) -> None:
+    """A "new" session on the old client is not new at all: the client keeps its own
+    cookie jar and connections, and the anti-bot system links the fresh cookie straight
+    back to the visitor it already flagged. Every bootstrap must rebuild the client."""
+    transports: list[ScriptedTransport] = []
+
+    def build(proxy: str | None) -> ScriptedTransport:
+        built = ScriptedTransport()
+        transports.append(built)
+        return built
+
+    sessions = SessionManager(db, TransportPool(build))
+
+    await sessions.get("fr")
+    await sessions.rotate("fr")
+
+    assert len(transports) == 2, "the second session rode the first session's client"
+    assert transports[0].closed
 
 
 async def test_sites_are_bootstrapped_independently(transport: ScriptedTransport, db: Any) -> None:

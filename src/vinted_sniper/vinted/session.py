@@ -67,6 +67,7 @@ class SessionManager:
         proxies: ProxyRotation | None = None,
         budget: RequestBudget | None = None,
         cooldown: SiteCooldown | None = None,
+        impersonate: bool = False,
     ) -> None:
         self._db = db
         self._pool: TransportPool | None = None
@@ -76,6 +77,9 @@ class SessionManager:
         else:
             self._transport = transport
         self._rotate_after_s = rotate_after_minutes * 60
+        # With TLS impersonation on, every request shakes hands like Chrome, so the
+        # personas we claim must be Chromium ones — see `hdr.pick_identity`.
+        self._impersonate = impersonate
         self._proxies = proxies or ProxyRotation()
         self._budget = budget
         self.cooldown = cooldown or SiteCooldown()
@@ -146,10 +150,18 @@ class SessionManager:
 
     async def bootstrap(self, tld: str) -> Session:
         """Load the site's homepage the way a browser would, and keep what it sets."""
-        identity = hdr.pick_identity()
+        identity = hdr.pick_identity(chromium_only=self._impersonate)
         proxy = self._proxies.acquire()
         root = urls.site_root(tld)
-        transport = self._pool.get(proxy) if self._pool is not None else self._transport
+        if self._pool is not None:
+            # A new session has to be new all the way down. The client keeps its own
+            # cookie jar and open connections, and anti-bot systems link every "fresh"
+            # visitor that arrives on them back to the old, possibly flagged one. Rebuild
+            # the route's client so the handshake genuinely starts from nothing.
+            await self._pool.discard(proxy)
+            transport: Transport | None = self._pool.get(proxy)
+        else:
+            transport = self._transport
         if transport is None:  # pragma: no cover - one of the two is always set
             raise RuntimeError("SessionManager was built without a transport")
 

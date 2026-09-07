@@ -100,9 +100,29 @@ def _load_agents() -> tuple[list[BrowserIdentity], list[int]]:
     return identities, weights
 
 
-def pick_identity(rng: random.Random | None = None) -> BrowserIdentity:
-    """Choose a browser persona, favouring the ones most people actually run."""
+# The brands whose TLS handshake matches Chrome's. When the transport impersonates
+# Chrome at the connection level, claiming any other brand on top of that handshake is
+# exactly the contradiction fingerprinting looks for.
+_CHROMIUM_BRANDS: Final = frozenset({"Chromium", "Microsoft Edge"})
+
+
+def pick_identity(
+    rng: random.Random | None = None, *, chromium_only: bool = False
+) -> BrowserIdentity:
+    """Choose a browser persona, favouring the ones most people actually run.
+
+    `chromium_only` is for the impersonated transport, which shakes hands like Chrome no
+    matter what the headers say: the persona must not contradict the handshake.
+    """
     identities, weights = _load_agents()
+    if chromium_only:
+        kept = [
+            (identity, weight)
+            for identity, weight in zip(identities, weights, strict=True)
+            if identity.brand in _CHROMIUM_BRANDS
+        ]
+        identities = [identity for identity, _ in kept]
+        weights = [weight for _, weight in kept]
     chooser = rng or random
     return chooser.choices(identities, weights=weights, k=1)[0]
 

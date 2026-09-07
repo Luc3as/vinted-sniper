@@ -163,7 +163,10 @@ async def _cmd_check(settings: Settings, url: str) -> int:
             mock_dir=settings.mock_scenario_dir if settings.fetch_mode == "mock" else None,
         ) as transport:
             sessions = SessionManager(
-                db, transport, rotate_after_minutes=settings.session_rotate_minutes
+                db,
+                transport,
+                rotate_after_minutes=settings.session_rotate_minutes,
+                impersonate=settings.http_impersonate,
             )
             client = VintedClient(transport, sessions)
 

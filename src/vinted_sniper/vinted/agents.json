@@ -1,36 +1,36 @@
 {
-  "comment": "Browser identities to blend in with, weighted by rough desktop market share. Refresh these when they age: a browser version nobody still runs stands out as much as no version at all. See docs/troubleshooting.md.",
-  "updated": "2026-08",
+  "comment": "Browser identities to blend in with, weighted by rough desktop market share. Chromium versions track the impersonated TLS target (curl_cffi's chrome), so the claimed browser and the handshake agree. Refresh these when they age: a browser version nobody still runs stands out as much as no version at all. See docs/troubleshooting.md.",
+  "updated": "2026-09",
   "agents": [
     {
       "share": 34,
-      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
       "brand": "Chromium",
-      "version": "140",
+      "version": "146",
       "platform": "Windows",
       "mobile": false
     },
     {
       "share": 12,
-      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
       "brand": "Chromium",
-      "version": "139",
+      "version": "145",
       "platform": "Windows",
       "mobile": false
     },
     {
       "share": 11,
-      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
       "brand": "Microsoft Edge",
-      "version": "140",
+      "version": "146",
       "platform": "Windows",
       "mobile": false
     },
     {
       "share": 10,
-      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
       "brand": "Chromium",
-      "version": "140",
+      "version": "146",
       "platform": "macOS",
       "mobile": false
     },
@@ -52,9 +52,9 @@
     },
     {
       "share": 6,
-      "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+      "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
       "brand": "Chromium",
-      "version": "140",
+      "version": "146",
       "platform": "Linux",
       "mobile": false
     },
@@ -68,9 +68,9 @@
     },
     {
       "share": 5,
-      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
       "brand": "Chromium",
-      "version": "138",
+      "version": "144",
       "platform": "Windows",
       "mobile": false
     }

@@ -108,6 +108,22 @@ def test_the_pool_reuses_one_client_per_route() -> None:
     assert built == [None, "http://one.test"]
 
 
+async def test_discarding_a_route_hands_out_a_fresh_client_next_time() -> None:
+    """The client is where the cookie jar and connections live. A discarded route must
+    not leave either behind for the next session to inherit."""
+
+    def build(proxy: str | None) -> ScriptedTransport:
+        return ScriptedTransport()
+
+    pool = TransportPool(build)
+    first = pool.get(None)
+
+    await pool.discard(None)
+
+    assert first.closed, "a discarded client should not keep its connections open"
+    assert pool.get(None) is not first
+
+
 async def test_closing_the_pool_closes_everything_in_it() -> None:
     transports: list[ScriptedTransport] = []
 

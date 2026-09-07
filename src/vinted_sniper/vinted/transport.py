@@ -238,6 +238,19 @@ class TransportPool:
             self._transports[proxy] = transport
         return transport
 
+    async def discard(self, proxy: str | None = None) -> None:
+        """Throw a route's client away, so the next request builds a fresh one.
+
+        The client is where the cookie jar and the open connections actually live —
+        curl_cffi keeps its own jar inside the session object — and anti-bot systems
+        recognise a returning visitor by those before looking at anything sent on
+        purpose. A "new" session on a kept client is not new at all.
+        """
+        transport = self._transports.pop(proxy, None)
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                await transport.aclose()
+
     async def aclose(self) -> None:
         for transport in self._transports.values():
             with contextlib.suppress(Exception):

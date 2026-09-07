@@ -87,6 +87,7 @@ class Application:
                     rotate_after_minutes=settings.session_rotate_minutes,
                     proxies=proxies,
                     budget=budget,
+                    impersonate=settings.http_impersonate,
                 )
                 client = VintedClient(
                     None, sessions, keep_raw=settings.keep_raw_json, budget=budget
