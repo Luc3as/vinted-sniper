@@ -5,6 +5,14 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 ## Unreleased
 
 ### Fixed
+- A session Vinted had flagged was reborn with the same cookies: curl_cffi keeps its cookie
+  jar on the pooled transport, so every "fresh" session after a refusal carried the same
+  DataDome cookies and stayed blocked until the container restarted. A new session now gets
+  a new transport — new cookie jar, new connections. And the identity no longer flips
+  browsers mid-jar: with `HTTP_IMPERSONATE` on, personas are Chromium-only, matching the
+  TLS fingerprint actually presented.
+- Alert times were UTC ("Listed 20:15 UTC"); they now read in `TIMEZONE` ("Listed at
+  22:15"), which is where the reader lives.
 - The watchdog called niche searches "stale" whenever a busy search on the same site kept
   finding listings — "Rab Downpour" measured against "waterproof jacket" looked frozen forever.
   A search whose page is not even full is never stale, and a full-page search is judged
@@ -26,6 +34,12 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 - The watchdog could crash, or rotate a session into a site that was already holding us off.
 
 ### Added
+- **Found page**: `/` now shows what turned up — listing photo cards with full galleries,
+  the total price leading (the asking price as a muted "+ fee" footnote), a text filter,
+  drops-only, and Show more. Searches, destinations and export moved to `/searches`.
+  Tooltips rebuilt to survive scrolling tables, a theme toggle (system → light → dark),
+  destinations editable and re-enablable in place, and a Playwright UI suite (`tests/ui`)
+  checking tooltip geometry, dark mode and responsive layouts for real.
 - **Site-wide cooldown and request budget.** One refused search holds every search on that
   site (`poll.cooling_down`, shown as "cooling" in the dashboard and `/status`, kept across
   restarts). `SITE_REQUESTS_PER_MINUTE` caps the address as a whole, homepage loads included.
@@ -71,6 +85,7 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 - Rate-limit primitives moved to `vinted_sniper.ratelimit`; `deliver.ratelimit` re-exports.
 
 ### Database
-Migrations 0004–0008: search filter columns, destination quiet hours, outbox rebuilt twice
-(notification kinds, previous price), item enrichment columns. Applied automatically at
-startup; all additive, existing rows behave as before.
+Migrations 0004–0012: search filter columns, destination quiet hours, outbox rebuilt twice
+(notification kinds, previous price), item enrichment columns, market memory and buyer
+feedback, market percentiles on notifications, destination language. Applied automatically
+at startup; all additive, existing rows behave as before.

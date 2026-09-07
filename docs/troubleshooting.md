@@ -142,10 +142,11 @@ topic.
 
 ## Everything is broken after an update
 
-Roll back to the previous image tag and open an issue:
+Roll back to the previous image and open an issue. `latest` moves, so pin the digest of the
+image that worked (`docker image ls --digests`):
 
 ```yaml
-image: ghcr.io/jasp-nerd/vinted-sniper:0.1.0
+image: ghcr.io/luc3as/vinted-sniper@sha256:<previous digest>
 ```
 
 The weekly canary tests against the live site, so an outright break usually gets caught

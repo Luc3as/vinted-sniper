@@ -28,7 +28,7 @@ Then:
 
 ```bash
 mkdir -p ~/vinted-sniper && cd ~/vinted-sniper
-curl -O https://raw.githubusercontent.com/jasp-nerd/vinted-sniper/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/Luc3as/vinted-sniper/luc3as/main/docker-compose.yml
 docker compose up -d
 ```
 
@@ -37,7 +37,7 @@ are set up there, so no `.env` file is needed to start. Grab one only if you wan
 or other tuning:
 
 ```bash
-curl -o .env https://raw.githubusercontent.com/jasp-nerd/vinted-sniper/main/.env.example
+curl -o .env https://raw.githubusercontent.com/Luc3as/vinted-sniper/luc3as/main/.env.example
 ```
 
 Images are published for both x86 and ARM, so the same commands work on a Pi.
@@ -128,7 +128,7 @@ tag in `docker-compose.yml` and open an issue.
 ## Running without Docker
 
 ```bash
-git clone https://github.com/jasp-nerd/vinted-sniper && cd vinted-sniper
+git clone https://github.com/Luc3as/vinted-sniper && cd vinted-sniper
 uv sync --extra web
 uv run vinted-sniper run
 ```

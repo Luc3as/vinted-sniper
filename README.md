@@ -7,7 +7,7 @@
 
 *[Slovenská verzia nižšie ↓](#slovensky)*
 
-[![CI](https://github.com/Luc3as/vinted-sniper/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/Luc3as/vinted-sniper/actions/workflows/ci.yml)
+[![CI](https://github.com/Luc3as/vinted-sniper/actions/workflows/ci.yml/badge.svg?branch=luc3as%2Fmain&event=push)](https://github.com/Luc3as/vinted-sniper/actions/workflows/ci.yml)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Upstream](https://img.shields.io/badge/fork_of-jasp--nerd%2Fvinted--sniper-555)](https://github.com/jasp-nerd/vinted-sniper)
@@ -158,7 +158,7 @@ a **webhook destination** here and route your searches to it. Roughly 2–3 ¢ p
 
 ```bash
 uv sync --extra web --extra impersonate --group dev
-uv run pytest -q            # 340+ tests, including reproductions of the production failures
+uv run pytest -q            # 500+ tests, including reproductions of the production failures
 uv run ruff check src tests && uv run mypy src
 ```
 
@@ -166,9 +166,11 @@ uv run ruff check src tests && uv run mypy src
 
 MIT, as upstream. Not affiliated with Vinted; it reads public listings anonymously and never
 logs in, buys, or lists anything — it cannot buy on your behalf and never will — Vinted's terms prohibit automated access, so running it is your call
-([docs/legal.md](docs/legal.md)). The bug fixes here are offered back to
-[jasp-nerd/vinted-sniper](https://github.com/jasp-nerd/vinted-sniper). The logo and wordmark are this fork's own and
-are **not** MIT — see [docs/media/logo/LICENSE.md](docs/media/logo/LICENSE.md).
+([docs/legal.md](docs/legal.md)). This fork is developed independently and is not merged back;
+it is built on [jasp-nerd/vinted-sniper](https://github.com/jasp-nerd/vinted-sniper), whose
+README at the time of the fork is kept as [README.upstream.md](README.upstream.md). The logo
+and wordmark are this fork's own and are **not** MIT — see
+[docs/media/logo/LICENSE.md](docs/media/logo/LICENSE.md).
 
 ---
 
@@ -176,8 +178,8 @@ are **not** MIT — see [docs/media/logo/LICENSE.md](docs/media/logo/LICENSE.md)
 
 <div align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/media/logo/logo-dark.svg">
-  <img src="docs/media/logo/logo-light.svg" alt="" width="96">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/logo/mark-dark.svg">
+  <img src="docs/media/logo/mark-light.svg" alt="" width="96">
 </picture>
 
 # vinted-sniper (slovensky)
@@ -241,6 +243,8 @@ sám. Nastavenia, Portainer stack a agenta pozri v anglickej sekcii vyššie; ko
 
 ## Licencia
 
-MIT, ako upstream. Nie je to projekt Vintedu; číta verejné inzeráty anonymne a nikdy sa
-neprihlasuje, nenakupuje ani nepredáva. Podmienky Vintedu automatizovaný prístup zakazujú,
-prevádzka je na tvoje zváženie ([docs/legal.md](docs/legal.md)).
+MIT, ako upstream. Fork sa vyvíja samostatne a späť sa nezlučuje; základom je
+[jasp-nerd/vinted-sniper](https://github.com/jasp-nerd/vinted-sniper), ktorého README z čias
+forku je uložené ako [README.upstream.md](README.upstream.md). Nie je to projekt Vintedu; číta
+verejné inzeráty anonymne a nikdy sa neprihlasuje, nenakupuje ani nepredáva. Podmienky Vintedu
+automatizovaný prístup zakazujú, prevádzka je na tvoje zváženie ([docs/legal.md](docs/legal.md)).

@@ -44,7 +44,7 @@ was found, so you can see the real delay yourself.
 | `SITE_REQUESTS_PER_MINUTE` | `12` | Ceiling on requests to any one country site from this address, counted across every search and including homepage loads. When one search is refused, every search on that site waits out the same backoff — the address is what gets scored, not the search. |
 | `STARTUP_STAGGER_S` | `20` | Seconds between the first checks of successive searches at startup, so a restart with ten searches does not open with ten requests in one second. |
 | `SESSION_ROTATE_MINUTES` | `60` | Start a fresh anonymous session after this long. Blocks track session age more than request rate. |
-| `HTTP_IMPERSONATE` | `false` | Make requests present a real browser's TLS fingerprint. Needs the `impersonate` extra. Only worth turning on if you are being blocked while the same search loads fine in a browser. |
+| `HTTP_IMPERSONATE` | `false` | Make requests present a real browser's TLS fingerprint. Needs the `impersonate` extra (already in the Docker image). Plain Python TLS is the first thing DataDome looks at, so **leave this on** unless you cannot install the extra. |
 | `PROXY_FILE` | unset | Path to a text file of proxy URLs, one per line (blank lines and `#` comments ignored). Used in turn; one that gets refused sits out for ten minutes. If all of them are sitting out, requests go direct rather than not at all. Rarely needed. |
 
 ### Noticing problems
@@ -63,7 +63,7 @@ was found, so you can see the real delay yourself.
 | Variable | Default | What it does |
 |---|---|---|
 | `WEEKLY_REPORT` | `true` | Every Monday at 08:00 (`TIMEZONE`), send destinations flagged for status notices a few lines: listings found, alerts sent, price drops, the best verdict, the busiest searches. |
-| `TIMEZONE` | `UTC` | IANA timezone (e.g. `Europe/Bratislava`) that a destination's quiet hours are read in. |
+| `TIMEZONE` | `UTC` | IANA timezone (e.g. `Europe/Bratislava`) that quiet hours, the "Listed at" time in alerts and the Monday report are read in. |
 | `TELEGRAM_BOT_TOKEN` | unset | From [@BotFather](https://t.me/BotFather). Enables Telegram delivery and the pairing bot. |
 
 ### Dashboard
@@ -118,12 +118,12 @@ Options for `watch`:
 | `--min-seller-reviews N` | Skip sellers with fewer than N reviews. |
 | `--block-seller a,b` | Skip these seller usernames outright. |
 | `--cheapest N` | Only listings priced in the cheapest N% of what this search has seen in the last 30 days (every listing on the page counts, filters or not). Adapts to the market by itself; inactive until ten price points exist. The alert states the position in words: "cheaper than 88% of 312 similar listings seen this month". |
+| `--to 1,2` | Destination ids to notify. Defaults to all active ones. |
 
 The same fields are under "More filters" when adding a search in the dashboard, and every
 search has an **Edit** button there (which also offers **Clone** — the same search, filters
 and destinations on another country site) for changing them afterwards — the change takes effect
 on the next check, no restart needed. Only the URL is fixed: it is what the search *is*.
-| `--to 1,2` | Destination ids to notify. Defaults to all active ones. |
 
 ## Adding a search
 
@@ -202,8 +202,9 @@ it changes only with a version bump, because other people's automations depend o
       "seller": "someone",
       "seller_rating": 0.93,
       "links": {
-        "message_seller": "https://www.vinted.fr/items/9683334896/want_it/new",
-        "buy": "https://www.vinted.fr/transaction/buy/new?..."
+        "message_seller": "https://www.vinted.fr/items/9683334896",
+        "buy": "https://www.vinted.fr/items/9683334896",
+        "seller": "https://www.vinted.fr/member/12345678"
       }
     }
   ]
@@ -211,7 +212,13 @@ it changes only with a version bump, because other people's automations depend o
 ```
 
 `price` is what the seller asks. `total_price` is what you pay. Filters and displays use the
-second one.
+second one. `message_seller` and `buy` keep their keys for compatibility but both resolve to
+the listing page — Vinted removed the deep links they used to point at.
+
+Items also carry the enrichment fields — `event`, `photo_urls`, `seller_reviews`,
+`enrichment_url`, `favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour`,
+`market`, `known_retail`, `reader_language`, `buyer_feedback`, and `previous_total_price` on
+a price drop — documented in [enrichment.md](enrichment.md).
 
 ## RSS
 

@@ -41,9 +41,9 @@ autocomplete and filter options through live.
 actions, `watchdog.py` compares searches against each other, `health.py` assembles the status
 view.
 
-**`deliver/`** gets notifications out. `outbox.py`-backed workers in `dispatcher.py` claim
-work in order, one destination at a time, through a token bucket in `ratelimit.py`. Each
-channel is a small module implementing one protocol.
+**`deliver/`** gets notifications out. Workers in `dispatcher.py` claim work from the
+database's outbox table in order, one destination at a time, through a token bucket in
+`ratelimit.py`. Each channel is a small module implementing one protocol.
 
 **`db/`** holds every SQL statement in `repo.py`, so a schema change has one place to look.
 

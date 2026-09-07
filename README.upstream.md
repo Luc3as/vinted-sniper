@@ -1,6 +1,11 @@
+> This is the upstream project's README as it stood when this fork went its own way, kept
+> for attribution. Links in it point at
+> [jasp-nerd/vinted-sniper](https://github.com/jasp-nerd/vinted-sniper); this fork's own
+> README is [README.md](README.md).
+
 <div align="center">
 
-**English** · [Français](README.fr.md)
+**English** · [Français](https://github.com/jasp-nerd/vinted-sniper/blob/main/README.fr.md)
 
 <img src="docs/media/banner.svg" alt="vinted-sniper — get told the moment something matches" width="820">
 

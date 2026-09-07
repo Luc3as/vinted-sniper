@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, luc3as/main]
   pull_request:
   # Lets a transient failure be re-run without an empty commit.
   workflow_dispatch:
