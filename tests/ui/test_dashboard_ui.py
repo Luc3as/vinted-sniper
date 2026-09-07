@@ -29,7 +29,7 @@ pytestmark = [
     pytest.mark.skipif(not _server_is_up(), reason=f"no dashboard at {BASE_URL}"),
 ]
 
-PAGES = ["/", "/searches", "/history", "/help"]
+PAGES = ["/", "/searches", "/magic", "/history", "/help"]
 
 VIEWPORTS = [
     pytest.param({"width": 1280, "height": 800}, id="desktop"),
@@ -70,6 +70,8 @@ def test_navigation_links(page: Page) -> None:
     page.goto(BASE_URL + "/")
     page.get_by_role("link", name="Searches").click()
     assert page.url.rstrip("/").endswith("/searches")
+    page.get_by_role("link", name="Magic").click()
+    assert page.url.rstrip("/").endswith("/magic")
     page.get_by_role("link", name="History").click()
     assert page.url.rstrip("/").endswith("/history")
     page.get_by_role("link", name="Help").click()
@@ -78,7 +80,7 @@ def test_navigation_links(page: Page) -> None:
 
 def test_nav_and_section_icons_present(page: Page) -> None:
     page.goto(BASE_URL + "/searches")
-    assert page.locator("nav a svg").count() == 4  # Found, Searches, History, Help
+    assert page.locator("nav a svg").count() == 5  # Found, Searches, Magic, History, Help
     assert page.locator("h2 svg").count() >= 2  # Searches, Destinations
 
 
@@ -142,6 +144,35 @@ def test_action_buttons_are_labeled(page: Page) -> None:
         b = buttons.nth(i)
         assert b.get_attribute("aria-label"), f"iconbtn #{i} missing aria-label"
         assert b.get_attribute("data-tip"), f"iconbtn #{i} missing data-tip"
+
+
+# --- Magic Search --------------------------------------------------------------------
+
+
+def test_magic_page_has_the_type_and_confirm_steps(page: Page) -> None:
+    """The two steps a sweep cannot be started without: say it, then approve the mapping.
+
+    The confirm card ships hidden — the browser reveals it once /api/magic-search/map has
+    answered — so it is asserted as present-but-hidden rather than visible. Its wording is
+    read with text_content() for the same reason: innerText of a hidden element is empty.
+    """
+    page.goto(BASE_URL + "/magic")
+    assert page.get_by_role("heading", name="Magic Search").first.is_visible()
+
+    text = page.locator("#m-text")
+    assert text.is_visible(), "the plain-language input is missing"
+    assert text.get_attribute("maxlength") == "500", "the 500-character cap is not on the input"
+    assert page.locator("#m-map").is_visible(), "the button that maps the sentence is missing"
+
+    confirm = page.locator("#m-step-confirm")
+    assert confirm.count() == 1, "the confirm step is not in the page at all"
+    assert confirm.is_hidden(), "the confirm step must stay hidden until a mapping comes back"
+    assert page.locator("#m-run").count() == 1, "the confirm step has no button to start a sweep"
+    # The ceiling has to be readable on the screen that spends it, not just in the docs.
+    wording = confirm.text_content() or ""
+    assert "full opinions" in wording, f"the confirm step does not print the ceiling: {wording!r}"
+
+    assert page.locator("#m-step-progress").is_hidden(), "the progress step starts hidden"
 
 
 # --- Tables fit their container -----------------------------------------------------
@@ -275,9 +306,14 @@ def test_tooltips_visible_in_viewport(page: Page, path: str, viewport: ViewportS
         # Playwright scrolls the icon underneath it. Pointer reachability is covered
         # by test_tooltip_inside_table_not_clipped; this sweep checks geometry.
         el.scroll_into_view_if_needed()
-        el.evaluate("(el) => el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}))")
-        box = page.evaluate(
-            """() => {
+        # Hover and measure in one evaluate. showTip() is synchronous, and the pages that
+        # refresh themselves (found.html swaps the grid every 10 s) fire a mouseover on the
+        # replaced nodes, which lands on nothing with a data-tip and calls hideTip(). Split
+        # across two round trips, that refresh could close the tooltip between opening it
+        # and reading it — a flake that looked like "the tip never became visible".
+        box = el.evaluate(
+            """(el) => {
+                el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
                 const tip = document.getElementById('tip');
                 if (!tip || tip.hidden) return null;
                 const r = tip.getBoundingClientRect();

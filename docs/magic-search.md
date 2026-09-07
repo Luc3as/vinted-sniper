@@ -467,6 +467,103 @@ The prompts live in your flows. This is what the existing flows needed:
   rates are 0. That is a configuration answer, not a free lunch.
 
 
+
+---
+
+# Using it from the dashboard
+
+Everything above is the contract the flows are built against. This is the same machinery
+with a screen in front of it: the `/magic` page, reachable from **Magic** in the top
+navigation. Nothing on it is new behaviour — it is what `sweep --judge` already did, with
+the confirmation step made visible, because a person can only approve a mapping they can
+read.
+
+The page needs `MAGIC_WEBHOOK_URL` for the sentence and a signed-in Vinted session to check
+the ids against. Without both it says so in the box itself rather than guessing, and the
+button that spends money is never reached.
+
+## The four states
+
+1. **Type.** One box, five hundred characters, and the site to search. Pressing *Work out
+   the search* is free: it is one call to the mapper and nothing is bought.
+2. **Confirm.** The mapping comes back as names, not ids — *Category: Men's jackets*,
+   *Brand: Patagonia*, *Size: M*, with the price and the words underneath. That is the
+   whole reason the step exists: an id nobody can read is an id nobody can check, and a
+   wrong category is a sweep that looks in the wrong place and finds nothing. If a name is
+   wrong, *Start over* and reword it. There is no field to edit by hand, because a
+   hand-typed id would skip the validation that makes the mapping worth trusting.
+3. **Running.** Pages read, listings seen, listings kept, photos checked and opinions
+   bought, refreshed every three seconds. A sweep takes a minute or two and waits its turn
+   behind the standing searches already being checked, so a screen that sits still for a
+   while is normal. Reloading is safe — the page picks the same run back up instead of
+   starting another. If the dashboard goes missing for five polls in a row, the page says
+   so rather than spinning; the sweep itself carries on without it.
+4. **Results.** In the order the sweep ranked them, not the order Vinted returned: what the
+   photo check recognised comes above what only matched on words. Every card carries what
+   the photos said, the one line explaining why, how much of the title matched, and — for
+   the best two or three — the full opinion. The address holds the run's number
+   (`/magic?sweep=41`), so it is a link worth keeping: opening it later shows the same
+   results without running or paying for anything again.
+
+## What it will spend, before it spends it
+
+The confirmation step prints the ceiling in words: at most `SWEEP_MAX_ITEMS` listings
+checked, at most `SWEEP_MAX_VERDICTS` full opinions. Those are the deployment's numbers and
+the page cannot raise them — the browser may ask for less, never for more. A sweep stops at
+the ceiling whatever it has found by then, so the figure beside the button is the worst case
+rather than an estimate.
+
+## One at a time
+
+A sweep spends real money, so only one runs per dashboard at a time. Pressing *Look through
+what is for sale* while another is still going is refused with a sentence saying so, not
+billed twice, and the answer is to wait for the running one to finish. If you are watching
+the network tab, that refusal is a `409` from `POST /api/magic-search/sweep`.
+
+## When a run does not finish
+
+The coloured word beside the run number is its state, and two of them mean the results are
+incomplete:
+
+- **`partial`** — it started, read part of what it was going to read, and then something
+  broke: a photo-check batch failed, or Vinted stopped answering. What it found is real and
+  is shown; what is missing was never looked at, not ruled out. The reason is printed under
+  the counts.
+- **`blocked`** — it never got going, almost always because the Vinted session is gone or
+  the site refused the request. There are no results, and again nothing was ruled out.
+
+Neither is retried on your behalf. Pressing the button again is your decision, for the same
+reason a failed mapping is not retried: a silent second attempt doubles the bill for what is
+usually the same failure.
+
+An empty result whose state is `ok` means something else entirely, and the page says it in
+those words — everything read was either the wrong thing or over the price you gave. That is
+an answer, not a fault.
+
+## Turning a sweep into a standing watch
+
+A sweep is one look at what is already for sale. Nothing on the results page is being
+watched and nobody was notified. *Watch this from now on*, at the bottom, turns it into an
+ordinary standing search — the same kind you get by pasting a URL into **Searches** — so
+from then on new listings that match it are found on a timer and alerted on.
+
+Two things are worth knowing about that button:
+
+- **The title rules come with it.** `watch_hints.required_keywords` and
+  `watch_hints.title_pattern` from the original mapping become the watch's title filters,
+  and the confirmation step tells you beforehand what they will be. They gate the alerts and
+  are never added to the search itself: Vinted treats words in a search loosely, so
+  filtering there would hide the very listings the sweep exists to catch. Those rules live
+  in the browser tab that ran the sweep — open a `/magic?sweep=…` link in a fresh tab and
+  the watch is still created, just without them, and the page tells you that before you
+  press it.
+- **It is the same row either way.** The watch is stored under the canonical Vinted URL its
+  filters build, so a sweep promoted here and a search created by pasting the equivalent URL
+  are one and the same. Promoting a sweep that duplicates a watch you already have is
+  refused instead of quietly making a second copy.
+
+A promoted sweep remembers the search it became, so its results page links straight to it
+from then on.
 ---
 
 <a name="slovensky"></a>
@@ -932,3 +1029,98 @@ Prompty sú v tvojich flowoch. Toto je to, čo potrebovali tie existujúce:
   dostal, nechá všetky inzeráty neposúdené a poradie spadne späť na názvy.
 - **Sweep, ktorý nič nestál,** znamená, že neprišlo žiadne `usage` a obe sadzby
   `MAGIC_COST_PER_MTOK_*` sú 0. To je odpoveď o konfigurácii, nie obed zadarmo.
+
+
+---
+
+# Ako sa to používa z dashboardu
+
+Všetko vyššie je zmluva, na ktorú sú flowy postavené. Toto je tá istá mašinéria s
+obrazovkou pred ňou: stránka `/magic`, dostupná cez **Magic** v hornom menu. Nie je na nej
+nič nové — je to to isté, čo `sweep --judge` robil doteraz, len s viditeľným
+potvrdzovacím krokom, lebo človek vie schváliť len mapovanie, ktoré si vie prečítať.
+
+Stránka potrebuje `MAGIC_WEBHOOK_URL` na prečítanie vety a prihlásenú vintedskú reláciu,
+voči ktorej sa overia id. Bez oboch to rovno napíše do políčka namiesto hádania a na
+tlačidlo, ktoré míňa peniaze, sa vôbec nedostaneš.
+
+## Štyri obrazovky
+
+1. **Napíš.** Jedno políčko, päťsto znakov a stránka, na ktorej sa má hľadať. Stlačiť
+   *Work out the search* je zadarmo: je to jedno volanie mapovacieho flowu a nič sa
+   nekupuje.
+2. **Potvrď.** Mapovanie sa vráti ako mená, nie ako id — *Category: Men's jackets*,
+   *Brand: Patagonia*, *Size: M*, pod tým cena a slová. Presne kvôli tomu ten krok
+   existuje: id, ktoré nikto neprečíta, je id, ktoré nikto neskontroluje, a zlá kategória
+   znamená sweep, ktorý hľadá na nesprávnom mieste a nenájde nič. Ak je niektoré meno zlé,
+   daj *Start over* a preformuluj vetu. Ručne prepísať sa nedá nič, lebo ručne napísané id
+   by obišlo práve to overenie, vďaka ktorému sa dá mapovaniu veriť.
+3. **Beží.** Prečítané stránky, videné inzeráty, ponechané inzeráty, skontrolované fotky a
+   kúpené posudky, obnovované každé tri sekundy. Sweep trvá minútu-dve a čaká, kým prídu na
+   rad hľadania, ktoré sa práve kontrolujú, takže obrazovka, ktorá chvíľu stojí, je normálna.
+   Obnoviť stránku je bezpečné — nadviaže na ten istý beh, nespustí ďalší. Ak sa dashboard
+   stratí päťkrát po sebe, stránka to napíše namiesto toho, aby sa točila donekonečna; sweep
+   beží ďalej aj bez nej.
+4. **Výsledky.** V poradí, v akom ich zoradil sweep, nie v tom, v akom ich vrátil Vinted:
+   to, čo spoznala kontrola fotiek, je nad tým, čo sa trafilo len slovami. Na každej karte
+   je, čo povedali fotky, jeden riadok prečo, koľko z názvu sedelo a — pri dvoch či troch
+   najlepších — celý posudok. V adrese je číslo behu (`/magic?sweep=41`), takže je to odkaz,
+   ktorý sa oplatí odložiť: otvoríš ho neskôr a uvidíš tie isté výsledky bez toho, aby sa
+   čokoľvek znova spúšťalo a platilo.
+
+## Čo to minie, skôr než to minie
+
+Potvrdzovací krok napíše strop slovami: najviac `SWEEP_MAX_ITEMS` skontrolovaných inzerátov
+a najviac `SWEEP_MAX_VERDICTS` plných posudkov. Sú to čísla danej inštalácie a stránka ich
+nevie zdvihnúť — prehliadač môže pýtať menej, viac nikdy. Sweep na strope skončí bez ohľadu
+na to, čo dovtedy našiel, takže číslo pri tlačidle je najhorší prípad, nie odhad.
+
+## Vždy len jeden naraz
+
+Sweep míňa skutočné peniaze, takže na jednom dashboarde beží vždy len jeden. Stlačiť *Look
+through what is for sale*, kým iný ešte beží, sa odmietne vetou, ktorá to povie — nezaplatí
+sa dvakrát — a riešením je počkať, kým ten bežiaci doskončí. Ak sa pozeráš do sieťovej
+záložky, to odmietnutie je `409` z `POST /api/magic-search/sweep`.
+
+## Keď beh nedobehne
+
+Farebné slovo pri čísle behu je jeho stav a dve z nich znamenajú, že výsledky sú neúplné:
+
+- **`partial`** — začal, prečítal časť toho, čo mal prečítať, a potom sa niečo pokazilo:
+  zlyhala dávka kontroly fotiek alebo Vinted prestal odpovedať. To, čo našiel, je skutočné a
+  je zobrazené; to, čo chýba, nebolo vylúčené — nikto sa naň nepozrel. Dôvod je vypísaný pod
+  počtami.
+- **`blocked`** — vôbec sa nerozbehol, takmer vždy preto, že vintedská relácia je preč alebo
+  stránka požiadavku odmietla. Nie sú žiadne výsledky a ani tu nebolo nič vylúčené.
+
+Ani jeden sa za teba neopakuje. Stlačiť tlačidlo znova je tvoje rozhodnutie, z rovnakého
+dôvodu, pre ktorý sa neopakuje zlyhané mapovanie: tichý druhý pokus zdvojnásobí účet za to,
+čo je takmer vždy to isté zlyhanie.
+
+Prázdny výsledok so stavom `ok` znamená niečo úplne iné a stránka to takto aj napíše —
+všetko prečítané bolo buď nesprávna vec, alebo drahšie, než si zadal. To je odpoveď, nie
+porucha.
+
+## Ako zo sweepu spraviť trvalé sledovanie
+
+Sweep je jeden pohľad na to, čo je práve teraz na predaj. Nič na stránke s výsledkami sa
+nesleduje a nikomu nič neprišlo. *Watch this from now on* dole zo sweepu spraví obyčajné
+trvalé hľadanie — také isté, aké dostaneš vložením URL v **Searches** — a od tej chvíle sa
+nové zodpovedajúce inzeráty hľadajú na časovači a chodia z nich upozornenia.
+
+Pri tom tlačidle sa oplatí vedieť dve veci:
+
+- **Pravidlá na názov idú s ním.** `watch_hints.required_keywords` a
+  `watch_hints.title_pattern` z pôvodného mapovania sa stanú filtrami sledovania na názov a
+  potvrdzovací krok ti dopredu povie, aké budú. Držia späť upozornenia a do samotného
+  hľadania sa nikdy nepridajú: Vinted berie slová vo vyhľadávaní voľne, takže filtrovať tam
+  by skrylo práve tie inzeráty, kvôli ktorým sweep existuje. Tieto pravidlá žijú v tej
+  záložke prehliadača, v ktorej sweep bežal — otvor odkaz `/magic?sweep=…` v novej záložke a
+  sledovanie sa aj tak vytvorí, len bez nich, a stránka ti to povie ešte pred stlačením.
+- **Je to ten istý riadok tak či tak.** Sledovanie sa uloží pod kanonickou vintedskou URL,
+  ktorú jeho filtre poskladajú, takže sweep povýšený tu a hľadanie vytvorené vložením
+  rovnocennej URL sú jedno a to isté. Povýšiť sweep, ktorý duplikuje už existujúce
+  sledovanie, sa odmietne namiesto toho, aby ticho vznikla druhá kópia.
+
+Povýšený sweep si pamätá, akým hľadaním sa stal, takže jeho stránka s výsledkami naň odvtedy
+priamo odkazuje.
