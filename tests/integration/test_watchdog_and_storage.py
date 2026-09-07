@@ -133,6 +133,25 @@ async def test_being_stale_starts_a_new_session(
     assert any("/api/v2/" not in request["url"] for request in transport.requests)
 
 
+async def test_warn_mode_does_not_claim_a_restart_that_never_happened(
+    repo: Repo, db: Database, transport: ScriptedTransport, settings: Settings
+) -> None:
+    """In "warn" mode nothing is rotated, so the alert must not say a session was started."""
+    stuck = await add_search(repo, "stuck")
+    healthy = await add_search(repo, "healthy")
+    now = int(time.time())
+    await set_state(db, stuck, last_success_at=now, stale_cycles=15, newest_raw_ts=now - 9000)
+    await set_state(db, healthy, last_success_at=now, stale_cycles=0, newest_raw_ts=now - 30)
+
+    warn_only = settings.model_copy(update={"watchdog_action": "warn"})
+    watchdog, announcements = make_watchdog(repo, db, transport, warn_only)
+    await watchdog.check()
+
+    assert announcements, "warn mode must still warn"
+    assert all("fresh session" not in message for message in announcements)
+    assert all("/api/v2/" in request["url"] for request in transport.requests)
+
+
 # --- Health reporting ---------------------------------------------------------------
 
 

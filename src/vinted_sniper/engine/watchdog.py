@@ -156,6 +156,7 @@ class Watchdog:
             action=self._settings.watchdog_action,
         )
 
+        rotated = False
         if self._settings.watchdog_action == "rotate":
             if self._sessions.cooldown.is_closed(search.tld):
                 # The site is already holding us off; a fresh handshake now would only
@@ -164,18 +165,33 @@ class Watchdog:
             else:
                 try:
                     await self._sessions.rotate(search.tld)
+                    rotated = True
                     log.info("watchdog.session_rotated", tld=search.tld)
                 except (BlockedError, NetworkError) as exc:
                     log.warning("watchdog.rotation_failed", tld=search.tld, error=str(exc))
 
         if self._announce is not None:
-            await self._announce(
-                lambda t: t(
-                    "“{name}” has seen nothing new for {cycles} checks while other vinted.{tld} "
-                    "searches keep finding listings. Started a fresh session; if it stays quiet, "
-                    "see the troubleshooting guide.",
-                    name=search.name,
-                    cycles=search.stale_cycles,
-                    tld=search.tld,
+            # The message must not claim a restart that did not happen: in "warn" mode,
+            # or when rotation was skipped or failed, nothing was restarted.
+            if rotated:
+                await self._announce(
+                    lambda t: t(
+                        "“{name}” has seen nothing new for {cycles} checks while other "
+                        "vinted.{tld} searches keep finding listings. Started a fresh session; "
+                        "if it stays quiet, see the troubleshooting guide.",
+                        name=search.name,
+                        cycles=search.stale_cycles,
+                        tld=search.tld,
+                    )
                 )
-            )
+            else:
+                await self._announce(
+                    lambda t: t(
+                        "“{name}” has seen nothing new for {cycles} checks while other "
+                        "vinted.{tld} searches keep finding listings. If it stays quiet, "
+                        "see the troubleshooting guide.",
+                        name=search.name,
+                        cycles=search.stale_cycles,
+                        tld=search.tld,
+                    )
+                )

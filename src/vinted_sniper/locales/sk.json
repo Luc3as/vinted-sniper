@@ -63,6 +63,7 @@
 
   "vinted.{tld} is refusing requests from this address (“{name}” was the first to notice). Holding every search on that site for about {minutes} min. If this keeps happening, see the troubleshooting guide.": "vinted.{tld} odmieta požiadavky z tejto adresy (prvé si to všimlo „{name}“). Všetky hľadania na tejto stránke pozastavujem asi na {minutes} min. Ak sa to opakuje, pozri troubleshooting.",
   "“{name}” has seen nothing new for {cycles} checks while other vinted.{tld} searches keep finding listings. Started a fresh session; if it stays quiet, see the troubleshooting guide.": "„{name}“ nenašlo nič nové {cycles} kontrol po sebe, kým ostatné hľadania na vinted.{tld} nálezy majú. Založil som novú session; ak zostane ticho, pozri troubleshooting.",
+  "“{name}” has seen nothing new for {cycles} checks while other vinted.{tld} searches keep finding listings. If it stays quiet, see the troubleshooting guide.": "„{name}“ nenašlo nič nové {cycles} kontrol po sebe, kým ostatné hľadania na vinted.{tld} nálezy majú. Ak zostane ticho, pozri troubleshooting.",
 
   "Weekly: nothing new turned up on any search. Either the market is quiet or the searches are too narrow.": "Týždeň: na žiadnom hľadaní sa nič nové neobjavilo. Buď je trh tichý, alebo sú hľadania príliš úzke.",
   "Weekly: {found} across {searches}, {sent}, {drops}.": "Týždeň: {found} v {searches}, {sent}, {drops}.",
