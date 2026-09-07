@@ -453,7 +453,9 @@ async def test_telegram_headlines_a_hot_deal_and_mutes_a_dull_one() -> None:
     await sender.send([replace(notification(2), enrichment=dull)])
 
     first, second = recorder.payload(0), recorder.payload(1)
-    assert first["text"].startswith("🔥 <b>HOT DEAL</b> · deal 91/100 · retail ~140 EUR · -88%")
+    assert first["text"].startswith(
+        "<b>Item 1</b>\n🔥 <b>HOT DEAL</b> · <b>deal 91/100 · retail ~140 EUR · -88%</b>"
+    )
     thumbs = first["reply_markup"]["inline_keyboard"][-1]
     assert [b["callback_data"] for b in thumbs] == ["fb:1:1", "fb:1:-1"]
     assert "Looks like: Nike Air Max 90" in first["text"]
@@ -488,7 +490,9 @@ async def test_a_slovak_destination_gets_a_slovak_alert() -> None:
 
     payload = recorder.payload(0)
     text = payload["text"]
-    assert text.startswith("🔥 <b>TOP PONUKA</b> · skóre 91/100 · v obchode ~140 EUR")
+    assert text.startswith(
+        "<b>Item 1</b>\n🔥 <b>TOP PONUKA</b> · <b>skóre 91/100 · v obchode ~140 EUR"
+    )
     assert "s ochranou kupujúceho" in text
     assert "lacnejší ako 88 % z 312 podobných inzerátov" in text
     assert "Predajca: sneakerfan" in text

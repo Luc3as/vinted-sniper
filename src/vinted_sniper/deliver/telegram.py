@@ -159,28 +159,32 @@ class TelegramSender:
         market_line: str | None = None,
     ) -> dict[str, Any]:
         t = self._t
-        lines = [f"<b>{html.escape(item.title)}</b>", html.escape(item.price_line(t))]
-        if market_line:
-            lines.append(f"📊 {html.escape(market_line)}")
+        # The listing's name leads; the verdict follows; everything else is reference
+        # material a reader scans only when the first two lines earn it.
+        lines: list[str] = []
         if headline:
-            lines.insert(0, f"📉 <b>{html.escape(headline)}</b>")
+            lines.append(f"📉 <b>{html.escape(headline)}</b>")
+        lines.append(f"<b>{html.escape(item.title)}</b>")
         silent = enrichment is not None and enrichment.is_dull(self._silent_below)
         if enrichment is not None:
-            self._weave_verdict(lines, item, enrichment, silent=silent)
+            lines.extend(self._verdict_block(item, enrichment, silent=silent))
+        lines.append(f"💶 {html.escape(item.price_line(t))}")
 
         details = " · ".join(
             html.escape(part) for part in (item.brand, item.size, item.condition) if part
         )
         if details:
-            lines.append(details)
+            lines.append(f"🏷 {details}")
+        if market_line:
+            lines.append(f"📊 {html.escape(market_line)}")
         if item.seller_login:
             seller = html.escape(item.seller_login)
             if item.seller_rating is not None:
                 seller += f" ({item.seller_rating:.0%})"
-            lines.append(t("Seller: {seller}", seller=seller))
+            lines.append(f"👤 {t('Seller: {seller}', seller=seller)}")
         if item.listed_at:
             local = item.listed_at.astimezone(self._zone)
-            lines.append(t("Listed at {time}", time=local.strftime("%H:%M")))
+            lines.append(f"🕐 {t('Listed at {time}', time=local.strftime('%H:%M'))}")
 
         keyboard: list[list[dict[str, str]]] = [_link_row(item, t)]
         # A second row of actions the bot handles itself: the two things people most
@@ -230,12 +234,15 @@ class TelegramSender:
             "link_preview_options": {"is_disabled": True},
         }
 
-    def _weave_verdict(
-        self, lines: list[str], item: Item, verdict: Enrichment, *, silent: bool
-    ) -> None:
+    def _verdict_block(
+        self, item: Item, verdict: Enrichment, *, silent: bool
+    ) -> list[str]:
+        """The score line, the one-sentence recommendation, and what the model thinks
+        the product is — in that order, right under the title."""
         t = self._t
         payable = item.total_price if item.total_price is not None else item.price
-        summary, details = verdict.lines(payable, item.currency, t)
+        block: list[str] = []
+        summary = verdict.summary(payable, item.currency, t)
         if summary:
             hot = verdict.is_hot(self._highlight_score)
             marker = (
@@ -243,8 +250,12 @@ class TelegramSender:
                 if hot
                 else ("💤 " if silent else "🤖 ")
             )
-            lines.insert(0, f"{marker}{html.escape(summary)}")
-        lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
+            block.append(f"{marker}<b>{html.escape(summary)}</b>")
+        if verdict.verdict:
+            block.append(f"💬 <i>{html.escape(verdict.verdict)}</i>")
+        if verdict.model:
+            block.append(f"🔎 <i>{html.escape(t('Looks like: {model}', model=verdict.model))}</i>")
+        return block
 
     def _digest_payload(self, batch: list[PendingNotification]) -> dict[str, Any]:
         t = self._t
