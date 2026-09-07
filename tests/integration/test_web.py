@@ -26,6 +26,9 @@ from vinted_sniper.engine import sweep
 from vinted_sniper.enrichment import EnrichmentIn
 from vinted_sniper.magic.client import MapperClient
 from vinted_sniper.magic.models import TriageItem
+from vinted_sniper.magic.triage import TriageClient
+from vinted_sniper.magic.verdict import VerdictClient
+from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.models import parse_item
 from vinted_sniper.vinted.session import SessionManager
 from vinted_sniper.vinted.taxonomy import Taxonomy
@@ -1314,3 +1317,53 @@ async def test_an_unjudged_sweep_stays_off_the_history_page(
     page = signed_in.get("/history")
 
     assert "Judged sweeps" not in page.text
+
+
+# --- The sweep's dependencies ---------------------------------------------------------
+
+
+def test_the_dashboard_carries_everything_a_sweep_needs(
+    web_settings: Settings, db: Database, repo: Repo, transport: ScriptedTransport
+) -> None:
+    """`judge_sweep()` wants four things the web process never used to hold.
+
+    Building the app with all four has to work without a single call to Vinted — the
+    clients are handed in already built, so nothing here opens a connection.
+    """
+    sessions = SessionManager(db, transport)
+    vinted = VintedClient(transport, sessions)
+    triage = TriageClient("https://n8n.example/triage", timeout_s=5.0)
+    verdict = VerdictClient("https://n8n.example/verdict", timeout_s=5.0)
+
+    app = create_app(
+        web_settings,
+        repo,
+        None,
+        None,
+        client=vinted,
+        sessions=sessions,
+        triage=triage,
+        verdict=verdict,
+    )
+
+    assert app.state.vinted is vinted
+    assert app.state.sessions is sessions
+    assert app.state.triage is triage
+    assert app.state.verdict is verdict
+    assert transport.requests == []
+
+
+def test_a_dashboard_built_without_them_still_starts(
+    web_settings: Settings, repo: Repo
+) -> None:
+    """The four are optional on purpose: most of the dashboard has no use for them.
+
+    An install with no Magic webhooks set, and every existing test that calls
+    `create_app(settings, repo)`, land here.
+    """
+    app = create_app(web_settings, repo)
+
+    assert app.state.vinted is None
+    assert app.state.sessions is None
+    assert app.state.triage is None
+    assert app.state.verdict is None

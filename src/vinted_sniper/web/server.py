@@ -43,9 +43,13 @@ from vinted_sniper.enrichment import Enrichment, EnrichmentIn
 from vinted_sniper.log import get_logger
 from vinted_sniper.magic.client import MapperClient
 from vinted_sniper.magic.errors import MappingError
+from vinted_sniper.magic.triage import TriageClient
 from vinted_sniper.magic.validate import validate
+from vinted_sniper.magic.verdict import VerdictClient
 from vinted_sniper.vinted import urls
+from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.errors import VintedError
+from vinted_sniper.vinted.session import SessionManager
 from vinted_sniper.vinted.taxonomy import FACET_CODES, Taxonomy
 from vinted_sniper.web.security import (
     LoginThrottle,
@@ -90,6 +94,11 @@ def create_app(
     repo: Repo,
     taxonomy: Taxonomy | None = None,
     mapper: MapperClient | None = None,
+    *,
+    client: VintedClient | None = None,
+    sessions: SessionManager | None = None,
+    triage: TriageClient | None = None,
+    verdict: VerdictClient | None = None,
 ) -> FastAPI:
     token = settings.web_auth_token  # None means no password: the dashboard just opens
 
@@ -97,6 +106,17 @@ def create_app(
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(SameOriginMiddleware)
     throttle = LoginThrottle()
+
+    # What a sweep needs, parked where a request can reach it. `sweep.judge_sweep()` wants
+    # a live Vinted client, a session manager, and the two n8n clients; the poller process
+    # already builds all four, so the web process borrows them rather than opening a second
+    # set of connections. Any of them may be None — a bare `create_app(settings, repo)` in a
+    # test, or an install with no Magic webhooks configured — and the endpoints that need
+    # them say so rather than pretending a sweep is possible.
+    app.state.vinted = client
+    app.state.sessions = sessions
+    app.state.triage = triage
+    app.state.verdict = verdict
 
     async def require_login(
         session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
@@ -1088,11 +1108,25 @@ async def serve(
     stop: asyncio.Event,
     taxonomy: Taxonomy | None = None,
     mapper: MapperClient | None = None,
+    *,
+    client: VintedClient | None = None,
+    sessions: SessionManager | None = None,
+    triage: TriageClient | None = None,
+    verdict: VerdictClient | None = None,
 ) -> None:
     """Run the web UI until the app shuts down."""
 
     config = uvicorn.Config(
-        create_app(settings, repo, taxonomy, mapper),
+        create_app(
+            settings,
+            repo,
+            taxonomy,
+            mapper,
+            client=client,
+            sessions=sessions,
+            triage=triage,
+            verdict=verdict,
+        ),
         host=settings.web_host,
         port=settings.web_port,
         log_config=None,

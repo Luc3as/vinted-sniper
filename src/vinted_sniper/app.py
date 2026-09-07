@@ -29,6 +29,8 @@ from vinted_sniper.engine.report import WeeklyReport
 from vinted_sniper.engine.watchdog import Watchdog
 from vinted_sniper.log import get_logger
 from vinted_sniper.magic.client import MapperClient
+from vinted_sniper.magic.triage import TriageClient
+from vinted_sniper.magic.verdict import VerdictClient
 from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.pacing import RequestBudget
 from vinted_sniper.vinted.proxies import ProxyRotation
@@ -151,7 +153,12 @@ class Application:
                                 if settings.magic_webhook_url
                                 else None
                             )
-                            tg.create_task(self._run_web(repo, taxonomy, mapper), name="web")
+                            tg.create_task(
+                                self._run_web(
+                                    repo, taxonomy, mapper, client=client, sessions=sessions
+                                ),
+                                name="web",
+                            )
                 except* Exception as group:
                     for error in group.exceptions:
                         log.exception("app.task_failed", error=str(error))
@@ -285,8 +292,34 @@ class Application:
             log.exception("telegram_bot.failed", error=str(exc))
 
     async def _run_web(
-        self, repo: Repo, taxonomy: Taxonomy, mapper: MapperClient | None = None
+        self,
+        repo: Repo,
+        taxonomy: Taxonomy,
+        mapper: MapperClient | None = None,
+        *,
+        client: VintedClient | None = None,
+        sessions: SessionManager | None = None,
     ) -> None:
+        # One webhook token and one timeout across all three Magic flows — the mapper,
+        # the photo check and the opinions are the same n8n instance wearing three hats.
+        triage = (
+            TriageClient(
+                self._settings.magic_triage_webhook_url,
+                token=self._settings.magic_webhook_token,
+                timeout_s=self._settings.magic_timeout_s,
+            )
+            if self._settings.magic_triage_webhook_url
+            else None
+        )
+        verdict = (
+            VerdictClient(
+                self._settings.magic_verdict_webhook_url,
+                token=self._settings.magic_webhook_token,
+                timeout_s=self._settings.magic_timeout_s,
+            )
+            if triage is not None and self._settings.magic_verdict_webhook_url
+            else None
+        )
         try:
             try:
                 from vinted_sniper.web.server import serve  # noqa: PLC0415
@@ -299,7 +332,17 @@ class Application:
                 )
                 return
 
-            await serve(self._settings, repo, self._stop, taxonomy, mapper)
+            await serve(
+                self._settings,
+                repo,
+                self._stop,
+                taxonomy,
+                mapper,
+                client=client,
+                sessions=sessions,
+                triage=triage,
+                verdict=verdict,
+            )
         except Exception as exc:
             log.exception("web.failed", error=str(exc))
         finally:
@@ -307,6 +350,10 @@ class Application:
             # the only thing that ever uses it — so it closes here, on every way out.
             if mapper is not None:
                 await mapper.aclose()
+            if triage is not None:
+                await triage.aclose()
+            if verdict is not None:
+                await verdict.aclose()
 
     # --- Signals -------------------------------------------------------------------
 
