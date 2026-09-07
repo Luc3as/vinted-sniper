@@ -152,11 +152,14 @@
        button used to, which is what lets the tables breathe. */
     button.iconbtn { display: inline-flex; align-items: center; justify-content: center;
                      width: 2rem; height: 2rem; padding: 0; vertical-align: middle; }
-    button svg, a svg { width: 1rem; height: 1rem; }
+    button svg, a svg, label svg { width: 1rem; height: 1rem; flex: none; vertical-align: -.15em; }
     /* The browser's [hidden] rule covers HTML only; the theme button swaps SVG icons. */
     #theme-toggle svg[hidden] { display: none; }
     .grid { display: grid; gap: .8rem; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
     .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+    /* A form's secondary block — routing, cloning — set off from the fields above it. */
+    .subsec { margin-top: .9rem; padding-top: .8rem; border-top: 1px dashed var(--line); }
+    .subsec > .muted { display: block; margin-top: .35rem; }
     .muted { color: var(--muted); font-size: .85rem; }
     .flash { border-left: 3px solid var(--info); background: var(--panel); border-radius: var(--radius-sm);
              padding: .6rem .85rem; margin: 0 0 1rem; }

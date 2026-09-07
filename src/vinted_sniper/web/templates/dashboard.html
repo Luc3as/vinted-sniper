@@ -136,7 +136,7 @@
               </div>
             </div>
             {% if destinations %}
-            <div style="margin-top:.85rem">
+            <div class="subsec">
               <label>Send alerts to {{ help('Which destinations this search feeds. A search with none selected still records listings, it just tells nobody.') }}</label>
               <div class="row">
                 {% for destination in destinations if destination.active %}
@@ -155,14 +155,16 @@
               <span class="muted">The URL cannot change — that would be a different search. Add a new one instead.</span>
             </div>
           </form>
-          <form method="post" action="/searches/{{ search.query_id }}/clone" class="row" style="margin-top:.9rem;padding-top:.8rem;border-top:1px dashed var(--line)">
-            <label for="clone-{{ q.id }}" style="margin:0">{{ icon('clone') }} Also watch this on</label>
-            <select id="clone-{{ q.id }}" name="tld" style="width:auto">
-              {% for t in known_tlds if t != q.tld %}
-              <option value="{{ t }}" {% if t in ('cz', 'de', 'pl', 'at', 'hu') and loop.first %}{% endif %}>vinted.{{ t }}</option>
-              {% endfor %}
-            </select>
-            <button class="quiet" type="submit">Clone</button>
+          <form method="post" action="/searches/{{ search.query_id }}/clone" class="subsec">
+            <div class="row">
+              <label for="clone-{{ q.id }}" style="margin:0">{{ icon('clone') }} Also watch this on</label>
+              <select id="clone-{{ q.id }}" name="tld" style="width:auto">
+                {% for t in known_tlds if t != q.tld %}
+                <option value="{{ t }}">vinted.{{ t }}</option>
+                {% endfor %}
+              </select>
+              <button class="quiet" type="submit">Clone</button>
+            </div>
             <span class="muted">Same filters and destinations, another country. Vinted lets you buy across EU sites, and the bigger markets (.de, .pl, .cz) have far more listings than .sk. A listing shown on several sites is only alerted once.</span>
           </form>
         </td>
@@ -311,7 +313,7 @@
         </div>
       </details>
       {% if destinations %}
-      <div style="margin-top:.85rem">
+      <div class="subsec">
         <label>Send alerts to {{ help('Which destinations this search feeds. A search with none selected still records listings, it just tells nobody.') }}</label>
         <div class="row">
           {% for destination in destinations if destination.active %}
