@@ -39,6 +39,7 @@ async def export_config(repo: Repo) -> dict[str, Any]:
                 "min_seller_reviews": query.min_seller_reviews,
                 "blocked_sellers": query.blocked_sellers,
                 "max_market_percentile": query.max_market_percentile,
+                "min_enrich_score": query.min_enrich_score,
                 "destinations": sorted(names_by_id[i] for i in routed if i in names_by_id),
             }
         )
@@ -104,6 +105,7 @@ async def import_config(repo: Repo, document: dict[str, Any]) -> dict[str, int]:
                 min_seller_reviews=entry.get("min_seller_reviews"),
                 blocked_sellers=list(entry.get("blocked_sellers") or []),
                 max_market_percentile=entry.get("max_market_percentile"),
+                min_enrich_score=entry.get("min_enrich_score"),
             )
             if entry.get("paused"):
                 await repo.set_paused(query_id, True)

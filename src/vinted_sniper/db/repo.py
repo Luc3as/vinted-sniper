@@ -54,6 +54,9 @@ class Query:
     blocked_sellers: list[str] = field(default_factory=list)
     # Only announce listings priced in the cheapest N% of what this search has seen.
     max_market_percentile: int | None = None
+    # Only alert when the AI agent scored the listing at least this. Applies only when a
+    # verdict arrived in time; no verdict means the alert goes out as usual.
+    min_enrich_score: int | None = None
     # Bumped on every edit; the supervisor restarts a search's task when it changes so
     # new filters take effect without a process restart.
     updated_at: int = 0
@@ -119,6 +122,8 @@ class PendingNotification:
     # Where the price sat among this search's listings when found: (percentile, sample).
     market_percentile: int | None = None
     market_n: int | None = None
+    # The search's score floor for alerts, if it set one; the dispatcher enforces it.
+    min_enrich_score: int | None = None
 
     def market_line(self, t: Translator = i18n.EN) -> str | None:
         """Plain words for the market position: "cheaper than 88% of 312 listings seen
@@ -191,14 +196,15 @@ class Repo:
         min_seller_reviews: int | None = None,
         blocked_sellers: list[str] | None = None,
         max_market_percentile: int | None = None,
+        min_enrich_score: int | None = None,
     ) -> int:
         now = int(time.time())
         query_id = await self._db.insert(
             "INSERT INTO queries (name, url, tld, params_json, poll_interval_s, "
             "banned_keywords_json, max_total_price, required_keywords_json, title_pattern, "
             "min_seller_rating, min_seller_reviews, blocked_sellers_json, "
-            "max_market_percentile, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "max_market_percentile, min_enrich_score, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 name,
                 url,
@@ -213,6 +219,7 @@ class Repo:
                 min_seller_reviews,
                 json.dumps(blocked_sellers or []),
                 max_market_percentile,
+                min_enrich_score,
                 now,
                 now,
             ),
@@ -257,6 +264,7 @@ class Repo:
         min_seller_reviews: int | None,
         blocked_sellers: list[str],
         max_market_percentile: int | None = None,
+        min_enrich_score: int | None = None,
     ) -> None:
         """Change everything about a search except what it searches for.
 
@@ -267,7 +275,7 @@ class Repo:
             "UPDATE queries SET name = ?, poll_interval_s = ?, banned_keywords_json = ?, "
             "max_total_price = ?, required_keywords_json = ?, title_pattern = ?, "
             "min_seller_rating = ?, min_seller_reviews = ?, blocked_sellers_json = ?, "
-            "max_market_percentile = ?, updated_at = ? WHERE id = ?",
+            "max_market_percentile = ?, min_enrich_score = ?, updated_at = ? WHERE id = ?",
             (
                 name,
                 poll_interval_s,
@@ -279,6 +287,7 @@ class Repo:
                 min_seller_reviews,
                 json.dumps(blocked_sellers),
                 max_market_percentile,
+                min_enrich_score,
                 int(time.time()),
                 query_id,
             ),
@@ -303,6 +312,7 @@ class Repo:
             min_seller_reviews=source.min_seller_reviews,
             blocked_sellers=source.blocked_sellers,
             max_market_percentile=source.max_market_percentile,
+            min_enrich_score=source.min_enrich_score,
         )
         for destination_id in await self.destination_ids_for_query(query_id):
             await self.route(new_id, destination_id)
@@ -350,6 +360,7 @@ class Repo:
             min_seller_reviews=row["min_seller_reviews"],
             blocked_sellers=_json_list(row["blocked_sellers_json"]) or [],
             max_market_percentile=row["max_market_percentile"],
+            min_enrich_score=row["min_enrich_score"],
             updated_at=int(row["updated_at"] or 0),
         )
 
@@ -1111,7 +1122,8 @@ class Repo:
         async with self._db.transaction() as conn:
             async with conn.execute(
                 "SELECT o.id, o.destination_id, o.query_id, o.attempts, o.kind, "
-                "o.previous_price, q.name AS query_name, i.* FROM outbox o "
+                "o.previous_price, q.name AS query_name, "
+                "q.min_enrich_score AS query_min_enrich_score, i.* FROM outbox o "
                 "JOIN items i ON i.item_id = o.item_id "
                 "LEFT JOIN queries q ON q.id = o.query_id "
                 "WHERE o.destination_id = ? AND o.status = 'pending' AND o.next_attempt_at <= ? "
@@ -1164,6 +1176,7 @@ class Repo:
                 enrichment=Enrichment.from_row(row),
                 market_percentile=row["market_percentile"],
                 market_n=row["market_n"],
+                min_enrich_score=row["query_min_enrich_score"],
             )
             for row in rows
         ]
@@ -1195,6 +1208,16 @@ class Repo:
             "UPDATE outbox SET status = 'failed', lease_expires_at = NULL, last_error = ? "
             "WHERE id = ?",
             [(error[:500], outbox_id) for outbox_id in outbox_ids],
+        )
+
+    async def mark_cancelled(self, cancellations: list[tuple[int, str]]) -> None:
+        """Drop notifications on purpose, each with its own reason for the history page."""
+        if not cancellations:
+            return
+        await self._db.execute_many(
+            "UPDATE outbox SET status = 'cancelled', lease_expires_at = NULL, last_error = ? "
+            "WHERE id = ?",
+            [(reason[:500], outbox_id) for outbox_id, reason in cancellations],
         )
 
     async def discard_pending_for(self, destination_id: int, reason: str) -> int:

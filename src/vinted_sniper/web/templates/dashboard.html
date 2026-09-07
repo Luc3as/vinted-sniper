@@ -49,6 +49,7 @@
             every {{ q.poll_interval_s }}s
             {% if q.max_total_price %}· ≤ {{ q.max_total_price }} total{% endif %}
             {% if q.max_market_percentile %}· cheapest {{ q.max_market_percentile }}% only{% endif %}
+            {% if q.min_enrich_score %}· 🤖 ≥ {{ q.min_enrich_score }}{% endif %}
             {% if q.required_keywords %}· needs {{ q.required_keywords | join(', ') }}{% endif %}
             {% if q.banned_keywords %}· not {{ q.banned_keywords | join(', ') }}{% endif %}
             {% if q.title_pattern %}· /{{ q.title_pattern }}/{% endif %}
@@ -110,6 +111,10 @@
               <div>
                 <label for="e-pct-{{ q.id }}">Only the cheapest … % {{ help('Compares each new listing with everything this search has seen in the last 30 days. “25” means: only tell me if it is cheaper than three quarters of them. Adapts to the market by itself; needs 10 listings before it kicks in.') }}</label>
                 <input type="text" id="e-pct-{{ q.id }}" name="max_market_percentile" value="{{ q.max_market_percentile or '' }}" placeholder="e.g. 25" inputmode="numeric">
+              </div>
+              <div>
+                <label for="e-score-{{ q.id }}">Alert only from AI score {{ help('Needs the AI agent. If its verdict arrives in time and scores below this, no alert goes to chat — the listing still appears on Found. If the agent is down or too slow, the alert is sent anyway after the wait.') }}</label>
+                <input type="text" id="e-score-{{ q.id }}" name="min_enrich_score" value="{{ q.min_enrich_score or '' }}" placeholder="e.g. 60" inputmode="numeric">
               </div>
               <div>
                 <label for="e-req-{{ q.id }}">Title must contain (all) {{ help('Comma-separated words that must all be in the title. Vinted’s text search also matches descriptions, which is where most of the noise comes from.') }}</label>
@@ -282,6 +287,10 @@
         <div>
           <label for="max_market_percentile">Only the cheapest … % {{ help('“25” = only tell me about listings cheaper than three quarters of what this search has seen in the last 30 days. Adapts by itself; needs 10 listings first.') }}</label>
           <input type="text" id="max_market_percentile" name="max_market_percentile" placeholder="e.g. 25" inputmode="numeric">
+        </div>
+        <div>
+          <label for="min_enrich_score">Alert only from AI score {{ help('Needs the AI agent. If its verdict arrives in time and scores below this, no alert goes to chat — the listing still appears on Found. If the agent is down or too slow, the alert is sent anyway after the wait.') }}</label>
+          <input type="text" id="min_enrich_score" name="min_enrich_score" placeholder="e.g. 60" inputmode="numeric">
         </div>
         <div>
           <label for="banned_keywords">Exclude words {{ help('Skip listings whose title contains any of these.') }}</label>

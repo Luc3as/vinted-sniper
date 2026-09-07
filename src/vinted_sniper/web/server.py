@@ -315,6 +315,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         min_seller_reviews: Annotated[str, Form()] = "",
         blocked_sellers: Annotated[str, Form()] = "",
         max_market_percentile: Annotated[str, Form()] = "",
+        min_enrich_score: Annotated[str, Form()] = "",
         destination_ids: Annotated[list[int] | None, Form()] = None,
         _: None = guard,
     ) -> Response:
@@ -351,6 +352,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             min_seller_reviews=_int_or_none(min_seller_reviews),
             blocked_sellers=_csv(blocked_sellers),
             max_market_percentile=_percent_or_none(max_market_percentile),
+            min_enrich_score=_percent_or_none(min_enrich_score),
         )
         for destination_id in destination_ids or []:
             await repo.route(query_id, destination_id)
@@ -394,6 +396,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
         min_seller_reviews: Annotated[str, Form()] = "",
         blocked_sellers: Annotated[str, Form()] = "",
         max_market_percentile: Annotated[str, Form()] = "",
+        min_enrich_score: Annotated[str, Form()] = "",
         destination_ids: Annotated[list[int] | None, Form()] = None,
         _: None = guard,
     ) -> Response:
@@ -421,6 +424,7 @@ def create_app(settings: Settings, repo: Repo, taxonomy: Taxonomy | None = None)
             min_seller_reviews=_int_or_none(min_seller_reviews),
             blocked_sellers=_csv(blocked_sellers),
             max_market_percentile=_percent_or_none(max_market_percentile),
+            min_enrich_score=_percent_or_none(min_enrich_score),
         )
         # The edit form carries the same destination checkboxes as the add form, so a save
         # is also a routing change: unchecked means "stop sending there".

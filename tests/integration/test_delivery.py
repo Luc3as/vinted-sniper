@@ -33,13 +33,14 @@ def listing(item_id: int) -> Item:
     )
 
 
-async def a_search(repo: Repo) -> Query:
+async def a_search(repo: Repo, min_enrich_score: int | None = None) -> Query:
     query_id = await repo.add_query(
         name="test",
         url="https://www.vinted.fr/catalog?search_text=x",
         tld="fr",
         params={},
         poll_interval_s=60,
+        min_enrich_score=min_enrich_score,
     )
     query = await repo.get_query(query_id)
     assert query is not None
@@ -428,6 +429,48 @@ async def test_chat_alerts_wait_for_a_verdict_while_the_webhook_fires_at_once(
 
     batch_view = await repo.claim_batch(phone, 10)
     assert batch_view == [], "nothing left"
+
+
+async def test_a_dull_verdict_cancels_the_alert_when_the_search_sets_a_floor(
+    repo: Repo, settings: Settings
+) -> None:
+    settings = settings.model_copy(update={"enrichment_wait_s": 90})
+    query = await a_search(repo, min_enrich_score=60)
+    phone = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    await repo.record_new_items(query, [listing(1)], [phone], hold_s=settings.enrichment_wait_s)
+
+    endpoint = FakeEndpoint()
+    dispatcher = make_dispatcher(repo, settings, endpoint)
+    assert await dispatcher.drain() == 0, "held for the verdict"
+
+    assert await repo.store_enrichment(1, EnrichmentIn(score=25))
+    assert await dispatcher.drain() == 0, "released, judged, and cancelled"
+    assert endpoint.calls == 0, "nothing reached the phone"
+    assert await repo.outbox_depth() == 0, "cancelled outright, not left pending"
+
+
+async def test_a_verdict_at_the_floor_still_alerts(repo: Repo, settings: Settings) -> None:
+    settings = settings.model_copy(update={"enrichment_wait_s": 90})
+    query = await a_search(repo, min_enrich_score=60)
+    phone = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    await repo.record_new_items(query, [listing(1)], [phone], hold_s=settings.enrichment_wait_s)
+    assert await repo.store_enrichment(1, EnrichmentIn(score=60))
+
+    endpoint = FakeEndpoint()
+    assert await make_dispatcher(repo, settings, endpoint).drain() == 1
+    assert endpoint.calls == 1
+
+
+async def test_a_missing_verdict_never_blocks_the_alert(repo: Repo, settings: Settings) -> None:
+    """The floor gates only what the agent actually judged: a dead or slow agent must
+    cost at most the wait, never the alert itself."""
+    query = await a_search(repo, min_enrich_score=60)
+    phone = await repo.add_destination(kind="ntfy", name="phone", config={"topic": "t"})
+    await repo.record_new_items(query, [listing(1)], [phone], hold_s=0)
+
+    endpoint = FakeEndpoint()
+    assert await make_dispatcher(repo, settings, endpoint).drain() == 1, "unscored still alerts"
+    assert endpoint.calls == 1
 
 
 async def test_a_verdict_for_an_unknown_listing_is_refused(repo: Repo) -> None:

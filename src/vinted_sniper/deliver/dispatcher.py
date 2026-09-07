@@ -55,6 +55,22 @@ def _awaiting_pairing(destination: Destination) -> bool:
     return destination.kind == "telegram" and not destination.config.get("chat_id")
 
 
+def _under_score_floor(notification: PendingNotification) -> bool:
+    """A new-listing alert whose verdict came back under the search's score floor.
+
+    Only a verdict that actually arrived can gate: a silent or dead agent means the
+    alert goes out unscored after the hold, exactly as if no floor were set. Price-drop
+    and follow-up messages pass too — their scores describe an earlier price.
+    """
+    return (
+        notification.kind == "new"
+        and notification.min_enrich_score is not None
+        and notification.enrichment is not None
+        and notification.enrichment.score is not None
+        and notification.enrichment.score < notification.min_enrich_score
+    )
+
+
 class Dispatcher:
     """Runs one sending worker per destination."""
 
@@ -177,6 +193,11 @@ class Dispatcher:
         if not batch:
             return 0
 
+        # The webhook is the agent's own feed and must see everything; chat destinations
+        # honour the search's score floor.
+        if sender.kind != "webhook" and not (batch := await self._apply_score_floor(batch)):
+            return 0
+
         if sender.kind == "telegram":
             # One bot token serves every Telegram destination, so the shared budget is
             # spent here rather than inside the sender.
@@ -222,6 +243,33 @@ class Dispatcher:
         await self._repo.mark_failed(abandoned, result.error or "the destination rejected it")
 
         return len(result.delivered)
+
+    async def _apply_score_floor(
+        self, batch: list[PendingNotification]
+    ) -> list[PendingNotification]:
+        """Cancel alerts whose verdict came in under their search's floor."""
+        scored_out = [n for n in batch if _under_score_floor(n)]
+        if not scored_out:
+            return batch
+        await self._repo.mark_cancelled(
+            [
+                (
+                    n.outbox_id,
+                    f"AI scored it {n.enrichment.score}, "  # type: ignore[union-attr]
+                    f"under this search's floor of {n.min_enrich_score}",
+                )
+                for n in scored_out
+            ]
+        )
+        for n in scored_out:
+            log.info(
+                "outbox.score_floor",
+                item_id=n.item.item_id,
+                query_id=n.query_id,
+                score=n.enrichment.score if n.enrichment else None,
+                floor=n.min_enrich_score,
+            )
+        return [n for n in batch if not _under_score_floor(n)]
 
     async def _agent_context(self, notification: PendingNotification) -> dict[str, Any]:
         """The facts an outside agent should weigh: market position, known retail prices,
