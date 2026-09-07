@@ -14,6 +14,10 @@ Two quieter hazards are pinned alongside it, because neither would announce itse
 * A row in `market` is keyed `(item_id, query_id)`, so a sweep writing there would fold its
   own reading into a standing search's price history and skew the percentile the search's
   own gates are judged against.
+* `store_enrichment()` on a sweep candidate is a no-op that returns `False`. Nothing
+  raises, nothing is written, and the expensive verdict is simply lost — so the guard below
+  covers the two `magic` clients as well as the engine, `verdict.py` being where the
+  temptation to reach for it actually lives.
 
 The counts are only meaningful next to a non-empty `sweep_candidates`: an empty database is
 trivially isolated, so every test here first proves the sweep did real work.
@@ -32,6 +36,8 @@ import pytest
 from tests.conftest import ScriptedTransport
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine import sweep
+from vinted_sniper.magic import triage as magic_triage
+from vinted_sniper.magic import verdict as magic_verdict
 from vinted_sniper.vinted.client import PER_PAGE, VintedClient
 from vinted_sniper.vinted.session import SessionManager
 
@@ -48,10 +54,27 @@ KEYWORDS = ["patagonia", "torrentshell"]
 # the hazard fails this test rather than shipping quietly.
 ALERT_WRITERS = ("record_new_items", "record_price_drops", "observe_market")
 
-# Read from the imported module rather than from a path, so the source-level guards below
+# Plus the one that is not an alert at all and is worse for it. `store_enrichment()` is
+# `UPDATE items ... WHERE item_id = ?`, so a sweep candidate — which has no row in `items`
+# and must never gain one — matches nothing and the call returns `False`. Nothing raises,
+# nothing is stored, and the verdict an operator paid for is gone. `record_verdict()` is
+# the sweep's writer; this is the guard that keeps the wrong one out.
+FORBIDDEN_WRITERS = (*ALERT_WRITERS, "store_enrichment")
+
+# Read from the imported modules rather than from paths, so the source-level guards below
 # cannot be silently skipped by running pytest from a different working directory. This
 # is the same seam `tests/unit/test_cli_sweep.py` uses on `_cmd_sweep`.
 SWEEP_SOURCE = inspect.getsource(sweep)
+
+# Every module on the sweep's write path. `engine/sweep.py` orchestrates it, and the two
+# `magic` clients are where the answers arrive — `verdict.py` most of all, because it holds
+# an enrichment answer in its hand and `store_enrichment()` is the obvious-looking place to
+# put it.
+GUARDED_MODULES = {
+    "engine/sweep.py": SWEEP_SOURCE,
+    "magic/triage.py": inspect.getsource(magic_triage),
+    "magic/verdict.py": inspect.getsource(magic_verdict),
+}
 
 
 async def count(db: Any, table: str) -> int:
@@ -199,22 +222,24 @@ async def test_the_dispatchers_wakeup_event_is_never_set(
     assert "work_available" not in SWEEP_SOURCE
 
 
-@pytest.mark.parametrize("forbidden", ALERT_WRITERS)
-async def test_the_sweep_module_never_names_an_alert_writer(forbidden: str) -> None:
+@pytest.mark.parametrize("module", sorted(GUARDED_MODULES))
+@pytest.mark.parametrize("forbidden", FORBIDDEN_WRITERS)
+def test_no_sweep_module_names_a_poller_writer(module: str, forbidden: str) -> None:
     """A source-level guard, so the hazard is caught at edit time, not at run time.
 
     Matching on parsed `Name`/`Attribute` nodes rather than on raw text means the module
-    docstring and the comments above may keep naming these methods — explaining why a sweep
-    must not call them is the point — without the explanation tripping its own guard.
+    docstrings and the comments above may keep naming these methods — explaining why a
+    sweep must not call them is the point — without the explanation tripping its own guard.
     """
-    tree = ast.parse(SWEEP_SOURCE)
+    tree = ast.parse(GUARDED_MODULES[module])
     referenced = {
         node.attr if isinstance(node, ast.Attribute) else node.id
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute | ast.Name)
     }
     assert forbidden not in referenced, (
-        f"engine/sweep.py references {forbidden}; that is the poller's alert write path"
+        f"{module} references {forbidden}; that is the poller's own write path, and on a "
+        "sweep candidate it writes nothing at all"
     )
 
 

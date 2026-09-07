@@ -22,4 +22,12 @@ debugging one should not have to learn a second set of rules. The one thing it a
 cost shape — `Usage` on every answer — and the rule that goes with it: triage sends
 thumbnails and never full-size photos, which is a property of the request body and is
 asserted as one.
+
+`verdict.py` is the last and most expensive step: a full opinion on the two or three
+listings triage recognised, with every full-size photo, from a copy of the enrichment flow.
+It parses its answer with `enrichment.EnrichmentIn` rather than a type of its own, because
+the flow is meant to be the same flow — only the destination of the answer differs, and
+that destination is `sweep_candidates` and never `items`. What keeps that stage affordable
+is not the prompt but the caller: `engine.sweep.judge_sweep()` cuts the list to
+`sweep_max_verdicts` before it makes a single request.
 """

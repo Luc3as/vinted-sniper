@@ -6,11 +6,18 @@ is the first test in this file: a listing called nothing but "Kurtka Patagonia" 
 score 0.0 — has to come out *above* a listing whose title matched every keyword and whose
 photo the model rejected. Everything else in the slice is plumbing for that sentence.
 
-The photo check is stubbed here and nothing else is: a real `SessionManager`, `VintedClient`
-and `Repo` over a scripted transport, so what is asserted is the orchestration — how the
-batches were cut, what reached the database and when, and what a failing batch leaves
-behind — rather than mocks agreeing with each other. `tests/unit/test_magic_triage.py`
-owns the wire contract with the flow itself.
+The second half of the file is the stage after it, and its headline claim is a number:
+at most `sweep_max_verdicts` full opinions are ever bought. That claim is only worth
+anything if it is counted in requests that were never made, so every assertion about the
+cap is an assertion about `StubVerdict.calls` — never about a prompt, and never about what
+was stored afterwards.
+
+Both AI stages are stubbed here and nothing else is: a real `SessionManager`,
+`VintedClient` and `Repo` over a scripted transport, so what is asserted is the
+orchestration — how the batches were cut, who was sent for a verdict, what reached the
+database and when, and what a failing call leaves behind — rather than mocks agreeing with
+each other. `tests/unit/test_magic_triage.py` and `tests/unit/test_magic_verdict.py` own
+the wire contracts with the flows themselves.
 """
 
 from __future__ import annotations
@@ -19,13 +26,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
 import structlog
 
 from tests.conftest import ScriptedTransport
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine import sweep
+from vinted_sniper.enrichment import EnrichmentIn
 from vinted_sniper.magic.errors import MappingError
 from vinted_sniper.magic.models import TriageBatch, TriageItem, TriageTarget, Usage
+from vinted_sniper.magic.verdict import VerdictOut
 from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.models import Item
 from vinted_sniper.vinted.session import SessionManager
@@ -106,6 +116,43 @@ def queue_page(transport: ScriptedTransport, entries: list[dict[str, Any]]) -> N
     transport.queue_catalog(entries)
 
 
+class StubVerdict:
+    """Stands in for the copy of the enrichment flow, and counts every call it was paid for.
+
+    The count is the point of most of the tests below: the cap is only real if it is a
+    number of requests that were never made.
+    """
+
+    def __init__(
+        self,
+        *,
+        usage: Usage | None = None,
+        fail_on: set[int] | None = None,
+        score: int = 80,
+    ) -> None:
+        self.usage = usage
+        # Item ids the flow refuses to answer about.
+        self.fail_on = fail_on or set()
+        self.score = score
+        self.calls: list[int] = []
+        self.targets: list[TriageTarget] = []
+
+    async def judge(self, item: Item, target: TriageTarget) -> VerdictOut:
+        self.calls.append(item.item_id)
+        self.targets.append(target)
+        if item.item_id in self.fail_on:
+            raise MappingError("the verdict flow answered 502")
+        return VerdictOut(
+            verdict=EnrichmentIn(
+                score=self.score,
+                model="Patagonia Torrentshell 3L",
+                matches_query=True,
+                verdict=f"a real shell, listing {item.item_id}",
+            ),
+            usage=self.usage,
+        )
+
+
 async def judge_over(
     transport: ScriptedTransport,
     repo: Repo,
@@ -116,6 +163,10 @@ async def judge_over(
     keywords: list[str] | None = None,
     max_pages: int = 4,
     max_items: int = 1000,
+    verdict: StubVerdict | None = None,
+    max_verdicts: int = 3,
+    cost_per_mtok_in: float = 0.0,
+    cost_per_mtok_out: float = 0.0,
 ) -> sweep.SweepResult:
     sessions = SessionManager(db, transport)
     client = VintedClient(transport, sessions)
@@ -128,10 +179,14 @@ async def judge_over(
         client=client,
         repo=repo,
         triage=triage,  # type: ignore[arg-type]
+        verdict=verdict,  # type: ignore[arg-type]
+        max_verdicts=max_verdicts,
         max_pages=max_pages,
         max_items=max_items,
         batch_size=batch_size,
         sessions=sessions,
+        cost_per_mtok_in=cost_per_mtok_in,
+        cost_per_mtok_out=cost_per_mtok_out,
     )
 
 
@@ -479,6 +534,336 @@ async def test_a_judged_sweep_still_writes_only_to_the_sweep_tables(
     result = await judge_over(transport, repo, db, triage=triage, batch_size=10)
 
     assert result.triaged == 25, "the empty counts below mean nothing without real work"
+    for table in ("items", "outbox", "market"):
+        row = await db.fetch_one(f"SELECT COUNT(*) AS n FROM {table}")
+        assert int(row["n"]) == 0, f"a judged sweep wrote to {table}"
+
+
+# --- The verdict cap ----------------------------------------------------------------------
+
+
+async def test_at_most_max_verdicts_are_bought_and_they_are_the_top_of_the_order(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """The slice's cost promise, counted in requests that were never made.
+
+    Ten listings the photo check recognised, a cap of three, and seven calls that do not
+    happen — because the cap is applied to the post-triage list before the loop starts. A
+    cap asked for in a prompt would have made all ten calls and then thrown seven answers
+    away.
+    """
+    ids = list(range(1400, 1410))
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    # Descending confidence, so "the top three" is one fixed set rather than a tie-break.
+    triage = StubTriage(
+        {
+            item_id: Answer(matches_target=True, confidence=0.99 - index / 100)
+            for index, item_id in enumerate(ids)
+        }
+    )
+    verdict = StubVerdict()
+
+    result = await judge_over(transport, repo, db, triage=triage, verdict=verdict, max_verdicts=3)
+
+    assert len(verdict.calls) == 3, "seven calls that were never made is the whole point"
+    assert verdict.calls == order(result)[:3] == [1400, 1401, 1402]
+    assert result.verdicts == 3
+
+
+async def test_a_cap_of_zero_buys_nothing_and_is_not_an_error(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """The cheapest useful configuration: rank everything, pay for no full opinions."""
+    ids = [1501, 1502, 1503]
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    triage = StubTriage({i: Answer(matches_target=True, confidence=0.9) for i in ids})
+    verdict = StubVerdict()
+
+    result = await judge_over(transport, repo, db, triage=triage, verdict=verdict, max_verdicts=0)
+
+    assert verdict.calls == []
+    assert result.verdicts == 0
+    assert result.status == "ok"
+    assert result.triaged == 3, "the free half of the funnel still ran"
+
+
+async def test_nothing_the_photo_check_recognised_means_nothing_is_bought(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """A sweep of 25 listings that are all the wrong coat costs nothing beyond triage."""
+    ids = list(range(1600, 1625))
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    triage = StubTriage({i: Answer(matches_target=False, confidence=0.9) for i in ids})
+    verdict = StubVerdict()
+
+    result = await judge_over(transport, repo, db, triage=triage, verdict=verdict)
+
+    assert verdict.calls == []
+    assert result.verdicts == 0
+    assert result.status == "ok"
+
+
+async def test_an_untriaged_candidate_is_never_bought_a_verdict(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """Only `matches_target is True` qualifies. "Nobody looked" is not a recommendation."""
+    ids = [1701, 1702, 1703]
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    triage = StubTriage({1703: Answer(matches_target=True, confidence=0.9)}, skip={1701, 1702})
+    verdict = StubVerdict()
+
+    result = await judge_over(transport, repo, db, triage=triage, verdict=verdict)
+
+    assert verdict.calls == [1703]
+    assert result.verdicts == 1
+
+
+async def test_a_verdict_lands_on_the_sweep_candidate_row(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """`record_verdict()`, not `store_enrichment()`: the answer reaches the sweep tables.
+
+    The wrong writer here would be an `UPDATE items` that matched no row and returned
+    `False` — a silent nothing, which is why the row is read back rather than the call
+    being trusted.
+    """
+    queue_page(transport, [make_item(1801, photo_ts=PHOTO_TS, price="40.0")])
+    triage = StubTriage({1801: Answer(matches_target=True, confidence=0.9)})
+
+    result = await judge_over(transport, repo, db, triage=triage, verdict=StubVerdict(score=91))
+
+    assert await stage_of(db, 1801) == "verdict"
+    row = await db.fetch_one(
+        "SELECT verdict_score, verdict_model, verdict_text, judged_at "
+        "FROM sweep_candidates WHERE sweep_id = ? AND item_id = ?",
+        (result.sweep_id, 1801),
+    )
+    assert int(row["verdict_score"]) == 91
+    assert row["verdict_model"] == "Patagonia Torrentshell 3L"
+    assert row["verdict_text"] == "a real shell, listing 1801"
+    assert int(row["judged_at"]) > 0
+
+
+async def test_one_failing_verdict_still_buys_the_others_and_closes_the_run_partial(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """A verdict failure is per candidate: two answers paid for are two answers kept.
+
+    Abandoning the run on the first refusal would throw away work already billed, and
+    reporting `ok` would let a reader see two names where three were asked for.
+    """
+    ids = [1901, 1902, 1903]
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    triage = StubTriage(
+        {
+            item_id: Answer(matches_target=True, confidence=0.99 - index / 100)
+            for index, item_id in enumerate(ids)
+        }
+    )
+    verdict = StubVerdict(fail_on={1902})
+
+    result = await judge_over(transport, repo, db, triage=triage, verdict=verdict, max_verdicts=3)
+
+    assert verdict.calls == [1901, 1902, 1903], "it carried on rather than abandoning the rest"
+    assert result.verdicts == 2
+    assert result.status == "partial"
+    assert result.error is not None and "502" in result.error
+
+    run = await repo.get_sweep_run(result.sweep_id)
+    assert run is not None
+    assert run.status == "partial"
+    assert await stage_of(db, 1901) == "verdict"
+    assert await stage_of(db, 1903) == "verdict"
+    assert await stage_of(db, 1902) == "triage", "the one that failed kept its triage answer"
+
+
+async def test_a_failed_triage_batch_stops_the_expensive_stage(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """Same rule as a blocked read: a stage that could not finish is not a shopping list.
+
+    Batch two failing means the ranking is missing 25 listings nobody looked at, so the
+    three most promising of what came back are not the three most promising of the sweep.
+    """
+    ids = list(range(2000, 2045))
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    triage = StubTriage({i: Answer(matches_target=True, confidence=0.9) for i in ids}, fail_on=1)
+    verdict = StubVerdict()
+
+    result = await judge_over(
+        transport, repo, db, triage=triage, verdict=verdict, batch_size=20, max_verdicts=3
+    )
+
+    assert result.status == "partial"
+    assert result.triaged == 20, "batch one is still on disk"
+    assert verdict.calls == [], "and no money was spent on a half-ranked list"
+    assert result.verdicts == 0
+
+
+# --- The cost line ------------------------------------------------------------------------
+
+
+async def test_the_run_records_what_both_stages_spent(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """Tokens and euros are the sum of every triage batch and every verdict, in the run row.
+
+    One triage batch at 1000 in / 200 out, two verdicts at 14 600 in / 240 out, priced at
+    1.00 and 5.00 per million. Both stages, one running total.
+    """
+    ids = [2101, 2102, 2103, 2104]
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    triage = StubTriage(
+        {
+            item_id: Answer(matches_target=True, confidence=0.99 - index / 100)
+            for index, item_id in enumerate(ids)
+        },
+        usage=Usage(input_tokens=1000, output_tokens=200),
+    )
+    verdict = StubVerdict(usage=Usage(input_tokens=14_600, output_tokens=240))
+
+    result = await judge_over(
+        transport,
+        repo,
+        db,
+        triage=triage,
+        verdict=verdict,
+        batch_size=4,
+        max_verdicts=2,
+        cost_per_mtok_in=1.0,
+        cost_per_mtok_out=5.0,
+    )
+
+    triage_tokens, triage_cost = 1200, (1000 * 1.0 + 200 * 5.0) / 1e6
+    verdict_tokens, verdict_cost = 14_840, (14_600 * 1.0 + 240 * 5.0) / 1e6
+    assert result.verdicts == 2
+    assert result.tokens == triage_tokens + 2 * verdict_tokens
+    assert result.cost_eur == pytest.approx(triage_cost + 2 * verdict_cost)
+    assert result.tokens > 0 and result.cost_eur > 0
+
+    run = await repo.get_sweep_run(result.sweep_id)
+    assert run is not None
+    assert run.tokens == result.tokens
+    assert run.cost_eur == pytest.approx(result.cost_eur)
+
+
+async def test_a_verdict_flow_that_prices_itself_wins_over_the_configured_rates(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """The rates are a fallback for a flow that says nothing, never an override of one."""
+    ids = [2201, 2202]
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    triage = StubTriage(
+        {
+            item_id: Answer(matches_target=True, confidence=0.99 - index / 100)
+            for index, item_id in enumerate(ids)
+        }
+    )
+    verdict = StubVerdict(usage=Usage(input_tokens=14_600, output_tokens=240, cost_eur=0.05))
+
+    result = await judge_over(
+        transport,
+        repo,
+        db,
+        triage=triage,
+        verdict=verdict,
+        max_verdicts=2,
+        cost_per_mtok_in=1.0,
+        cost_per_mtok_out=5.0,
+    )
+
+    assert result.cost_eur == pytest.approx(0.10), "0.05 twice, not the rate arithmetic"
+    assert result.tokens == 2 * 14_840, "tokens are still counted either way"
+
+
+async def test_triage_spend_survives_a_verdict_stage_that_fails_entirely(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """T02's additive-not-assignment property, asserted end to end.
+
+    Triage answered and was billed; every verdict then refused. The run must still report
+    what triage cost — a cost line that only appears on a clean run is a cost line that
+    hides exactly the runs worth looking at.
+    """
+    ids = [2301, 2302]
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    triage = StubTriage(
+        {item_id: Answer(matches_target=True, confidence=0.9) for item_id in ids},
+        usage=Usage(input_tokens=1000, output_tokens=200, cost_eur=0.01),
+    )
+    verdict = StubVerdict(fail_on=set(ids))
+
+    result = await judge_over(
+        transport, repo, db, triage=triage, verdict=verdict, batch_size=2, max_verdicts=2
+    )
+
+    assert result.status == "partial"
+    assert result.verdicts == 0
+    assert result.tokens == 1200
+    assert result.cost_eur == pytest.approx(0.01)
+
+    run = await repo.get_sweep_run(result.sweep_id)
+    assert run is not None
+    assert run.tokens == 1200
+    assert run.cost_eur == pytest.approx(0.01), "closing the run partial did not reset the bill"
+
+
+async def test_the_cost_event_carries_the_five_fields_r004_asks_for(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """One `sweep.cost` line per judged run — grepping it is the whole cost report."""
+    ids = list(range(2400, 2410))
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    triage = StubTriage(
+        {
+            item_id: Answer(matches_target=index < 4, confidence=0.99 - index / 100)
+            for index, item_id in enumerate(ids)
+        },
+        usage=Usage(input_tokens=1000, output_tokens=200),
+    )
+    verdict = StubVerdict(usage=Usage(input_tokens=14_600, output_tokens=240))
+
+    with structlog.testing.capture_logs() as entries:
+        result = await judge_over(
+            transport,
+            repo,
+            db,
+            triage=triage,
+            verdict=verdict,
+            batch_size=10,
+            max_verdicts=3,
+            cost_per_mtok_in=1.0,
+            cost_per_mtok_out=5.0,
+        )
+
+    lines = [entry for entry in entries if entry["event"] == "sweep.cost"]
+    assert len(lines) == 1, "one line per run, not one per stage"
+    line = lines[0]
+    assert line["items_funneled"] == 10
+    assert line["thumbnails_triaged"] == 10
+    assert line["verdicts_issued"] == 3
+    assert line["tokens"] == result.tokens
+    assert line["cost_eur"] == pytest.approx(result.cost_eur)
+    assert line["sweep_id"] == result.sweep_id
+
+
+async def test_a_judged_and_verdicted_sweep_still_writes_only_to_the_sweep_tables(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """The safety claim with the last stage in the loop, where the temptation actually is.
+
+    `store_enrichment()` writes `items`, and a sweep candidate has no row there — so the
+    mistake would be a silent no-op rather than a crash. This counts the rows.
+    """
+    ids = list(range(2500, 2510))
+    queue_page(transport, [make_item(i, photo_ts=PHOTO_TS, price="40.0") for i in ids])
+    triage = StubTriage({i: Answer(matches_target=True, confidence=0.8) for i in ids})
+
+    result = await judge_over(
+        transport, repo, db, triage=triage, verdict=StubVerdict(), max_verdicts=3
+    )
+
+    assert result.verdicts == 3, "the empty counts below mean nothing without real work"
     for table in ("items", "outbox", "market"):
         row = await db.fetch_one(f"SELECT COUNT(*) AS n FROM {table}")
         assert int(row["n"]) == 0, f"a judged sweep wrote to {table}"

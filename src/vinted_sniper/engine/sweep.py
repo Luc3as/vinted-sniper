@@ -14,9 +14,11 @@ seller — which is exactly the subset `filters.SWEEP_GATES` runs.
 
 `funnel()` and everything under it is pure: parsed listings in, a ranking out. `run_sweep()`
 pages the API in relevance order, funnels what it read and writes the result to the sweep
-tables. `judge_sweep()` is the whole point of the milestone: it runs that sweep and then
-sends every survivor's *thumbnail* to the photo check, so what comes back is ordered by
-what the listings look like rather than by what the sellers called them.
+tables. `judge_sweep()` is the whole point of the milestone: it runs that sweep, sends
+every survivor's *thumbnail* to the photo check so what comes back is ordered by what the
+listings look like rather than by what the sellers called them, and then buys a full
+opinion on the best two or three — a hard cap applied to a list before any request is
+made, and a `sweep.cost` line saying what the whole run spent.
 
 `engine/dedup.py` is deliberately not used — its freshness window is newest-first semantics
 and would discard nearly all of an existing-stock sweep.
@@ -50,8 +52,9 @@ from vinted_sniper.vinted.errors import (
 from vinted_sniper.vinted.models import Item
 from vinted_sniper.vinted.session import SessionManager
 
-if TYPE_CHECKING:  # pragma: no cover - the stage is duck-typed at runtime, see judge_sweep()
+if TYPE_CHECKING:  # pragma: no cover - the stages are duck-typed at runtime, see judge_sweep()
     from vinted_sniper.magic.triage import TriageClient
+    from vinted_sniper.magic.verdict import VerdictClient
 
 log = get_logger(__name__)
 
@@ -287,13 +290,15 @@ async def judge_sweep(
     max_pages: int,
     max_items: int,
     batch_size: int,
+    verdict: VerdictClient | None = None,
+    max_verdicts: int = 0,
     query_id: int | None = None,
     gates_query: Query | None = None,
     sessions: SessionManager | None = None,
     cost_per_mtok_in: float = 0.0,
     cost_per_mtok_out: float = 0.0,
 ) -> SweepResult:
-    """Run a sweep, then re-rank what it found by what the photos actually show.
+    """Run a sweep, re-rank it by what the photos show, then buy a few full opinions.
 
     This is the point of the milestone in one function. `run_sweep()` can only rank what a
     seller typed, and in the reference sweep not one of the 89 real matches named the model
@@ -313,10 +318,20 @@ async def judge_sweep(
       on. If a sweep of a few hundred items ever needs to be faster, that is an S04
       concern and belongs behind a bounded gather, not a bare `asyncio.gather`.
 
+    The verdict stage is the expensive one and the cap on it is structural: the post-triage
+    order is filtered to what the photo check recognised and sliced to `max_verdicts`
+    *before* the loop starts, so "at most three" is a property of a list rather than a
+    sentence in a prompt. Zero matches and `max_verdicts=0` both mean zero requests and
+    neither is an error, and a `verdict` client of `None` turns the stage off entirely.
+
     A sweep never raises. A refused or partial `run_sweep()` comes straight back
     untouched — a run that could not read the site must not then go and spend money on it —
-    and a batch that fails closes the run `status='partial'` and returns what was triaged
-    so far. Nothing already stored is discarded: it was paid for.
+    and a triage batch that fails closes the run `status='partial'`, returns what was
+    triaged so far and skips the verdict stage for the same reason. A verdict that fails is
+    narrower still: that one candidate is logged and skipped, the rest are bought, and the
+    run closes `partial`. Nothing already stored is discarded, and neither is the bill for
+    it — `add_sweep_cost()` is called as each stage completes, so a run that dies half way
+    through still reports what it actually spent.
 
     Ordering note: the stored `position` column stays the funnel's order. The triage order
     is the returned `candidates` list, and it is reproducible from the database at any time
@@ -380,7 +395,7 @@ async def judge_sweep(
         for item in keep:
             outcomes[item.id] = item
 
-        batch_tokens, batch_cost = _batch_cost(answer.usage, cost_per_mtok_in, cost_per_mtok_out)
+        batch_tokens, batch_cost = _usage_cost(answer.usage, cost_per_mtok_in, cost_per_mtok_out)
         tokens += batch_tokens
         cost_eur += batch_cost
         if batch_tokens or batch_cost:
@@ -397,6 +412,32 @@ async def judge_sweep(
         for outcome in (outcomes.get(ranked.item.item_id),)
     ]
     judged.sort(key=_triage_rank_key)
+
+    verdicts = 0
+    if verdict is not None and status == result.status:
+        # The cap is applied here, to a list, before a single request exists — which is the
+        # only form of "at most three" a test can hold the code to. A cap asked for in a
+        # prompt is a wish. `max_verdicts=0` and "nothing matched" both slice to an empty
+        # list and cost nothing, and neither is an error.
+        #
+        # A triage stage that failed partway does not get to open the expensive one: the
+        # same rule that stops a blocked `run_sweep()` reaching the photo check. The
+        # answers triage did pay for are already on disk and already reported.
+        winners = [ranked for ranked in judged if ranked.matches_target][:max_verdicts]
+        verdicts, spent_tokens, spent_cost, failure = await _buy_verdicts(
+            winners,
+            verdict=verdict,
+            target=target,
+            repo=repo,
+            sweep_id=result.sweep_id,
+            run_log=run_log,
+            cost_per_mtok_in=cost_per_mtok_in,
+            cost_per_mtok_out=cost_per_mtok_out,
+        )
+        tokens += spent_tokens
+        cost_eur += spent_cost
+        if failure is not None:
+            status, error = "partial", failure
 
     if status != result.status:
         await repo.finish_sweep_run(
@@ -415,20 +456,83 @@ async def judge_sweep(
         candidates=len(judged),
         triaged=len(outcomes),
         matched=matched,
+        verdicts=verdicts,
         batches=_batch_count(len(result.candidates), batch_size),
+        status=status,
+    )
+    # The bill, on its own line, once per judged run. Five fields, because those five are
+    # what R004 asks a run to be able to answer: how much was looked at for free, how much
+    # was looked at cheaply, how much was looked at properly, and what the two paid stages
+    # cost between them. Grepping `sweep.cost` is the whole cost report.
+    run_log.info(
+        "sweep.cost",
+        items_funneled=len(result.candidates),
+        thumbnails_triaged=len(outcomes),
+        verdicts_issued=verdicts,
         tokens=tokens,
         cost_eur=round(cost_eur, 4),
-        status=status,
     )
     return replace(
         result,
         candidates=judged,
         triaged=len(outcomes),
+        verdicts=verdicts,
         tokens=tokens,
         cost_eur=cost_eur,
         status=status,
         error=error,
     )
+
+
+async def _buy_verdicts(
+    winners: Sequence[RankedItem],
+    *,
+    verdict: VerdictClient,
+    target: TriageTarget,
+    repo: Repo,
+    sweep_id: int,
+    run_log: structlog.stdlib.BoundLogger,
+    cost_per_mtok_in: float,
+    cost_per_mtok_out: float,
+) -> tuple[int, int, float, str | None]:
+    """Buy one full opinion per winner and return what was bought, spent and lost.
+
+    The list arriving here is already capped — that is deliberate, and it is why this
+    function has no ceiling of its own: there is exactly one place that decides how many
+    verdicts a sweep pays for, and it is the slice in `judge_sweep()` above.
+
+    A refusal is per candidate. It is reported back as a message rather than raised, so the
+    caller closes the run `partial` while the verdicts either side of the failure stay
+    bought, stored and billed. The last failure wins the message; the count of them is in
+    the `sweep.verdict_failed` lines.
+    """
+    bought = 0
+    tokens = 0
+    cost_eur = 0.0
+    failure: str | None = None
+
+    for ranked in winners:
+        item_id = ranked.item.item_id
+        try:
+            opinion = await verdict.judge(ranked.item, target)
+        except MappingError as exc:
+            failure = str(exc)
+            run_log.warning("sweep.verdict_failed", item_id=item_id, error=failure)
+            continue
+
+        # `record_verdict`, never `store_enrichment` — same answer shape, different table,
+        # and the wrong one here writes nothing at all (D005/D009/MEM007).
+        await repo.record_verdict(sweep_id, item_id, opinion.verdict, int(time.time()))
+        bought += 1
+        spent_tokens, spent_cost = _usage_cost(opinion.usage, cost_per_mtok_in, cost_per_mtok_out)
+        tokens += spent_tokens
+        cost_eur += spent_cost
+        # Per verdict, like the triage batches: a run that dies on the third of three still
+        # shows what the first two cost.
+        if spent_tokens or spent_cost:
+            await repo.add_sweep_cost(sweep_id, spent_tokens, spent_cost)
+
+    return bought, tokens, cost_eur, failure
 
 
 def _batches(candidates: Sequence[RankedItem], size: int) -> Iterator[list[RankedItem]]:
@@ -448,8 +552,11 @@ def _batch_count(total: int, size: int) -> int:
     return -(-total // step)
 
 
-def _batch_cost(usage: object, per_mtok_in: float, per_mtok_out: float) -> tuple[int, float]:
-    """What one batch cost: the flow's own figure when it gave one, arithmetic otherwise.
+def _usage_cost(usage: object, per_mtok_in: float, per_mtok_out: float) -> tuple[int, float]:
+    """What one call cost: the flow's own figure when it gave one, arithmetic otherwise.
+
+    Shared by both paid stages — a triage batch and a single verdict are priced by the same
+    rule, so an operator comparing the two lines is comparing like with like.
 
     A flow that reports nothing is not an error — it just means the run's cost line is an
     estimate from the configured per-million rates. The rates default to 0.0 so a caller
