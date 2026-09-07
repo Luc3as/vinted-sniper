@@ -14,7 +14,7 @@ from vinted_sniper import __version__, app, backup, log
 from vinted_sniper.config import MIN_POLL_INTERVAL_S, Settings
 from vinted_sniper.db import Database, apply_pending
 from vinted_sniper.db.repo import Repo
-from vinted_sniper.engine import filters, health, quiet
+from vinted_sniper.engine import filters, health, quiet, sweep
 from vinted_sniper.vinted import urls
 from vinted_sniper.vinted.client import VintedClient
 from vinted_sniper.vinted.errors import BlockedError, VintedError
@@ -48,6 +48,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     check.add_argument(
         "--url", required=True, help="A Vinted search URL, copied from your browser."
+    )
+
+    sweep_cmd = sub.add_parser(
+        "sweep",
+        help="Look once through what is already for sale and print the best matches. "
+        "Nothing is saved as a search and nobody is notified.",
+    )
+    sweep_cmd.add_argument("url", help="A Vinted search URL, copied from your browser.")
+    sweep_cmd.add_argument(
+        "--pages",
+        type=int,
+        default=0,
+        help="How many pages to read (default from settings).",
+    )
+    sweep_cmd.add_argument(
+        "--max-items",
+        type=int,
+        default=0,
+        help="The most listings to look at (default from settings).",
+    )
+    sweep_cmd.add_argument(
+        "--keyword",
+        action="append",
+        default=[],
+        dest="keywords",
+        help="A word that makes a listing a better match. Repeat it for more words. "
+        "Missing words never remove a listing, they only push it down the list.",
     )
 
     watch = sub.add_parser("watch", help="Add a search.")
@@ -201,6 +228,99 @@ async def _cmd_check(settings: Settings, url: str) -> int:
             print(f"    {details}")
         print(f"    listed {listed}")
         print(f"    {item.url}\n")
+    return 0
+
+
+async def _cmd_sweep(
+    settings: Settings,
+    url: str,
+    *,
+    pages: int,
+    max_items: int,
+    keywords: list[str],
+) -> int:
+    """One read of stock already on sale, ranked. Nothing is watched and nobody is told.
+
+    Deliberately built from the same pieces as `_cmd_check`: Database -> apply_pending ->
+    TransportSession -> SessionManager -> VintedClient, and nothing else. There is no
+    `Dispatcher` here, no `Repo.record_new_items` / `record_price_drops` / `observe_market`
+    and no `work_available` event — that trio plus the event is the alert write path
+    (`db/repo.py`, woken from `engine/poller.py`), and a sweep touching any of it would
+    turn a read-only look around into notifications nobody asked for. A sweep writes only
+    to the `sweep_runs` / `sweep_candidates` tables, which the poller never reads.
+    """
+    try:
+        normalised = urls.normalise_search_url(url)
+        tld = urls.extract_tld(normalised)
+        params = urls.parse_search_params(normalised)
+    except urls.InvalidSearchURLError as exc:
+        print(f"That URL will not work: {exc}", file=sys.stderr)
+        return 2
+
+    max_pages = pages if pages > 0 else settings.sweep_max_pages
+    ceiling = max_items if max_items > 0 else settings.sweep_max_items
+    # With no --keyword the words you typed into Vinted are the ones that rank. They are a
+    # hint either way: a listing missing all of them still gets stored, just last.
+    ranking = keywords or params.get("search_text", "").split()
+
+    print(f"Site:   vinted.{tld}")
+    print(f"Search: {normalised}")
+    print(f"Rank by: {', '.join(ranking) if ranking else '(nothing — everything ties)'}")
+    print(f"Reading up to {max_pages} page(s), at most {ceiling} listing(s).\n")
+
+    async with Database(settings.db_path) as db:
+        await apply_pending(db)
+        async with TransportSession.build(
+            impersonate=settings.http_impersonate,
+            timeout=settings.request_timeout_s,
+            mock_dir=settings.mock_scenario_dir if settings.fetch_mode == "mock" else None,
+        ) as transport:
+            sessions = SessionManager(
+                db,
+                transport,
+                rotate_after_minutes=settings.session_rotate_minutes,
+                impersonate=settings.http_impersonate,
+            )
+            client = VintedClient(transport, sessions)
+
+            result = await sweep.run_sweep(
+                tld=tld,
+                params=params,
+                keywords=ranking,
+                client=client,
+                repo=Repo(db),
+                max_pages=max_pages,
+                max_items=ceiling,
+                sessions=sessions,
+            )
+
+    print(
+        f"Sweep #{result.sweep_id}: read {result.pages_fetched} page(s), "
+        f"saw {result.items_seen} listing(s), kept {len(result.candidates)}."
+    )
+    if result.funnel:
+        print("\nSkipped:")
+        for reason, count in sorted(result.funnel.items(), key=lambda pair: -pair[1]):
+            print(f"  {count} x {reason}")
+
+    if result.candidates:
+        print("\nBest matches:\n")
+        for ranked in result.candidates[:5]:
+            item = ranked.item
+            print(f"  {item.title}")
+            print(f"    match {round(ranked.rank_score * 100)}% · {item.price_line()}")
+            print(f"    {item.url}\n")
+    else:
+        print("\nNothing survived the filters. Try a broader search or a higher budget.")
+
+    if result.status == "blocked":
+        print(f"Stopped early: the site refused the request ({result.error}).", file=sys.stderr)
+        print(f"See {TROUBLESHOOTING}", file=sys.stderr)
+        return 1
+    if result.status != "ok":
+        print(f"Stopped early: {result.error}", file=sys.stderr)
+        print("What you see above is only what it managed to read.", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -458,6 +578,14 @@ async def _run(args: argparse.Namespace) -> int:
             return await _cmd_migrate(settings)
         case "check":
             return await _cmd_check(settings, args.url)
+        case "sweep":
+            return await _cmd_sweep(
+                settings,
+                args.url,
+                pages=args.pages,
+                max_items=args.max_items,
+                keywords=list(args.keywords),
+            )
         case "watch":
             return await _cmd_watch(settings, args)
         case "searches":

@@ -107,6 +107,7 @@ finishing even one page and asking for several pages would mean nothing.
 ```
 vinted-sniper run                      start watching (what the container runs)
 vinted-sniper check --url <url>        fetch one search once and print the result
+vinted-sniper sweep <url> [options]    look once through what is already for sale
 vinted-sniper watch <url> [options]    add a search
 vinted-sniper searches                 list searches
 vinted-sniper unwatch <id>             remove one
@@ -140,6 +141,27 @@ The same fields are under "More filters" when adding a search in the dashboard, 
 search has an **Edit** button there (which also offers **Clone** — the same search, filters
 and destinations on another country site) for changing them afterwards — the change takes effect
 on the next check, no restart needed. Only the URL is fixed: it is what the search *is*.
+
+Options for `sweep`:
+
+| Option | Meaning |
+|---|---|
+| `--pages N` | How many pages to read. Defaults to `SWEEP_MAX_PAGES`. |
+| `--max-items N` | The most listings to look at. Defaults to `SWEEP_MAX_ITEMS`. |
+| `--keyword WORD` | A word that makes a listing a better match. Repeat it for more words. Defaults to the words in the search URL. |
+
+A sweep is a one-off read of stock already on Vinted, best matches first. It is not a
+search: nothing is saved to watch, nothing is sent anywhere, and no notification can come
+out of it. It prints how many pages it read, how many listings it saw, what it skipped and
+why, and the best few it kept.
+
+Keywords rank, they do not filter. Sellers write the same coat as "Patagonia jacket",
+"Patagonia bunda" and "Kurtka Patagonia", so a listing missing every one of your words is
+still kept — it just sits at the bottom of the list. What does remove a listing is a real
+limit: a banned word, your budget, the condition or the seller.
+
+The same run is written to the log as one `sweep.summary` line carrying the page count, the
+listing count, the skip reasons and how long it took.
 
 ## Adding a search
 
@@ -359,6 +381,7 @@ toho jeden sweep prečíta predtým, než sa čokoľvek z toho dostane k AI.
 ```
 vinted-sniper run                      spusti sledovanie (to, čo beží v kontajneri)
 vinted-sniper check --url <url>        stiahni jedno vyhľadávanie raz a vypíš výsledok
+vinted-sniper sweep <url> [voľby]      pozri sa raz na to, čo je už na predaj
 vinted-sniper watch <url> [voľby]      pridaj vyhľadávanie
 vinted-sniper searches                 vypíš vyhľadávania
 vinted-sniper unwatch <id>             odstráň jedno
@@ -392,6 +415,27 @@ Tie isté polia sú pod „More filters" pri pridávaní vyhľadávania v dashbo
 vyhľadávanie tam má tlačidlo **Edit** (ktoré ponúka aj **Clone** — to isté vyhľadávanie,
 filtre a ciele na inej krajine) na neskoršie zmeny — zmena platí od najbližšej kontroly, bez
 reštartu. Pevná je len URL: tá je tým, čím vyhľadávanie *je*.
+
+Voľby pre `sweep`:
+
+| Voľba | Význam |
+|---|---|
+| `--pages N` | Koľko stránok prečítať. Predvolene `SWEEP_MAX_PAGES`. |
+| `--max-items N` | Najviac inzerátov, na ktoré sa pozrieť. Predvolene `SWEEP_MAX_ITEMS`. |
+| `--keyword SLOVO` | Slovo, ktoré robí inzerát lepšie sediacim. Zopakuj ho pre viac slov. Predvolene slová z URL vyhľadávania. |
+
+Sweep je jednorazové prečítanie toho, čo už na Vintede visí, od najlepšie sediacich. Nie je
+to vyhľadávanie: nič sa neuloží na sledovanie, nikam sa nič nepošle a žiadna notifikácia z
+toho vyjsť nemôže. Vypíše, koľko stránok prečítal, koľko inzerátov videl, čo preskočil a
+prečo, a tých pár najlepších, ktoré nechal.
+
+Kľúčové slová radia, nefiltrujú. Predajcovia ten istý kabát napíšu ako „Patagonia jacket",
+„Patagonia bunda" aj „Kurtka Patagonia", takže inzerát bez jediného tvojho slova zostáva —
+len sedí na konci zoznamu. Inzerát odstráni až skutočné obmedzenie: zakázané slovo, tvoj
+rozpočet, stav alebo predajca.
+
+Ten istý beh ide do logu ako jeden riadok `sweep.summary` s počtom stránok, počtom
+inzerátov, dôvodmi preskočenia a tým, ako dlho to trvalo.
 
 ## Pridanie vyhľadávania
 

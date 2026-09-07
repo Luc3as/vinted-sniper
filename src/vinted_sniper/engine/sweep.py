@@ -160,6 +160,7 @@ async def run_sweep(
     `'blocked'`), and no Vinted error escapes to the caller — a one-shot read failing is not
     a reason to take down whoever asked for it.
     """
+    started = time.monotonic()
     sweep_id = await repo.create_sweep_run(
         tld=tld, params=params, keywords=keywords, query_id=query_id
     )
@@ -220,12 +221,18 @@ async def run_sweep(
         funnel=result.funnel,
         error=error,
     )
+    # One line per run, carrying the whole funnel. A sweep that returned little is
+    # explained by grepping this event rather than by re-running it: the per-reason drop
+    # counts say whether the budget gate, the banned words or the site itself ate the page.
     run_log.info(
-        "sweep.finished",
-        status=status,
-        pages=pages_fetched,
+        "sweep.summary",
+        sweep_id=sweep_id,
+        pages_fetched=pages_fetched,
         items_seen=result.items_seen,
         candidates=len(stored),
+        funnel=result.funnel,
+        status=status,
+        elapsed_s=round(time.monotonic() - started, 2),
     )
     return replace(
         result,
