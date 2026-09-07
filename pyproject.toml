@@ -108,7 +108,9 @@ warn_unreachable = true
 enable_error_code = ["redundant-expr", "possibly-undefined", "truthy-bool"]
 
 [[tool.mypy.overrides]]
-module = ["curl_cffi.*"]
+# playwright: only installed where tests/ui actually runs (needs a live dashboard);
+# CI type-checks the file without it.
+module = ["curl_cffi.*", "playwright.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
