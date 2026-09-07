@@ -1,5 +1,7 @@
 # How it works
 
+*[Slovenská verzia nižšie ↓](#slovensky)*
+
 One process, one event loop, one SQLite file. There is no queue server, no second database
 and no worker fleet, because a tool watching a handful of searches does not need any of that
 and every extra moving part is another thing that can be broken at three in the morning.
@@ -119,3 +121,128 @@ VINTED_SNIPER_FETCH_MODE=mock VINTED_SNIPER_MOCK_SCENARIO_DIR=./scenario uv run 
 
 A scenario directory holds `root.json` and `catalog.json` describing responses. Either can be
 a list, in which case successive calls walk through it — which is how the failure drills work.
+
+---
+
+<a name="slovensky"></a>
+
+# Ako to funguje (slovensky)
+
+Jeden proces, jeden event loop, jeden SQLite súbor. Žiadny queue server, žiadna druhá
+databáza, žiadna flotila workerov — nástroj, ktorý sleduje pár vyhľadávaní, nič z toho
+nepotrebuje a každá ďalšia pohyblivá časť je ďalšia vec, ktorá sa môže pokaziť o tretej ráno.
+
+```
+                    ┌─ poller ─┐  jedna úloha na vyhľadávanie
+   Vinted ◀── HTTP ─┤ poller   │  stiahni → filtruj → rozhodni, čo je nové
+                    └─ poller ─┘
+                          │  jedna transakcia: zapíš inzeráty + zaraď notifikácie
+                          ▼
+                    ┌──────────┐
+                    │  SQLite  │  vyhľadávania, stav, inzeráty, outbox, sessions
+                    └──────────┘
+                          │  vyzdvihni v poradí, jeden worker na cieľ
+                          ▼
+                  dispatcher ──▶ Discord · Telegram · ntfy · tvoj webhook
+
+   watchdog    číta stav naprieč vyhľadávaniami, odhalí zamrznutý katalóg
+   heartbeat   zapisuje časovú pečiatku, ktorú číta health check
+   web         dashboard nad tou istou databázou, zapnutý predvolene
+```
+
+## Časti
+
+**`vinted/`** je všetko, čo sa dotýka Vintedu. `transport.py` definuje malý protokol, vďaka
+ktorému je HTTP klient vymeniteľný detail — predvolene čisté httpx, curl_cffi s TLS odtlačkom
+prehliadača, keď ho zapneš, alebo replay-z-disku transport pre testy a offline vývoj.
+`session.py` získa anonymnú session cookie načítaním homepage tak, ako by to urobil
+prehliadač, uloží ju, aby reštart nepotreboval nový handshake, a na časovači ju obmieňa.
+`client.py` robí ten jediný request, ktorý táto appka robí, a odmieta veriť, že 200 je
+katalóg, kým si to neoverí. `urls.py` premení URL z adresného riadku na kanonickú formu plus
+API parametre. `taxonomy.py` kŕmi builder vyhľadávaní v dashboarde: vyťaží strom kategórií a
+CSRF token z HTML stránky vyhľadávania (JSON endpointy, ktoré strom kedysi servírovali, už
+neexistujú), strom cachuje v databáze na týždeň a brand autocomplete s filtrami preposiela
+naživo.
+
+**`engine/`** rozhoduje, čo s výsledkami. `filters.py` aplikuje tvoje pravidlá, `dedup.py`
+zisťuje, čo je naozaj nové, `poller.py` beží slučku a mapuje zlyhania na akcie, `watchdog.py`
+porovnáva vyhľadávania medzi sebou, `health.py` skladá stavový pohľad.
+
+**`deliver/`** dostáva notifikácie von. Workery v `dispatcher.py` vyzdvihujú prácu z outbox
+tabuľky v databáze v poradí, jeden cieľ naraz, cez token bucket v `ratelimit.py`. Každý kanál
+je malý modul implementujúci jeden protokol.
+
+**`db/`** drží každý SQL príkaz v `repo.py`, takže zmena schémy má jedno miesto, kam sa pozrieť.
+
+## Tri rozhodnutia, ktoré stoja za vysvetlenie
+
+### Iba anonymne
+
+Vinted dá session cookie každému, kto načíta stránku, a tá cookie je všetko, čo katalóg
+potrebuje. Prihlásenie by odomklo viac, vrátane nakupovania — ale znamenalo by ukladať
+niečie prihlasovacie údaje a vystaviť skutočný účet obmedzeniam, ktoré Vinted uplatňuje na
+podozrenia z automatizácie. Čítať verejné stránky ako neprihlásený návštevník je bezpečnejšie
+aj jednoduchšie a robí z „nevieme za teba nakupovať" úprimné tvrdenie, nie chýbajúcu funkciu.
+
+### Chyby nie sú zameniteľné
+
+Najčastejší spôsob, akým si nástroje v tomto priestore kopú vlastný hrob, je uniformné
+opakovanie requestov. Každé zlyhanie znamená niečo iné:
+
+| Čo sa stalo | Čo to znamená | Čo urobíme |
+|---|---|---|
+| 401 | Anonymný token zostarol | Získať nový a rýchlo zopakovať |
+| 403 | Tohto klienta odmietajú | Tvrdo ustúpiť, začať novú session |
+| 429 | Príliš rýchlo | Počkať presne toľko, koľko nám povedali |
+| 200 s nesprávnym tvarom | Niečo sa zmenilo, alebo sme dostali interstitial | Hlasno zalogovať, neopakovať, nenotifikovať |
+| Sieťová chyba | Prechodná | Krátky backoff |
+
+Opakovať 403 tak, ako by si opakoval timeout, je spôsob, ako sa z dočasného bloku stane dlhý.
+
+### Notifikácie sa zapisujú skôr, než sa posielajú
+
+Nájdenie inzerátu a zaradenie jeho notifikácií sa deje v jednej transakcii. Nič nie je
+označené ako odoslané, kým to druhá strana neprijala, a proces zabitý uprostred odosielania
+vráti svoje vyzdvihnuté riadky do fronty pri štarte. Alternatíva — posielať za pochodu —
+stráca alerty pri páde alebo ich posiela dvakrát, a oboje sa na stroji, ktorý sa reštartuje,
+deje dosť často na to, aby na tom záležalo.
+
+Tu sa tiež rešpektujú rate limity. Jeden worker na cieľ, posiela jednu vec naraz, v poradí, v
+akom sa veci našli. Je to pomalšie než vystreliť všetko naraz — a presne o to ide: platformy
+si pamätajú, kto ich zaplavuje.
+
+## Rozhodovanie, čo je nové
+
+Tri brány, lebo každá kryje dieru, ktorú ostatné nechávajú:
+
+1. **Okno čerstvosti.** Čokoľvek s fotkou staršou ako dvadsať minút sa ignoruje, takže reštart
+   ani pomalá prvá kontrola nemôžu prehrať včerajšok.
+2. **High-water mark na vyhľadávanie.** Najnovší už ohlásený inzerát. Výsledky sa vo Vintedom
+   radení posúvajú; toto bráni tomu, aby tá istá vec prišla dvakrát.
+3. **Množina už zaznamenaných id inzerátov.** Dve prekrývajúce sa vyhľadávania uvidia ten istý
+   inzerát. Máš o ňom počuť raz.
+
+Prvá kontrola vyhľadávania je špeciálny prípad: zaznamená všetko, čo nájde, a nepovie ti o
+ničom — pokiaľ nenastavíš `FIRST_RUN_MODE=newest`, ktorý pošle presne jeden inzerát, aby si si
+overil, že doručovanie funguje.
+
+## Testovanie
+
+`tests/unit` pokrýva rozhodnutia — normalizáciu URL, filtre, dedup, skladanie správ, pacing.
+`tests/integration` púšťa skutočný poller, dispatcher a databázu proti skriptovanému
+transportu a pokrýva prípady, ktoré rozhodujú, či toto prežije týždeň bez dozoru: prázdne
+výsledky, 403, 429, expirovaný token, odpoveď, ktorá nie je katalóg, pád uprostred
+doručovania a reštart, ktorý nič neposiela znova.
+
+Nič v teste nesiaha na sieť. Samostatný týždenný job robí jeden skutočný request proti živej
+stránke, takže keď Vinted niečo zmení, dozvieme sa to z CI, nie z issue.
+
+Spusti to offline tak, ako to robia testy:
+
+```bash
+VINTED_SNIPER_FETCH_MODE=mock VINTED_SNIPER_MOCK_SCENARIO_DIR=./scenario uv run vinted-sniper run
+```
+
+Adresár scenára obsahuje `root.json` a `catalog.json` popisujúce odpovede. Ktorýkoľvek z nich
+môže byť zoznam — vtedy ním postupné volania prechádzajú, čo je presne spôsob, akým fungujú
+drily zlyhaní.

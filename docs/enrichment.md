@@ -1,5 +1,7 @@
 # Enrichment: letting an agent judge a listing before you see it
 
+*[Slovenská verzia nižšie ↓](#slovensky)*
+
 vinted-sniper knows what the catalog says — title, price, photos, seller. It does not know
 whether the jacket in the photos is the model you searched for, what it costs new, or
 whether the price is a bargain or a warning sign. Those are questions for something that
@@ -112,3 +114,119 @@ identify most products.
 **Verdicts feed back.** A verdict's `model` and `retail_price` are cached per search and
 sent as `known_retail` next time. The 👍/👎 buttons under a Telegram alert become
 `buyer_feedback`.
+
+---
+
+<a name="slovensky"></a>
+
+# Enrichment: nechaj agenta posúdiť inzerát skôr, než ho uvidíš (slovensky)
+
+vinted-sniper vie, čo hovorí katalóg — názov, cenu, fotky, predajcu. Nevie, či bunda na
+fotkách je model, ktorý si hľadal, koľko stojí nová, ani či je cena výhra alebo varovný
+signál. To sú otázky pre niečo, čo sa vie pozrieť na obrázky a hľadať na webe. Táto stránka
+popisuje slučku, cez ktorú si také niečo zapojíš — referenčné riešenie je n8n workflow s LLM
+agentom — bez toho, aby doručovanie opustilo vinted-sniper: alert stále príde do Telegramu so
+svojimi tlačidlami, quiet hours a digestami, len s votkaným verdiktom.
+
+## Ako slučka funguje
+
+```
+poller nájde inzerát
+  ├─ webhook cieľ             → vystrelí hneď, payload nesie "enrichment_url"
+  └─ chatové ciele            → podržané ENRICHMENT_WAIT_S sekúnd
+
+agent si pozrie fotky, identifikuje produkt, overí retail cenu, oskóruje deal
+  └─ POST enrichment_url      → uloží sa k inzerátu; podržaný alert sa hneď uvoľní
+
+nič neprišlo načas?           → alert odíde tak, ako vždy
+```
+
+Ticho od agenta stojí zdržanie, nikdy nie alert. Ak verdikt príde po odoslaní alertu, uloží
+sa (dashboard ho ukáže) a — keď má skóre aspoň `ENRICHMENT_HIGHLIGHT_SCORE` a nehovorí, že
+ide o nesprávny produkt — do tých istých chatových cieľov odíde krátky follow-up „verdikt je
+tu: hot deal". Oneskorený verdikt v zmysle „nič extra" zostane ticho: druhú správu by si
+nezaslúžil.
+
+## Nastavenie
+
+1. Pridaj webhook cieľ mieriaci na tvojho agenta (n8n: produkčná URL Webhook nodu). Nasmeruj
+   naň vyhľadávania, ktoré chceš posudzovať, popri tvojom Telegram cieli.
+2. Nastav `VINTED_SNIPER_ENRICHMENT_WAIT_S=90` (alebo koľko tvoj agent obvykle potrebuje) a
+   reštartuj. Nastav `VINTED_SNIPER_WEB_AUTH_TOKEN`, ak ešte nie je — callback ho potrebuje.
+3. Agent nech `POST`-ne verdikt na `enrichment_url` s hlavičkou
+   `Authorization: Bearer <WEB_AUTH_TOKEN>`.
+
+## Čo agent dostane
+
+Webhook payload z [configuration.md](configuration.md), s týmito poľami, na ktorých agentovi
+záleží:
+
+| Pole | Význam |
+|---|---|
+| `search`, `search_id` | Meno a id vyhľadávania. Meno je obvykle hľadaný text. |
+| `items[].title`, `brand`, `size`, `condition` | Čo napísal predajca. |
+| `items[].price`, `total_price`, `currency` | Pýtaná cena a čo kupujúci naozaj zaplatí. |
+| `items[].photo_urls` | Všetky fotky v plnej veľkosti. Na identifikáciu produktu obvykle stačia dve-tri. |
+| `items[].seller`, `seller_rating`, `seller_reviews` | Kto predáva, hodnotenie 0–1, počet recenzií. |
+| `items[].enrichment_url` | Kam poslať verdikt. `null`, kým je dashboard vypnutý. |
+| `items[].favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour` | Dopyt. Inzerát starý dvanásť minút so šiestimi srdiečkami si trh už všimol. |
+| `items[].market` | Kde cena sedí medzi všetkým, čo toto vyhľadávanie ukázalo za posledných 30 dní (`null`, kým nie je desať bodov): `n`, `p10`, `p25`, `median`, `p75`, `median_same_condition`, `this_percentile` (podiel lacnejších inzerátov) a `sells_fast_under` — medián cien inzerátov, ktoré zmizli do dňa; najbližšia vec k predajnej cene, akú katalóg ponúka. Stavané z každého inzerátu na stránke, bez requestov navyše. |
+| `items[].known_retail` | Retail ceny, ktoré predchádzajúce verdikty nahlásili pre toto vyhľadávanie, `[{model, price, currency, source}]`. Pri zhode produktu použi znova namiesto nového hľadania. |
+| `items[].reader_language` | `en` alebo `sk`: jazyk, v ktorom kupujúci číta alerty tohto vyhľadávania (najčastejší medzi jeho chatovými cieľmi). Píš `verdict` v ňom. |
+| `items[].buyer_feedback` | Palce kupujúceho na nedávne verdikty tohto vyhľadávania: `[{title, condition, total_price, agent_score, agent_model, buyer_said}]`. Čo tento konkrétny kupujúci považuje za deal. |
+
+## Čo agent pošle späť
+
+`POST {enrichment_url}` s JSON telom. Každé pole je voliteľné; čiastočný verdikt je lepší
+ako žiadny.
+
+```json
+{
+  "score": 87,
+  "model": "Patagonia Torrentshell 3L Jacket (men's, 2022)",
+  "retail_price": 160,
+  "retail_source": "patagonia.com",
+  "matches_query": true,
+  "risk": null,
+  "verdict": "Genuine 3L model, current season, ~60% under retail for 'very good' condition."
+}
+```
+
+| Pole | Typ | Význam |
+|---|---|---|
+| `score` | 0–100 | Aký dobrý deal to je, so všetkým zohľadneným. |
+| `model` | text | Aký produkt to v skutočnosti je. |
+| `retail_price` | číslo | Koľko stojí nový, v mene inzerátu. |
+| `retail_source` | text | Odkiaľ tá cena je. |
+| `matches_query` | bool | Je to, čo vyhľadávanie hľadalo, alebo napodobenina, ktorá to len spomína? |
+| `risk` | text | Obavy o pravosť: stock fotky, chýbajúce štítky, podozrivo nízka cena, predajca bez histórie. |
+| `verdict` | text | Jedna veta pre človeka. |
+
+Odpovede: `200 {"ok": true}`, `401` pri chýbajúcom alebo zlom tokene, `404` pre inzerát,
+ktorý už nie je uložený (mazané po `ITEM_RETENTION_DAYS`), `422` pre telo, ktoré nesedí.
+
+## Ako sa verdikt zobrazí
+
+**Telegram.** Horný riadok: `🔥 HOT DEAL · deal 87/100 · retail ~160 EUR · -60%` pri skóre
+aspoň `ENRICHMENT_HIGHLIGHT_SCORE`; inak `🤖 …`; `💤 …` bez zvuku notifikácie pri skóre pod
+`ENRICHMENT_SILENT_BELOW` alebo pri `matches_query: false`. Potom inzerát ako obvykle, potom
+„Looks like: …" a verdikt kurzívou.
+
+**Discord.** Pole „🤖 Verdict" na embede.
+
+**Dashboard.** Odznak so skóre na karte inzerátu, verdikt ako jeho tooltip.
+
+## Ako má agent skórovať
+
+Retail je jedna noha z troch. Čo vec stojí nová, hovorí málo o tom, za čo sa predáva
+použitá; to hovorí `market` a `sells_fast_under` hovorí, čo ľudia naozaj platia. Referenčný
+workflow skóruje v poradí: percentil inzerátu na jeho trhu (inzerát pod `p10` v dobrom stave
+od dôveryhodného predajcu je výhra; pod `p10` od predajcu bez histórie so stock fotkami je
+podvod, nie zľava); dopyt (`favourites_per_hour`); zľavu voči retailu; stav a históriu
+predajcu; a riziko pravosti, ktoré skóre zastropuje, nie iba zníži. `buyer_feedback` to celé
+ladí na vkus jedného človeka. Reverzné hľadanie obrázkov treba málokedy: značka, názov a
+jedna ostrá fotka identifikujú väčšinu produktov.
+
+**Verdikty sa vracajú do obehu.** `model` a `retail_price` z verdiktu sa cachujú per
+vyhľadávanie a nabudúce odchádzajú ako `known_retail`. Tlačidlá 👍/👎 pod Telegram alertom sa
+stávajú `buyer_feedback`.

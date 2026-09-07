@@ -1,5 +1,7 @@
 # Configuration
 
+*[Slovenská verzia nižšie ↓](#slovensky)*
+
 Two kinds of settings, kept apart deliberately.
 
 **Environment variables** control the process: where the database is, how often to check,
@@ -231,3 +233,239 @@ http://localhost:8000/rss/1.xml
 If `WEB_AUTH_TOKEN` is set, feed readers cannot sign in, so the token goes in the URL
 instead: `/rss/1.xml?key=<your token>`. Anyone with that URL can read the feed, so treat it
 like a password.
+
+---
+
+<a name="slovensky"></a>
+
+# Konfigurácia (slovensky)
+
+Dva druhy nastavení, zámerne oddelené.
+
+**Environment premenné** riadia proces: kde je databáza, ako často kontrolovať, ako logovať.
+Čítajú sa raz pri štarte a sú vypísané nižšie.
+
+**Vyhľadávania a ciele** žijú v databáze a spravujú sa cez CLI alebo dashboard. Neexistuje
+konfiguračný súbor, ktorý by ich vymenúval, takže niet čo synchronizovať a niet otázky,
+ktorá kópia vyhráva.
+
+## Environment premenné
+
+Každá premenná má prefix `VINTED_SNIPER_`. Všetky sú voliteľné, kde nie je uvedené inak.
+[`.env.example`](../.env.example) má ten istý zoznam s komentármi, pripravený na kopírovanie.
+
+### Úložisko
+
+| Premenná | Predvolené | Čo robí |
+|---|---|---|
+| `DB_PATH` | `./data/app.db` | Kde žije SQLite súbor. V kontajneri už nastavené na `/data/app.db`. |
+| `ITEM_RETENTION_DAYS` | `30` | Zmaž uložené inzeráty staršie než toto. Nič sa tým neposiela znova. |
+| `KEEP_RAW_JSON` | `false` | Drž plný API payload každého inzerátu. Hodí sa pri ladení parsovania; ukladá viac dát o predajcoch, než notifikácie potrebujú. |
+
+### Kontrolovanie
+
+| Premenná | Predvolené | Čo robí |
+|---|---|---|
+| `POLL_DEFAULT_INTERVAL_S` | `60` | Sekundy medzi kontrolami novo pridaného vyhľadávania. Hodnoty per vyhľadávanie ho prebíjajú. Menej než 10 sa odmieta. |
+| `FRESHNESS_WINDOW_MIN` | `20` | Ignoruj inzeráty s fotkou staršou než toto. Bráni reštartu prehrať staré výsledky. |
+| `FIRST_RUN_MODE` | `silent` | Čo urobí úplne nové vyhľadávanie prvý raz: `silent` nenotifikuje nič, `newest` pošle presne jeden inzerát na overenie doručovania. |
+| `PRICE_DROP_MIN_PERCENT` | `10` | Ohlás inzerát znova, keď jeho celková cena klesla aspoň o toľkoto odvtedy, čo bol zaznamenaný. Zadarmo: porovnávajú sa len inzeráty stále na prvej stránke vyhľadávania, z už stiahnutej stránky. `0` to vypína. |
+| `REQUEST_TIMEOUT_S` | `15` | Ako dlho čakať na Vinted, kým to s jedným requestom vzdáme. |
+
+Podlaha 10 sekúnd nie je opatrnosť pre opatrnosť: API Vintedu samo mešká minúty za tým, čo
+ľudia nahrávajú, niekedy dlhšie, takže rýchlejšie kontroly nenájdu nič skôr a blok si
+vyslúžia. Každá notifikácia ukazuje, kedy sa inzerát podľa Vintedu objavil aj kedy bol
+nájdený, takže skutočné oneskorenie vidíš sám.
+
+### Ako zostať neblokovaný
+
+| Premenná | Predvolené | Čo robí |
+|---|---|---|
+| `SITE_REQUESTS_PER_MINUTE` | `12` | Strop requestov na jednu krajinu z tejto adresy, počítané cez všetky vyhľadávania a vrátane načítaní homepage. Keď je jedno vyhľadávanie odmietnuté, všetky na tej stránke čakajú rovnaký backoff — skóruje sa adresa, nie vyhľadávanie. |
+| `STARTUP_STAGGER_S` | `20` | Sekundy medzi prvými kontrolami po sebe idúcich vyhľadávaní pri štarte, aby reštart s desiatimi vyhľadávaniami neotvoril desiatimi requestami v jednej sekunde. |
+| `SESSION_ROTATE_MINUTES` | `60` | Po tomto čase založ novú anonymnú session. Bloky sledujú vek session viac než frekvenciu requestov. |
+| `HTTP_IMPERSONATE` | `false` | Requesty prezentujú TLS odtlačok skutočného prehliadača. Potrebuje extra `impersonate` (v Docker image už je). Čisté Python TLS je prvá vec, na ktorú sa DataDome pozerá, takže **nechaj zapnuté**, pokiaľ extra vieš nainštalovať. |
+| `PROXY_FILE` | nenastavené | Cesta k textovému súboru s proxy URL, jedna na riadok (prázdne riadky a `#` komentáre sa ignorujú). Používajú sa postupne; odmietnutá si sadne na desať minút. Ak sedia všetky, requesty idú priamo — radšej než vôbec. Málokedy treba. |
+
+### Všímanie si problémov
+
+| Premenná | Predvolené | Čo robí |
+|---|---|---|
+| `WATCHDOG_STALE_CYCLES` | `10` | Kontroly bez nového inzerátu, po ktorých sa vyhľadávanie považuje za zaseknuté — ale len ak ostatné vyhľadávania na tej istej stránke stále nachádzajú. |
+| `WATCHDOG_ACTION` | `rotate` | `warn` to zaloguje; `rotate` navyše založí novú session. |
+| `ENRICHMENT_WAIT_S` | `0` | Podrž chatové notifikácie toľkoto sekúnd, aby externý agent stihol poslať verdikt na `/api/items/{id}/enrichment`. Webhook ciele strieľajú hneď bez ohľadu na to. `0` slučku vypína. Pozri [enrichment.md](enrichment.md). |
+| `ENRICHMENT_HIGHLIGHT_SCORE` | `75` | Deal skóre od tejto hodnoty dostane hlavičku hot deal. |
+| `ENRICHMENT_SILENT_BELOW` | `40` | Deal skóre pod touto hodnotou, alebo verdikt „nie je to, čo sa hľadalo", sa doručí bez zvuku notifikácie (Telegram). |
+| `OUTBOX_EXPIRY_MINUTES` | `60` | Zahoď notifikácie, ktoré sa nepodarilo doručiť v tomto okne. |
+
+### Telegram
+
+| Premenná | Predvolené | Čo robí |
+|---|---|---|
+| `WEEKLY_REPORT` | `true` | Každý pondelok o 08:00 (`TIMEZONE`) pošli cieľom označeným na stavové správy pár riadkov: nájdené inzeráty, odoslané alerty, zľavy, najlepší verdikt, najrušnejšie vyhľadávania. |
+| `TIMEZONE` | `UTC` | IANA časová zóna (napr. `Europe/Bratislava`), v ktorej sa čítajú quiet hours, čas „Pridané o" v alertoch a pondelkový report. |
+| `TELEGRAM_BOT_TOKEN` | nenastavené | Od [@BotFather](https://t.me/BotFather). Zapína doručovanie do Telegramu a párovacieho bota. |
+
+### Dashboard
+
+| Premenná | Predvolené | Čo robí |
+|---|---|---|
+| `WEB_ENABLED` | `true` | Dashboard. Vypni, ak používaš iba CLI. |
+| `WEB_AUTH_TOKEN` | nenastavené | Voliteľné. Bez tokenu dashboard nemá prihlásenie, čo je v poriadku, kým počúva na localhoste. **Nastav ho skôr, než ho vystavíš ďalej** — ukazuje tvoje webhook URL a chat id. Vygeneruj cez `openssl rand -hex 32`. |
+| `WEB_HOST` | `127.0.0.1` | Predvolene loopback. Rozširuj len za reverse proxy, ktorej veríš. |
+| `WEB_PORT` | `8000` | |
+| `WEB_PUBLIC_URL` | nenastavené | Adresa, na ktorej je dashboard dosiahnuteľný odtiaľ, kde čítaš alerty — nastav, keď dashboard sedí za reverse proxy alebo tunelom. Stane sa z nej Dashboard odkaz v Discord správach; nenastavená, odkaz mieri na `http://<WEB_HOST>:<WEB_PORT>`. |
+
+### Logovanie a vývoj
+
+| Premenná | Predvolené | Čo robí |
+|---|---|---|
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
+| `LOG_COLOR` | `false` | ANSI farby v konzolových logoch. Nechaj vypnuté, keď je čitateľom Portainer alebo `docker logs`; escape kódy renderujú ako opakované slová. |
+| `LOG_FORMAT` | `console` | `json`, keď logy zbiera niečo iné. |
+| `FETCH_MODE` | `live` | `mock` prehráva nahraté odpovede z disku namiesto volania Vintedu. |
+| `MOCK_SCENARIO_DIR` | nenastavené | Povinné pri `FETCH_MODE=mock`. |
+
+## Príkazy
+
+```
+vinted-sniper run                      spusti sledovanie (to, čo beží v kontajneri)
+vinted-sniper check --url <url>        stiahni jedno vyhľadávanie raz a vypíš výsledok
+vinted-sniper watch <url> [voľby]      pridaj vyhľadávanie
+vinted-sniper searches                 vypíš vyhľadávania
+vinted-sniper unwatch <id>             odstráň jedno
+vinted-sniper destination <druh> <cieľ>   pridaj, kam posielať
+vinted-sniper destinations             vypíš ich
+vinted-sniper pair-telegram            vypíš link, ktorý pripojí Telegram chat
+vinted-sniper status                   ako sa darí každému vyhľadávaniu
+vinted-sniper migrate                  vytvor alebo aktualizuj databázu a skonči
+vinted-sniper heartbeat                exit 0, ak appka žije (health check)
+vinted-sniper export                   vyhľadávania, ciele a trasy ako JSON
+vinted-sniper import <súbor>           pridaj, čo export obsahuje (existujúce sa nedotknú)
+```
+
+Voľby pre `watch`:
+
+| Voľba | Význam |
+|---|---|
+| `--name` | Ako to volať. Predvolene hľadaný text. |
+| `--every N` | Sekundy medzi kontrolami tohto vyhľadávania. |
+| `--max-price N` | Preskoč všetko nad touto sumou **vrátane buyer protection**. |
+| `--exclude a,b,c` | Preskoč inzeráty, ktorých názov obsahuje ktorékoľvek z týchto slov. |
+| `--require a,b` | Nechaj len inzeráty, ktorých názov obsahuje **všetky** tieto slová. Textové hľadanie Vintedu matchuje aj popisy, odkiaľ ide väčšina šumu. |
+| `--title-regex VZOR` | Nechaj len inzeráty, ktorých názov matchuje tento regulárny výraz (bez ohľadu na veľkosť písmen). |
+| `--min-seller-rating N` | Preskoč predajcov s hodnotením pod N percent. Predajcovia zatiaľ bez hodnotenia sa preskakujú tiež. |
+| `--min-seller-reviews N` | Preskoč predajcov s menej než N recenziami. |
+| `--block-seller a,b` | Preskoč týchto predajcov rovno. |
+| `--cheapest N` | Len inzeráty s cenou v najlacnejších N % z toho, čo toto vyhľadávanie videlo za posledných 30 dní (počíta sa každý inzerát na stránke, filtre-nefiltre). Prispôsobuje sa trhu sám; neaktívny, kým nie je desať cenových bodov. Alert pozíciu vysloví slovami: „lacnejší ako 88 % z 312 podobných inzerátov za tento mesiac". |
+| `--to 1,2` | Id cieľov na notifikovanie. Predvolene všetky aktívne. |
+
+Tie isté polia sú pod „More filters" pri pridávaní vyhľadávania v dashboarde a každé
+vyhľadávanie tam má tlačidlo **Edit** (ktoré ponúka aj **Clone** — to isté vyhľadávanie,
+filtre a ciele na inej krajine) na neskoršie zmeny — zmena platí od najbližšej kontroly, bez
+reštartu. Pevná je len URL: tá je tým, čím vyhľadávanie *je*.
+
+## Pridanie vyhľadávania
+
+Vyhľadaj na Vintede, nastav filtre, skopíruj adresný riadok a vlož tú URL do dashboardu alebo
+do `vinted-sniper watch`. Dashboard ti URL vie aj postaviť — z Vintedových vlastných
+kategórií, brand autocomplete a filtrov.
+
+Funguje ktorákoľvek krajina: `vinted.fr`, `.de`, `.nl`, `.co.uk`, `.com` a ostatné. Sleduje
+sa stránka, z ktorej si kopíroval, a odkazy, ktoré dostaneš, mieria tam. Trackovacie
+parametre sa odstraňujú, takže dvakrát vložené to isté vyhľadávanie sa počíta ako jedno.
+
+## Ciele
+
+Kde vziať jednotlivé druhy cieľov:
+
+| Druh | Nastavenie |
+|---|---|
+| `discord` | Vo svojom serveri: Settings → Integrations → Webhooks → New Webhook → Copy URL. Nič netreba pozývať, nič hostovať. |
+| `telegram` | Vytvor bota cez [@BotFather](https://t.me/BotFather), nastav `TELEGRAM_BOT_TOKEN`, spusti `vinted-sniper pair-telegram` a klikni na vypísaný link. Chat id nájde za teba. Každý alert nesie dve tlačidlá navyše, ktoré bot obsluhuje sám: preskočiť predajcu pre dané vyhľadávanie a pozastaviť vyhľadávanie (`/resume <id>` ho vráti). Tlačidlá fungujú len z párovaného chatu. |
+| `ntfy` | Vyber si názov topicu, nainštaluj ntfy appku. Bez účtu. |
+| `webhook` | Akákoľvek URL pod tvojou kontrolou: n8n, Home Assistant, skript. Payload nižšie. |
+
+Každé vyhľadávanie môže mať vlastnú sadu cieľov, takže Discord kanál na jedno a telefón na
+druhé je normálka.
+
+Už ohlásený inzerát sa ohlási znova, keď jeho cena klesne o `PRICE_DROP_MIN_PERCENT` alebo
+viac — predajcovia na Vintede zľavňujú často a bunda pridrahá v pondelok nemusí byť pridrahá
+vo štvrtok. Nestojí to nič navyše: prvá stránka vyhľadávania, ktorú appka aj tak sťahuje,
+nesie aktuálnu cenu každého inzerátu, takže inzerát sa sleduje, kým na nej zostáva (na tichom
+vyhľadávaní donekonečna). Webhook konzumenti na takých položkách vidia `"event":
+"price_drop"` a `"previous_total_price"`.
+
+Cieľ má **jazyk** (`--lang en|sk`, alebo selektor v dashboarde): jeho alerty, odpovede bota a
+zdravotné správy sa renderujú v ňom. Slovenský Telegram chat a anglický Discord server môžu
+zdieľať jednu inštanciu. Samotný dashboard je zatiaľ po anglicky.
+
+Cieľ môže mať **quiet hours** — `--quiet 23:00-07:00` na príkazovom riadku, alebo pole vedľa
+v dashboarde — počas ktorých sa nič neposiela. Alerty nájdené medzitým sa držia (sú vyňaté z
+`OUTBOX_EXPIRY_MINUTES`) a odídu spolu, keď okno skončí; Discord a Telegram veľkú dávku
+zbalia do jednej digest správy. Časy sa čítajú v `TIMEZONE`.
+
+Čo sa ukladá per cieľ — dashboard aj `vinted-sniper destination` to vyplnia za teba:
+
+| Druh | Polia |
+|---|---|
+| `discord` | `webhook_url` |
+| `telegram` | `chat_id`, voliteľne `message_thread_id` pre forum topic |
+| `ntfy` | `topic`, voliteľne `server` a `token` |
+| `webhook` | `url`, voliteľne `headers` |
+
+## Webhook payload
+
+Obyčajný webhook cieľ dostane POST ako tento. Tvar sa berie ako kontrakt: mení sa len so
+zmenou verzie, lebo závisia od neho automatizácie iných ľudí.
+
+```json
+{
+  "version": 1,
+  "search": "nike air max",
+  "items": [
+    {
+      "id": 9683334896,
+      "site": "vinted.fr",
+      "title": "Nike Air Max 90",
+      "url": "https://www.vinted.fr/items/9683334896-nike-air-max-90",
+      "brand": "Nike",
+      "size": "42",
+      "condition": "Very good",
+      "price": "15.00",
+      "total_price": "16.45",
+      "currency": "EUR",
+      "photo_url": "https://images.vinted.net/...",
+      "listed_at": "2026-08-16T20:14:00+00:00",
+      "seller": "someone",
+      "seller_rating": 0.93,
+      "links": {
+        "message_seller": "https://www.vinted.fr/items/9683334896",
+        "buy": "https://www.vinted.fr/items/9683334896",
+        "seller": "https://www.vinted.fr/member/12345678"
+      }
+    }
+  ]
+}
+```
+
+`price` je, čo si predajca pýta. `total_price` je, čo zaplatíš. Filtre aj zobrazenia
+používajú to druhé. `message_seller` a `buy` si nechávajú kľúče kvôli kompatibilite, ale oba
+vedú na stránku inzerátu — hlboké odkazy, na ktoré mierili, Vinted odstránil.
+
+Položky nesú aj enrichment polia — `event`, `photo_urls`, `seller_reviews`,
+`enrichment_url`, `favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour`,
+`market`, `known_retail`, `reader_language`, `buyer_feedback` a `previous_total_price` pri
+zľave — zdokumentované v [enrichment.md](enrichment.md).
+
+## RSS
+
+Každé vyhľadávanie má feed na `/rss/<id vyhľadávania>.xml`, takže s predvoľbami:
+
+```
+http://localhost:8000/rss/1.xml
+```
+
+Ak je nastavený `WEB_AUTH_TOKEN`, čítačky feedov sa nevedia prihlásiť, takže token ide do
+URL: `/rss/1.xml?key=<tvoj token>`. Ktokoľvek s tou URL vie feed čítať, tak s ňou zaobchádzaj
+ako s heslom.

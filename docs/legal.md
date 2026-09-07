@@ -1,5 +1,7 @@
 # Rules, risks, and other people's data
 
+*[Slovenská verzia nižšie ↓](#slovensky)*
+
 Not legal advice. This is what the project assumes and why, so you can decide for yourself.
 
 ## Vinted's terms
@@ -72,3 +74,84 @@ mirror is not.
 Then stop. This project has no interest in being adversarial with them; it exists because the
 official notifications are slow, not because anyone wants a fight. If you receive a notice,
 comply with it, and please open an issue so other people know.
+
+---
+
+<a name="slovensky"></a>
+
+# Pravidlá, riziká a dáta iných ľudí (slovensky)
+
+Toto nie je právna rada. Je to súhrn toho, z čoho projekt vychádza a prečo, aby si sa vedel
+rozhodnúť sám.
+
+## Podmienky Vintedu
+
+Podmienky používania Vintedu zakazujú automatizovaný prístup — boty, scrapery, crawlery,
+obvyklý zoznam. To je zmluva medzi tebou a Vintedom, nie zákon. Jej porušenie nie je trestný
+čin; dáva Vintedu dôvod prestať ťa obsluhovať.
+
+V EÚ čítanie verejne dostupných stránok samo osebe nezákonné nie je. Súdy vo viacerých
+jurisdikciách dospeli pri verejných dátach k podobným záverom. Čo podmienky Vintedu dávajú,
+je právo ťa zablokovať a — ak máš účet — zrušiť ho.
+
+## Čo to znamená v praxi
+
+Tento nástroj číta verejné stránky inzerátov anonymne. Nikdy sa neprihlasuje, nikam neposiela
+tvoje prihlasovacie údaje a nikdy sa nedotkne tvojho Vinted účtu. Nie je tu žiadny účet, ktorý
+by Vinted mohol obmedziť.
+
+Realistický najhorší scenár je, že tvoju IP adresu prestanú obsluhovať — čo je dočasné a
+vratné. To je zásadne iné riziko než pri nástrojoch, ktoré sa prihlasujú a nakupujú
+automaticky: Vinted obmedzuje účty podozrivé z automatizácie a obmedzenie účtu ťa stojí
+históriu nákupov, tvoje inzeráty aj reputáciu.
+
+Aj preto nakupovanie nie je funkciou tohto nástroja a nikdy nebude.
+
+## Byť rozumným hosťom
+
+Predvolené hodnoty sú zámerne neuponáhľané a oplatí sa ich tak nechať:
+
+- Jedna kontrola za minútu na vyhľadávanie, s podlahou desať sekúnd. Katalóg Vintedu aj tak
+  mešká za nahratými vecami, takže rýchlejšie kontroly nenájdu nič skôr.
+- Jeden request na kontrolu. Žiadne prechádzanie stránok, žiadne sťahovanie detailu každého
+  inzerátu.
+- Sessions sa znovu používajú namiesto neustáleho zakladania nových.
+- Keď dostaneme povel ustúpiť, ustúpime — a čakáme presne toľko, koľko si Vinted pýta.
+
+Ak máš veľa vyhľadávaní, zvýš interval namiesto pridávania paralelizmu. Cieľom je byť trochu
+nezvyčajným návštevníkom, nie záťažovým testom.
+
+## Dáta iných ľudí
+
+Inzeráty obsahujú osobné údaje: používateľské mená predajcov, odkazy na profily, niekedy
+mesto, niekedy hodnotenie. Podľa GDPR sa ich uložením stávaš prevádzkovateľom, aj pri
+osobnom použití. Výnimka pre osobné použitie je užšia, než si ľudia myslia, a neprežije
+publikovanie ani zdieľanie.
+
+Ako to projekt drží pri zemi:
+
+- Ukladá sa len to, čo notifikácia potrebuje: meno a hodnotenie, nie celé profily.
+- Plné API payloady sú predvolene vypnuté (`KEEP_RAW_JSON=false`).
+- Inzeráty sa po tridsiatich dňoch mažú.
+- Všetko zostáva v súbore na tvojom stroji. Nikam sa neposiela nič okrem notifikácií, ktoré
+  si nastavil.
+- Žiadne profilovanie predajcov, žiadne krížové porovnávanie, žiadne agregované datasety.
+
+Ak toto zmeníš — zapneš raw payloady, predĺžiš retenciu, exportuješ databázu — berieš na seba
+väčšiu zodpovednosť za tie dáta. Ak čokoľvek zverejníš, potrebuješ právny základ, a „veď to už
+bolo verejné" ním nie je.
+
+Nepoužívaj to na budovanie datasetu o jednotlivých predajcoch, na predaj vyscrapovaných dát
+ani na cielenie na kohokoľvek. To je iná činnosť než čakanie na bundu v tvojej veľkosti.
+
+## Zdieľanie nálezov
+
+Notifikácie sú pre teba. Hromadné republikovanie fotiek či popisov inzerátov naráža na
+autorské právo — tie fotky odfotil predajca — aj na všetko vyššie. Odkaz je v poriadku.
+Zrkadlo nie.
+
+## Ak ťa Vinted požiada prestať
+
+Tak prestaň. Tento projekt nemá záujem ísť s nimi do sporu; existuje preto, že oficiálne
+notifikácie sú pomalé, nie preto, že by niekto chcel boj. Ak dostaneš výzvu, vyhov jej a
+prosím, otvor issue, aby o tom vedeli aj ostatní.

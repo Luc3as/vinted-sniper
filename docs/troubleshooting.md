@@ -1,5 +1,7 @@
 # When it stops finding things
 
+*[Slovenská verzia nižšie ↓](#slovensky)*
+
 Start here: `vinted-sniper status`. It prints every search with a one-word state, when it
 last succeeded, and what went wrong if anything did.
 
@@ -42,8 +44,8 @@ The search has stopped seeing new listings while your other searches on the same
 still finding them. Vinted sometimes serves a catalog that has quietly stopped updating,
 which looks like success from the outside.
 
-The app starts a fresh session on its own when it notices. If it stays stale for more than
-an hour, restart it:
+The app starts a fresh session on its own when it notices (with `WATCHDOG_ACTION=warn` it
+only tells you). If it stays stale for more than an hour, restart it:
 
 ```bash
 docker compose restart vinted-sniper
@@ -152,3 +154,156 @@ image: ghcr.io/luc3as/vinted-sniper@sha256:<previous digest>
 The weekly canary tests against the live site, so an outright break usually gets caught
 before it ships. If you hit one anyway, the logs from `docker compose logs` are the useful
 thing to attach.
+
+---
+
+<a name="slovensky"></a>
+
+# Keď prestane nachádzať veci (slovensky)
+
+Začni tu: `vinted-sniper status`. Vypíše každé vyhľadávanie s jednoslovným stavom, kedy
+naposledy uspelo a čo sa pokazilo, ak vôbec niečo.
+
+```
+Running.
+
+nike air max [ok] — vinted.fr
+  last successful check: 34s ago
+  newest listing seen:   112s ago
+
+carhartt jacket [failing] — vinted.co.uk
+  last successful check: 1840s ago
+  blocked 12 times, rate limited 0 times
+  last error: vinted.co.uk refused the request with 403
+```
+
+Stav ti povie, ktorú z nasledujúcich sekcií čítať.
+
+## „ok", ale nič nechodí
+
+Vyhľadávanie funguje; len sa nič nezhoduje. Bežné príčiny, v poradí, v akom sa oplatí
+kontrolovať:
+
+**Tvoj cenový limit zahŕňa buyer protection.** Limit 20 odmietne inzerát za 18, ktorý v
+skutočnosti stojí 20,50. To je zámerné správanie, ale ľudí prekvapuje. Čo máš nastavené,
+zistíš cez `vinted-sniper searches`.
+
+**Samotné vyhľadávanie je úzke.** Otvor URL v prehliadači. Ak ani Vinted neukazuje nič nové,
+nič nie je pokazené.
+
+**Vylúčené slová chytajú viac, než si chcel.** Vylúčenie „new" vylúči aj „brand new
+condition" a všetko ostatné, čo ho obsahuje.
+
+**Všetko sú boostované inzeráty.** Platené bumpy sa preskakujú, lebo sú to staré inzeráty,
+ktoré sa vynárajú znova — nie nové.
+
+## „stale"
+
+Vyhľadávanie prestalo vidieť nové inzeráty, zatiaľ čo tvoje ostatné vyhľadávania na tej istej
+stránke ich stále nachádzajú. Vinted občas servíruje katalóg, ktorý sa potichu prestal
+aktualizovať — zvonku to vyzerá ako úspech.
+
+Appka si sama založí novú session, keď si to všimne (pri `WATCHDOG_ACTION=warn` len upozorní).
+Ak to zostane stale viac než hodinu, reštartuj:
+
+```bash
+docker compose restart vinted-sniper
+```
+
+Ak to pretrváva aj potom, vyhľadávanie mohlo naozaj vyschnúť. Porovnaj s tou istou URL v
+prehliadači.
+
+## „failing" so 403
+
+Vinted odmieta spojenie. Takmer vždy ide o to, odkiaľ request prichádza, nie o to, čo žiadal.
+Over si to jedným príkazom:
+
+```bash
+curl -v -c - -L "https://www.vinted.fr/" 2>&1 | grep access_token_web
+```
+
+Použi tú krajinu, ktorú sleduješ.
+
+**Ak sa vypíše riadok s cookie**, tvoja adresa je v poriadku a problém je v appke — otvor
+prosím issue s logmi.
+
+**Ak sa nevypíše nič**, tvoja adresa je challenged a žiadne nastavenie to neopraví. Možnosti,
+od najlacnejšej:
+
+1. **Počkaj.** Obvykle je to dočasné. Appka sama ustupuje.
+2. **Spomaľ.** Zvýš `VINTED_SNIPER_POLL_DEFAULT_INTERVAL_S` na 120 či 300, alebo zníž
+   `VINTED_SNIPER_SITE_REQUESTS_PER_MINUTE`, ktoré stropuje adresu ako celok. Desať vyhľadávaní
+   naraz z jednej adresy je oveľa viac prevádzky než jedno. Keď je jedno vyhľadávanie
+   odmietnuté, ostatné na tej stránke sa samy zdržia (`poll.cooling_down` v logoch) — to je
+   zámer, nie druhý problém.
+3. **Presuň to domov.** Domáce pripojenia sú challengované oveľa menej než datacentrové.
+   Raspberry Pi stačí.
+4. **Zapni TLS impersonation.** Nastav `VINTED_SNIPER_HTTP_IMPERSONATE=true`. Requesty budú na
+   úrovni spojenia vyzerať ako skutočný prehliadač, nie ako Python. Potrebuje nainštalovanú
+   extra `impersonate` a nie je to zázrak — ak je adresa blokovaná natvrdo, blokovaná zostane.
+5. **Použi proxy.** `VINTED_SNIPER_PROXY_FILE` ukazuje na textový súbor s jednou proxy URL na
+   riadok. Free proxy zoznamy sú už zablokované; ak ideš touto cestou, použi rezidenčné proxy
+   v krajine stránky, ktorú sleduješ. Väčšina ľudí to nikdy nepotrebuje.
+
+## „failing" so 429
+
+Kontroluješ príliš často na to, ako sa Vinted práve tvári na tvoju adresu. Appka už čaká
+presne toľko, koľko si Vinted pýta. Ak sa to opakuje, zvýš interval — inzeráty tam stále budú.
+
+## „failing" s malformed
+
+Vinted odpovedal niečím, čo nie je katalóg. Obvykle to znamená anti-bot interstitial (pozri
+sekciu o 403) alebo zmenu ich API, ktorá potrebuje opravu tu. Oplatí sa otvoriť issue so
+zalogovanou chybou.
+
+## Notifikácie prestali, ale vyhľadávania sú v poriadku
+
+Skontroluj cieľ:
+
+```bash
+vinted-sniper destinations
+```
+
+Cieľ označený `disabled` bol vypnutý, lebo druhá strana povedala, že už neexistuje — zmazaný
+Discord webhook, zablokovaný Telegram bot, zlé chat id. Je to zámer: opakované posielanie na
+mŕtvy webhook je presne to, za čo ti Discord rate-limitne adresu. Odstráň ho a pridaj nový.
+
+Tiež sa oplatí vedieť: nedoručené notifikácie sa predvolene po hodine zahadzujú. Ak bol
+Discord celú noc dole, po návrate dostaneš aktuálne inzeráty, nie záplavu starých.
+
+## Píše „Not running"
+
+Heartbeat je starý — proces neprechádza svojou slučkou.
+
+```bash
+docker compose logs --tail 50 vinted-sniper
+docker compose ps
+```
+
+Ak sa kontajner opakovane reštartuje, logy povedia prečo.
+
+Oplatí sa grepnúť logy aj na `web.no_password`: to varovanie znamená, že dashboard počúva na
+inej adrese než localhost bez prihlásenia, takže ktokoľvek, kto dosiahne na port, vidí tvoje
+webhook URL. Buď nastav `VINTED_SNIPER_WEB_AUTH_TOKEN`, alebo over, že publikovaný port nie
+je verejný.
+
+## Telegram sa nikdy nepripojí
+
+Bot ti nemôže napísať prvý — to je pravidlo Telegramu, nie obmedzenie tu. Spusti
+`vinted-sniper pair-telegram --bot-username tvojbot`, potom klikni na vypísaný link v chate
+alebo skupine, kde chceš alerty. Appka musí bežať, aby link fungoval, a link expiruje po
+tridsiatich minútach.
+
+Pri skupine najprv pridaj bota do skupiny. Pri forum topicu klikni na link v danom topicu.
+
+## Po update je všetko rozbité
+
+Vráť sa na predchádzajúci image a otvor issue. `latest` sa hýbe, takže si pripni digest
+image, ktorý fungoval (`docker image ls --digests`):
+
+```yaml
+image: ghcr.io/luc3as/vinted-sniper@sha256:<predchádzajúci digest>
+```
+
+Týždenný canary testuje proti živej stránke, takže úplné rozbitie sa obvykle chytí skôr, než
+sa dostane von. Ak naň aj tak narazíš, užitočná príloha sú logy z `docker compose logs`.

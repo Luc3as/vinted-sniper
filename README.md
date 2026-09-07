@@ -117,10 +117,13 @@ for you. Nothing else is required; everything below is tuning.
 
 ### Portainer stack
 
+The short version — the full walkthrough (repository stacks, stack env variables, updating,
+logs) is in [docs/self-hosting.md](docs/self-hosting.md#in-portainer):
+
 ```yaml
 services:
   vinted-sniper:
-    image: vinted-sniper:impersonate
+    image: ghcr.io/luc3as/vinted-sniper:latest
     container_name: vinted-sniper
     restart: unless-stopped
     environment:
@@ -237,9 +240,11 @@ docker compose up -d
 
 Otvor **http://localhost:8000**, vlož URL vyhľadávania, pridaj cieľ. Pre Telegram spusti
 `docker exec vinted-sniper vinted-sniper pair-telegram` a klikni na link — chat id si nájde
-sám. Nastavenia, Portainer stack a agenta pozri v anglickej sekcii vyššie; kompletný zoznam je v
-[docs/configuration.md](docs/configuration.md), kontrakt pre agenta v
-[docs/enrichment.md](docs/enrichment.md).
+sám. Dokumentácia je dvojjazyčná — slovenská verzia je vždy v druhej polovici súboru:
+kompletný zoznam nastavení v [docs/configuration.md](docs/configuration.md#slovensky),
+kontrakt pre agenta v [docs/enrichment.md](docs/enrichment.md#slovensky), Portainer a ďalšie
+spôsoby nasadenia v [docs/self-hosting.md](docs/self-hosting.md#slovensky), riešenie
+problémov v [docs/troubleshooting.md](docs/troubleshooting.md#slovensky).
 
 ## Licencia
 
