@@ -83,3 +83,64 @@ class MappedQuery(BaseModel):
             params["search_text"] = self.search_text
         params["order"] = "newest_first"
         return params
+
+
+class TriageTarget(BaseModel):
+    """What the photo check compares a listing against: the thing you asked for.
+
+    Built from a `MappedQuery` — `keywords` and `visual_signature` are the two fields S02
+    added for exactly this moment — plus `labels`, the human-readable names of the ids the
+    search already filtered on. The model never sees a catalog id; it sees "Patagonia" and
+    "Jackets & Coats", because those are what a photo can be judged against.
+    """
+
+    keywords: list[str] = Field(default_factory=list)
+    visual_signature: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+
+
+class Usage(BaseModel):
+    """What one call to a judging flow cost, as the flow reported it.
+
+    Optional everywhere: a flow that reports nothing is not an error, it just means the
+    sweep prices the call from the configured per-million rates instead. `cost_eur` is the
+    flow's own figure and wins over that arithmetic when present (T06).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_eur: float | None = None
+
+
+class TriageItem(BaseModel):
+    """One listing's thumbnail verdict: is this the thing, and how sure is the model.
+
+    `confidence` is bounded rather than free: it ranks candidates, so a flow answering 87
+    when it meant 0.87 would silently dominate every real match. Out of range is a schema
+    failure the operator sees, not a number that quietly reorders a sweep.
+
+    This satisfies `db.repo.TriageOutcome` structurally — the repo writer takes it as-is
+    with no adapter, and the db layer never imports this module (MEM027).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    matches_target: bool
+    confidence: float = Field(ge=0, le=1)
+    reason: str | None = None
+
+
+class TriageBatch(BaseModel):
+    """One batch's answer: a verdict per listing, and what the batch cost.
+
+    Extra keys ignored for the same reason as `MappedQuery`: the flow can start returning a
+    new field before this app knows about it, so the two deploys are not coupled.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    results: list[TriageItem] = Field(default_factory=list)
+    usage: Usage | None = None

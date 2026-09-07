@@ -12,4 +12,14 @@ already passes around. Confirming that each id in it actually exists in Vinted's
 is a separate step, on purpose: a shape can be valid and still be a search for a brand
 nobody has ever sold. When that check fails the caller gets a `MappingError` naming what
 was wrong, not an empty result page.
+
+The second half of the package is the judging side. `triage.py` asks a flow which of a
+sweep's survivors *look* like the thing that was asked for — the whole reason this
+milestone exists, since a title score can only rank the words a seller happened to type.
+It is built as a deliberate copy of `client.py`: same one-attempt discipline, same single
+`MappingError`, same wrapper unwrapping, because both talk to the same n8n and an operator
+debugging one should not have to learn a second set of rules. The one thing it adds is a
+cost shape — `Usage` on every answer — and the rule that goes with it: triage sends
+thumbnails and never full-size photos, which is a property of the request body and is
+asserted as one.
 """
