@@ -175,6 +175,7 @@ async def run_sweep(
     query_id: int | None = None,
     gates_query: Query | None = None,
     sessions: SessionManager | None = None,
+    sweep_id: int | None = None,
 ) -> SweepResult:
     """Read up to `max_pages` of existing stock in relevance order and store the best of it.
 
@@ -193,11 +194,19 @@ async def run_sweep(
     succeeded are funnelled and stored, the run is closed with `status='partial'` (or
     `'blocked'`), and no Vinted error escapes to the caller — a one-shot read failing is not
     a reason to take down whoever asked for it.
+
+    `sweep_id` is for callers that need the id *before* the sweep starts — an HTTP handler
+    that has to answer 202 with something the browser can poll, when the run itself will
+    still be reading pages minutes later. Passing one means "the row is already open, use
+    it"; leaving it None runs the line below exactly as every existing caller does. Same
+    shape as `filters.check(gates=...)`: an optional keyword that leaves the default path
+    byte-identical rather than a branch through the body.
     """
     started = time.monotonic()
-    sweep_id = await repo.create_sweep_run(
-        tld=tld, params=params, keywords=keywords, query_id=query_id
-    )
+    if sweep_id is None:
+        sweep_id = await repo.create_sweep_run(
+            tld=tld, params=params, keywords=keywords, query_id=query_id
+        )
     gates = gates_query if gates_query is not None else ephemeral_query(tld=tld, params=params)
     run_log = log.bind(sweep_id=sweep_id, tld=tld)
 
@@ -295,6 +304,7 @@ async def judge_sweep(
     query_id: int | None = None,
     gates_query: Query | None = None,
     sessions: SessionManager | None = None,
+    sweep_id: int | None = None,
     cost_per_mtok_in: float = 0.0,
     cost_per_mtok_out: float = 0.0,
 ) -> SweepResult:
@@ -333,6 +343,10 @@ async def judge_sweep(
     it — `add_sweep_cost()` is called as each stage completes, so a run that dies half way
     through still reports what it actually spent.
 
+    `sweep_id` is forwarded to `run_sweep()` untouched and means the same thing here: the
+    run's row is already open, so a caller that answered 202 with an id minutes ago is
+    still describing this run and not a second one.
+
     Ordering note: the stored `position` column stays the funnel's order. The triage order
     is the returned `candidates` list, and it is reproducible from the database at any time
     because `matches_target`, `confidence` and `rank_score` are all persisted per candidate.
@@ -348,6 +362,7 @@ async def judge_sweep(
         query_id=query_id,
         gates_query=gates_query,
         sessions=sessions,
+        sweep_id=sweep_id,
     )
     if result.status != "ok" or not result.candidates:
         return result

@@ -22,7 +22,7 @@ import json
 import secrets
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Any
@@ -89,6 +89,104 @@ class MagicSearchIn(BaseModel):
     tld: str = Field(min_length=2, max_length=8)
 
 
+class SweepLaunchIn(BaseModel):
+    """A confirmed mapping, posted back to start the sweep it describes.
+
+    The map step stores nothing, so the browser hands back what `/api/magic-search/map`
+    gave it rather than a mapping id. `labels` is flat here on purpose — it is the plain
+    wording the photo check is told to look for, so the confirmation screen sends the names
+    it showed the person, one string each.
+
+    The two ceilings are advisory and downward-only. What a sweep is allowed to read and
+    pay for is a deployment's decision, so `settings.sweep_max_pages` and
+    `settings.sweep_max_items` are the real numbers and anything posted here is clamped to
+    them; posting nothing means the settings apply unchanged.
+    """
+
+    params: dict[str, str]
+    tld: str = Field(min_length=2, max_length=8)
+    keywords: list[str] = Field(default_factory=list)
+    visual_signature: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+    max_pages: int | None = Field(default=None, ge=1)
+    max_items: int | None = Field(default=None, ge=1)
+
+
+async def _run_magic_sweep(
+    *,
+    sweep_id: int,
+    body: SweepLaunchIn,
+    tld: str,
+    max_pages: int,
+    max_items: int,
+    settings: Settings,
+    repo: Repo,
+    client: VintedClient,
+    sessions: SessionManager | None,
+    triage: TriageClient,
+    verdict: VerdictClient | None,
+) -> None:
+    """The whole of what a web-launched sweep does, at module level so it can be guarded.
+
+    `tests/integration/test_sweep_isolation.py` scans the sweep's write path for the
+    poller's own writers, and it scans *this function* rather than `web/server.py` as a
+    whole: the enrichment ingest endpoint in this module legitimately calls
+    `store_enrichment()`, which is exactly one of the names that must never appear on a
+    sweep's side. Scoping the scan to the launcher keeps the guard meaningful at the new
+    entry point instead of permanently green.
+
+    It never raises. `judge_sweep()` already degrades rather than throwing, but this runs
+    detached from any request, so anything it did not anticipate would otherwise close the
+    HTTP story with a run stuck at `status='running'` and a browser polling it forever.
+    """
+    started = time.monotonic()
+    status = "error"
+    try:
+        result = await sweep.judge_sweep(
+            sweep_id=sweep_id,
+            tld=tld,
+            params=dict(body.params),
+            keywords=list(body.keywords),
+            visual_signature=body.visual_signature,
+            labels=dict(body.labels),
+            client=client,
+            repo=repo,
+            triage=triage,
+            verdict=verdict,
+            max_pages=max_pages,
+            max_items=max_items,
+            batch_size=settings.sweep_triage_batch,
+            max_verdicts=settings.sweep_max_verdicts,
+            sessions=sessions,
+            cost_per_mtok_in=settings.magic_cost_per_mtok_in,
+            cost_per_mtok_out=settings.magic_cost_per_mtok_out,
+        )
+        status = result.status
+    except Exception as exc:  # a detached task has nowhere to raise to
+        # The counts already on the row are kept: whatever pages and batches did land are
+        # real, and overwriting them with zeroes would turn a partial result into a lie.
+        log.exception("magic.sweep_crashed", sweep_id=sweep_id, error=str(exc))
+        status = "partial"
+        row = await repo.get_sweep_run(sweep_id)
+        if row is not None and row.finished_at is None:
+            await repo.finish_sweep_run(
+                sweep_id,
+                status=status,
+                pages_fetched=row.pages_fetched,
+                items_seen=row.items_seen,
+                candidates=row.candidates,
+                funnel=row.funnel,
+                error=str(exc),
+            )
+    finally:
+        log.info(
+            "magic.sweep_finished",
+            sweep_id=sweep_id,
+            status=status,
+            elapsed_s=round(time.monotonic() - started, 2),
+        )
+
+
 def create_app(
     settings: Settings,
     repo: Repo,
@@ -99,6 +197,7 @@ def create_app(
     sessions: SessionManager | None = None,
     triage: TriageClient | None = None,
     verdict: VerdictClient | None = None,
+    launch: Callable[[Coroutine[Any, Any, None]], None] | None = None,
 ) -> FastAPI:
     token = settings.web_auth_token  # None means no password: the dashboard just opens
 
@@ -117,6 +216,30 @@ def create_app(
     app.state.sessions = sessions
     app.state.triage = triage
     app.state.verdict = verdict
+
+    # A sweep takes minutes, so the POST that starts one answers 202 and the work runs on
+    # after the response. Two things that need holding for that to be true:
+    #
+    # * The task. `asyncio.create_task()` keeps only a weak reference, so a task nobody
+    #   holds can be collected mid-run; `sweep_tasks` is the strong reference, and
+    #   `serve()` cancels whatever is still in it on shutdown.
+    # * The fact that one is running. A sweep spends real money, so a second click while
+    #   the first is still going is refused rather than billed. `sweeping` is claimed
+    #   before the first await in the handler, which is what makes the check-then-claim
+    #   atomic under asyncio.
+    sweep_tasks: set[asyncio.Task[None]] = set()
+    app.state.sweep_tasks = sweep_tasks
+    sweeping = False
+
+    def _launch(coro: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(coro)
+        sweep_tasks.add(task)
+        task.add_done_callback(sweep_tasks.discard)
+
+    # Injectable so a test can run the sweep to completion and then read it back, instead
+    # of sleeping and hoping: `TestClient` and a detached task race, and a test that races
+    # is a test that will one day be deleted for flaking.
+    start_sweep_task = launch if launch is not None else _launch
 
     async def require_login(
         session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
@@ -651,6 +774,75 @@ def create_app(
             }
         )
 
+    @app.post("/api/magic-search/sweep")
+    async def magic_search_sweep(body: SweepLaunchIn, _: None = guard) -> JSONResponse:
+        """Start a sweep and answer with the id that describes it, immediately.
+
+        The sweep itself reads pages and buys AI answers for minutes afterwards, so the
+        only useful thing to return is something the page can poll — which is why the run's
+        row is opened here, before anything is launched, and handed to `judge_sweep()`
+        rather than created inside it. Polling `recent_sweep_runs()` for the id a moment
+        later would be a race with every other sweep on the same database.
+        """
+        nonlocal sweeping
+
+        if client is None or triage is None:
+            raise HTTPException(status_code=503, detail="Magic Search is not set up")
+        tld = _known_tld(body.tld)
+
+        if sweeping:
+            log.warning("magic.sweep_launch_refused", reason="in_flight", tld=tld)
+            raise HTTPException(
+                status_code=409,
+                detail="a sweep is already running — wait for it to finish",
+            )
+
+        # What the deployment allows, never what the browser asked for. Clamping down is
+        # the only direction available: a posted ceiling can shrink a sweep, never grow it.
+        max_pages = min(body.max_pages or settings.sweep_max_pages, settings.sweep_max_pages)
+        max_items = min(body.max_items or settings.sweep_max_items, settings.sweep_max_items)
+
+        sweeping = True
+        try:
+            sweep_id = await repo.create_sweep_run(
+                tld=tld, params=dict(body.params), keywords=list(body.keywords)
+            )
+        except Exception:
+            sweeping = False
+            raise
+
+        async def run() -> None:
+            nonlocal sweeping
+            try:
+                await _run_magic_sweep(
+                    sweep_id=sweep_id,
+                    body=body,
+                    tld=tld,
+                    max_pages=max_pages,
+                    max_items=max_items,
+                    settings=settings,
+                    repo=repo,
+                    client=client,
+                    sessions=sessions,
+                    triage=triage,
+                    verdict=verdict,
+                )
+            finally:
+                # Cleared in a `finally` rather than in the happy path: a sweep that
+                # crashed, or one cancelled by a shutdown, must not wedge the endpoint at
+                # 409 for the rest of the process's life.
+                sweeping = False
+
+        log.info(
+            "magic.sweep_started",
+            sweep_id=sweep_id,
+            tld=tld,
+            max_pages=max_pages,
+            max_items=max_items,
+        )
+        start_sweep_task(run())
+        return JSONResponse({"sweep_id": sweep_id}, status_code=202)
+
     # --- Destinations --------------------------------------------------------------
 
     @app.post("/destinations")
@@ -1116,17 +1308,18 @@ async def serve(
 ) -> None:
     """Run the web UI until the app shuts down."""
 
+    app = create_app(
+        settings,
+        repo,
+        taxonomy,
+        mapper,
+        client=client,
+        sessions=sessions,
+        triage=triage,
+        verdict=verdict,
+    )
     config = uvicorn.Config(
-        create_app(
-            settings,
-            repo,
-            taxonomy,
-            mapper,
-            client=client,
-            sessions=sessions,
-            triage=triage,
-            verdict=verdict,
-        ),
+        app,
         host=settings.web_host,
         port=settings.web_port,
         log_config=None,
@@ -1145,3 +1338,14 @@ async def serve(
     await stop.wait()
     server.should_exit = True
     await serving
+
+    # A sweep launched by the browser outlives the request that started it, so shutdown has
+    # to say so out loud. Uvicorn only knows about requests; these tasks are ours to end,
+    # and a run cut off here stays `running` in the database on purpose — it did not
+    # finish, and pretending otherwise would put a fabricated result on the history page.
+    survivors = [task for task in app.state.sweep_tasks if not task.done()]
+    if survivors:
+        log.info("web.sweeps_cancelled", count=len(survivors))
+        for task in survivors:
+            task.cancel()
+        await asyncio.gather(*survivors, return_exceptions=True)

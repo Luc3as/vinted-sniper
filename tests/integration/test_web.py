@@ -25,10 +25,10 @@ from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine import sweep
 from vinted_sniper.enrichment import EnrichmentIn
 from vinted_sniper.magic.client import MapperClient
-from vinted_sniper.magic.models import TriageItem
+from vinted_sniper.magic.models import TriageBatch, TriageItem
 from vinted_sniper.magic.triage import TriageClient
 from vinted_sniper.magic.verdict import VerdictClient
-from vinted_sniper.vinted.client import VintedClient
+from vinted_sniper.vinted.client import PER_PAGE, VintedClient
 from vinted_sniper.vinted.models import parse_item
 from vinted_sniper.vinted.session import SessionManager
 from vinted_sniper.vinted.taxonomy import Taxonomy
@@ -1353,9 +1353,7 @@ def test_the_dashboard_carries_everything_a_sweep_needs(
     assert transport.requests == []
 
 
-def test_a_dashboard_built_without_them_still_starts(
-    web_settings: Settings, repo: Repo
-) -> None:
+def test_a_dashboard_built_without_them_still_starts(web_settings: Settings, repo: Repo) -> None:
     """The four are optional on purpose: most of the dashboard has no use for them.
 
     An install with no Magic webhooks set, and every existing test that calls
@@ -1367,3 +1365,308 @@ def test_a_dashboard_built_without_them_still_starts(
     assert app.state.sessions is None
     assert app.state.triage is None
     assert app.state.verdict is None
+
+
+# --- Launching a sweep ----------------------------------------------------------------
+#
+# The slice's one vertical: a POST that answers before the work is done, an id the page can
+# poll while it runs, and no second bill for a second click. Nothing here sleeps — the
+# launcher is injected, so the test decides exactly when the sweep runs and reads the same
+# `GET /api/sweeps/{id}` the browser will.
+
+
+class CollectingLauncher:
+    """Takes the sweep's coroutine and holds it, so the test runs it when it chooses.
+
+    The alternative is `asyncio.create_task` plus a sleep, which races `TestClient`'s own
+    thread and would flake. Holding the coroutine makes "before the sweep ran" and "after
+    the sweep ran" two lines of a test instead of a guess about timing.
+    """
+
+    def __init__(self) -> None:
+        self.pending: list[Any] = []
+
+    def __call__(self, coro: Any) -> None:
+        self.pending.append(coro)
+
+    async def drain(self) -> None:
+        while self.pending:
+            await self.pending.pop(0)
+
+    def discard(self) -> None:
+        for coro in self.pending:
+            coro.close()
+        self.pending.clear()
+
+
+SWEEP_PHOTO_TS = 1_760_000_000
+
+SWEEP_BODY = {
+    "params": {"search_text": "torrentshell", "order": "newest_first"},
+    "tld": "fr",
+    "keywords": ["torrentshell"],
+    "visual_signature": "a boxy waterproof shell with a stowaway hood",
+    "labels": {"brand": "Patagonia"},
+}
+
+
+class StubTriage:
+    """The photo check, answering yes to everything and counting nothing else."""
+
+    def __init__(self) -> None:
+        self.batches: list[list[int]] = []
+
+    async def judge(self, items: list[Any], target: Any) -> TriageBatch:
+        self.batches.append([item.item_id for item in items])
+        return TriageBatch(
+            results=[
+                TriageItem(id=item.item_id, matches_target=True, confidence=0.9, reason="the hood")
+                for item in items
+            ],
+            usage=None,
+        )
+
+
+@pytest.fixture
+def sweep_client(
+    web_settings: Settings,
+    db: Database,
+    repo: Repo,
+    transport: ScriptedTransport,
+) -> Iterator[Callable[..., tuple[TestClient, CollectingLauncher]]]:
+    """A signed-in dashboard wired for sweeps, with the launcher in the test's hands."""
+    with contextlib.ExitStack() as stack:
+        launchers: list[CollectingLauncher] = []
+
+        def build(
+            *, with_client: bool = True, with_triage: bool = True, settings: Settings | None = None
+        ) -> tuple[TestClient, CollectingLauncher]:
+            sessions = SessionManager(db, transport)
+            launcher = CollectingLauncher()
+            launchers.append(launcher)
+            stack.callback(launcher.discard)
+            app = create_app(
+                settings or web_settings,
+                repo,
+                None,
+                None,
+                client=VintedClient(transport, sessions) if with_client else None,
+                sessions=sessions,
+                triage=StubTriage() if with_triage else None,  # type: ignore[arg-type]
+                verdict=None,
+                launch=launcher,
+            )
+            test_client = stack.enter_context(TestClient(app))
+            test_client.cookies.set(SESSION_COOKIE, TOKEN)
+            return test_client, launcher
+
+        yield build
+
+
+def _queue_one_short_page(
+    transport: ScriptedTransport, make_item: Callable[..., dict[str, Any]], count: int = 4
+) -> None:
+    """One page shorter than a full one, so the sweep reads it and stops."""
+    transport.queue_catalog(
+        [
+            make_item(item_id, photo_ts=SWEEP_PHOTO_TS, title="Patagonia Torrentshell")
+            for item_id in range(count)
+        ]
+    )
+
+
+def test_launching_a_sweep_needs_a_login(client: TestClient) -> None:
+    response = client.post("/api/magic-search/sweep", json=SWEEP_BODY)
+
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("missing", ["client", "triage"])
+def test_without_a_vinted_client_or_a_photo_check_a_sweep_says_it_is_not_set_up(
+    sweep_client: Callable[..., tuple[TestClient, CollectingLauncher]], missing: str
+) -> None:
+    """Half a Magic Search is not a sweep: both the reader and the judge have to be there."""
+    test_client, launcher = sweep_client(
+        with_client=missing != "client", with_triage=missing != "triage"
+    )
+
+    response = test_client.post("/api/magic-search/sweep", json=SWEEP_BODY)
+
+    assert response.status_code == 503
+    assert "not set up" in response.json()["detail"]
+    assert launcher.pending == []  # nothing was launched, so nothing will be billed
+
+
+def test_a_sweep_on_an_unknown_site_is_refused_before_anything_is_opened(
+    sweep_client: Callable[..., tuple[TestClient, CollectingLauncher]], repo: Repo
+) -> None:
+    test_client, launcher = sweep_client()
+
+    response = test_client.post("/api/magic-search/sweep", json={**SWEEP_BODY, "tld": "xx"})
+
+    assert response.status_code == 404
+    assert launcher.pending == []
+
+
+async def test_a_sweep_answers_with_its_id_before_it_has_read_anything(
+    sweep_client: Callable[..., tuple[TestClient, CollectingLauncher]],
+    transport: ScriptedTransport,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    """The point of the endpoint: an id to poll, handed over while the run is still open."""
+    test_client, launcher = sweep_client()
+    _queue_one_short_page(transport, make_item)
+
+    response = test_client.post("/api/magic-search/sweep", json=SWEEP_BODY)
+
+    assert response.status_code == 202
+    sweep_id = response.json()["sweep_id"]
+    assert isinstance(sweep_id, int)
+    assert transport.requests == []  # answered before a single page was fetched
+
+    running = test_client.get(f"/api/sweeps/{sweep_id}").json()
+    assert running["status"] == "running"
+    assert running["candidates"] == []
+
+    await launcher.drain()
+
+    finished = test_client.get(f"/api/sweeps/{sweep_id}").json()
+    assert finished["id"] == sweep_id
+    assert finished["status"] == "ok"
+    assert finished["pages_fetched"] == 1
+    assert finished["kept"] == 4
+    assert finished["triaged"] == 4
+    assert len(finished["candidates"]) == 4
+
+
+async def test_a_second_sweep_while_one_is_running_is_refused_not_billed(
+    sweep_client: Callable[..., tuple[TestClient, CollectingLauncher]],
+    transport: ScriptedTransport,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    """A double click must not mean a double bill, and the refusal says so in words."""
+    test_client, launcher = sweep_client()
+    _queue_one_short_page(transport, make_item)
+
+    first = test_client.post("/api/magic-search/sweep", json=SWEEP_BODY)
+    second = test_client.post("/api/magic-search/sweep", json=SWEEP_BODY)
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert "already running" in second.json()["detail"]
+    assert len(launcher.pending) == 1
+
+    # And the flag clears when the sweep ends, so the endpoint is usable again afterwards.
+    await launcher.drain()
+    _queue_one_short_page(transport, make_item)
+    third = test_client.post("/api/magic-search/sweep", json=SWEEP_BODY)
+    assert third.status_code == 202
+    assert third.json()["sweep_id"] != first.json()["sweep_id"]
+
+
+async def test_a_sweep_that_found_nothing_still_closes_and_frees_the_endpoint(
+    sweep_client: Callable[..., tuple[TestClient, CollectingLauncher]],
+) -> None:
+    """Nothing queued, so the site answers with an empty page. Zero finds is not an error."""
+    test_client, launcher = sweep_client()
+
+    first = test_client.post("/api/magic-search/sweep", json=SWEEP_BODY)
+    await launcher.drain()
+
+    assert first.status_code == 202
+    closed = test_client.get(f"/api/sweeps/{first.json()['sweep_id']}").json()
+    assert closed["status"] == "ok"
+    assert closed["kept"] == 0
+    assert test_client.post("/api/magic-search/sweep", json=SWEEP_BODY).status_code == 202
+
+
+async def test_a_sweep_that_crashes_is_closed_with_the_reason_not_left_running(
+    sweep_client: Callable[..., tuple[TestClient, CollectingLauncher]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one thing the browser cannot recover from is a run that never stops saying
+    `running`, so the detached task closes the row itself rather than dying quietly.
+
+    `judge_sweep()` is documented not to raise; this pins what happens when something it
+    did not anticipate does. The flag has to clear too — a crash that wedges the endpoint
+    at 409 for the life of the process would be the worse half of the same bug.
+    """
+
+    async def explode(**_: Any) -> None:
+        raise RuntimeError("the database went away mid-sweep")
+
+    monkeypatch.setattr(sweep, "judge_sweep", explode)
+    test_client, launcher = sweep_client()
+
+    first = test_client.post("/api/magic-search/sweep", json=SWEEP_BODY)
+    await launcher.drain()
+
+    closed = test_client.get(f"/api/sweeps/{first.json()['sweep_id']}").json()
+    assert closed["status"] == "partial"
+    assert "the database went away mid-sweep" in closed["error"]
+    assert closed["finished_at"] is not None
+
+    monkeypatch.undo()
+    assert test_client.post("/api/magic-search/sweep", json=SWEEP_BODY).status_code == 202
+
+
+async def test_a_posted_ceiling_above_the_settings_is_clamped_down_to_them(
+    web_settings: Settings,
+    sweep_client: Callable[..., tuple[TestClient, CollectingLauncher]],
+    transport: ScriptedTransport,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    """A client-supplied ceiling is what a sweep spends money against, so it never grows."""
+    settings = web_settings.model_copy(update={"sweep_max_pages": 1, "sweep_max_items": 2})
+    test_client, launcher = sweep_client(settings=settings)
+    # Two full pages queued. Only the first is allowed to be read, even though 9 was asked
+    # for, and only two of its listings are allowed through the funnel.
+    transport.queue_catalog(
+        [
+            make_item(item_id, photo_ts=SWEEP_PHOTO_TS, title="Patagonia Torrentshell")
+            for item_id in range(PER_PAGE)
+        ]
+    )
+    transport.queue_catalog(
+        [
+            make_item(item_id, photo_ts=SWEEP_PHOTO_TS, title="Patagonia Torrentshell")
+            for item_id in range(PER_PAGE, 2 * PER_PAGE)
+        ]
+    )
+
+    response = test_client.post(
+        "/api/magic-search/sweep", json={**SWEEP_BODY, "max_pages": 9, "max_items": 999}
+    )
+    await launcher.drain()
+
+    assert response.status_code == 202
+    run = test_client.get(f"/api/sweeps/{response.json()['sweep_id']}").json()
+    assert run["pages_fetched"] == 1
+    assert run["kept"] == 2
+
+
+async def test_a_ceiling_below_the_settings_is_honoured_as_asked(
+    sweep_client: Callable[..., tuple[TestClient, CollectingLauncher]],
+    transport: ScriptedTransport,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    """Clamping is downward-only, so a smaller request is still a smaller sweep."""
+    test_client, launcher = sweep_client()
+    _queue_one_short_page(transport, make_item, count=5)
+
+    response = test_client.post("/api/magic-search/sweep", json={**SWEEP_BODY, "max_items": 2})
+    await launcher.drain()
+
+    run = test_client.get(f"/api/sweeps/{response.json()['sweep_id']}").json()
+    assert run["kept"] == 2
+
+
+def test_a_sweep_without_the_params_it_needs_is_refused_by_shape(
+    sweep_client: Callable[..., tuple[TestClient, CollectingLauncher]],
+) -> None:
+    test_client, launcher = sweep_client()
+
+    response = test_client.post("/api/magic-search/sweep", json={"tld": "fr"})
+
+    assert response.status_code == 422
+    assert launcher.pending == []

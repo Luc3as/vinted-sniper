@@ -32,14 +32,20 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from tests.conftest import ScriptedTransport
+from vinted_sniper.config import Settings
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.engine import sweep
 from vinted_sniper.magic import triage as magic_triage
 from vinted_sniper.magic import verdict as magic_verdict
+from vinted_sniper.magic.models import TriageBatch, TriageItem
 from vinted_sniper.vinted.client import PER_PAGE, VintedClient
 from vinted_sniper.vinted.session import SessionManager
+from vinted_sniper.web import server as web_server
+from vinted_sniper.web.server import SESSION_COOKIE, create_app
 
 PHOTO_TS = 1_760_000_000
 
@@ -70,10 +76,20 @@ SWEEP_SOURCE = inspect.getsource(sweep)
 # `magic` clients are where the answers arrive — `verdict.py` most of all, because it holds
 # an enrichment answer in its hand and `store_enrichment()` is the obvious-looking place to
 # put it.
+# Plus the sweep's newest entry point. S04 lets the browser start a sweep, and a launcher
+# living in `web/server.py` is outside the three modules above — so the guard would go on
+# passing while the hazard moved somewhere it no longer looked.
+#
+# Scoped to the launcher function rather than the whole module on purpose: `web/server.py`
+# legitimately calls `store_enrichment()` for the enrichment ingest endpoint, which is a
+# standing-poller concern and has nothing to do with a sweep. Scanning the module would
+# make this entry permanently red for an innocent reason; scanning `_run_magic_sweep()`
+# keeps it a real guard over the code that actually runs on a sweep's behalf.
 GUARDED_MODULES = {
     "engine/sweep.py": SWEEP_SOURCE,
     "magic/triage.py": inspect.getsource(magic_triage),
     "magic/verdict.py": inspect.getsource(magic_verdict),
+    "web/server.py::_run_magic_sweep": inspect.getsource(web_server._run_magic_sweep),
 }
 
 
@@ -293,3 +309,79 @@ async def test_deleting_the_standing_watch_leaves_the_sweep_evidence(
     assert run is not None
     assert run.query_id is None
     assert len(await repo.sweep_candidates(result.sweep_id)) == len(result.candidates)
+
+
+# --- The write path, reached through the browser --------------------------------------
+
+
+class AlwaysMatches:
+    """The photo check, stubbed to say yes, so the whole judged path actually runs."""
+
+    async def judge(self, items: list[Any], target: Any) -> TriageBatch:
+        return TriageBatch(
+            results=[
+                TriageItem(id=item.item_id, matches_target=True, confidence=0.9) for item in items
+            ],
+            usage=None,
+        )
+
+
+async def test_a_sweep_launched_from_the_browser_writes_only_to_the_sweep_tables(
+    transport: ScriptedTransport,
+    repo: Repo,
+    db: Any,
+    make_item: Callable[..., dict[str, Any]],
+    tmp_path: Any,
+) -> None:
+    """The same claim as the first test in this file, at S04's new entry point.
+
+    A route is a second way in, and a second way in is a second chance to reach the wrong
+    writer — through a request handler that has the whole `Repo` in scope, no less. The
+    source-level guard above pins what `_run_magic_sweep()` may name; this pins what a real
+    request actually wrote.
+    """
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        db_path=tmp_path / "app.db",
+        web_enabled=True,
+        web_auth_token=SecretStr("test-token-please-ignore"),
+    )
+    query_id = await seed_standing_watch(repo)
+    queue_pages(transport, make_item, pages=2)
+
+    sessions = SessionManager(db, transport)
+    launched: list[Any] = []
+    app = create_app(
+        settings,
+        repo,
+        None,
+        None,
+        client=VintedClient(transport, sessions),
+        sessions=sessions,
+        triage=AlwaysMatches(),  # type: ignore[arg-type]
+        verdict=None,
+        launch=launched.append,
+    )
+    with TestClient(app) as test_client:
+        test_client.cookies.set(SESSION_COOKIE, "test-token-please-ignore")
+        response = test_client.post(
+            "/api/magic-search/sweep",
+            json={
+                "params": PARAMS,
+                "tld": "fr",
+                "keywords": KEYWORDS,
+                "visual_signature": "a boxy waterproof shell",
+                "labels": {"brand": "Patagonia"},
+                "max_pages": 2,
+            },
+        )
+        assert response.status_code == 202
+        await launched.pop()
+
+    stored = await count(db, "sweep_candidates")
+    assert stored > 0, "the empty counts below mean nothing unless the sweep stored something"
+    assert await count(db, "items") == 0, "a web-launched sweep is still not the poller"
+    assert await count(db, "outbox") == 0, "an outbox row is a Telegram alert"
+    assert await count(db, "market") == 0
+    # And the standing watch it ran beside is exactly where it was.
+    assert (await repo.get_state(query_id)).newest_item_ts == PHOTO_TS
