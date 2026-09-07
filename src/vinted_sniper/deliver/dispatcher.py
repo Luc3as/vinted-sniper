@@ -293,6 +293,7 @@ class Dispatcher:
                     highlight_score=self._settings.enrichment_highlight_score,
                     silent_below=self._settings.enrichment_silent_below,
                     language=destination.language,
+                    zone=self._zone,
                 )
             case "webhook":
                 return WebhookSender(

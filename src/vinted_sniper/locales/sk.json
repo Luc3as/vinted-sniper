@@ -7,7 +7,7 @@
   "{price}{currency} ({total}{currency} with protection)": "{price}{currency} ({total}{currency} s ochranou kupujúceho)",
   "cheaper than {pct}% of {n} similar listings seen this month": "lacnejší ako {pct} % z {n} podobných inzerátov za tento mesiac",
   "Seller: {seller}": "Predajca: {seller}",
-  "Listed {time} UTC": "Pridané {time} UTC",
+  "Listed at {time}": "Pridané o {time}",
   "Looks like: {model}": "Vyzerá to na: {model}",
   "HOT DEAL": "TOP PONUKA",
   "deal {score}/100": "skóre {score}/100",

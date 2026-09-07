@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -354,6 +355,26 @@ async def test_telegram_rate_limits_are_honoured_exactly() -> None:
 
     assert result.retry_after_s == 7.0
     assert result.retry == [1]
+
+
+async def test_listing_times_are_shown_in_the_reader_timezone() -> None:
+    """The timestamp on an alert should read as wall-clock time where the reader lives,
+    not as UTC with a suffix nobody does the arithmetic on."""
+    recorder = Recorder(httpx.Response(200, json={"ok": True}))
+    sender = TelegramSender(
+        {"chat_id": "123"},
+        bot_token="t",
+        client=recorder.client(),
+        bucket=fast_bucket(),
+        zone=ZoneInfo("Europe/Bratislava"),
+    )
+
+    # photo_ts 1_760_000_000 is 08:53 UTC on a summer-time day: 10:53 in Bratislava.
+    await sender.send([notification(1)])
+
+    text = recorder.payload()["text"]
+    assert "10:53" in text
+    assert "UTC" not in text
 
 
 async def test_forum_topics_are_supported() -> None:

@@ -12,6 +12,7 @@ image at all.
 from __future__ import annotations
 
 import html
+from datetime import UTC, tzinfo
 from typing import Any
 
 import httpx
@@ -61,6 +62,7 @@ class TelegramSender:
         highlight_score: int = 75,
         silent_below: int = 40,
         language: str = "en",
+        zone: tzinfo = UTC,
         client: httpx.AsyncClient | None = None,
         bucket: TokenBucket | None = None,
     ) -> None:
@@ -74,6 +76,7 @@ class TelegramSender:
         self._bucket = bucket or TokenBucket(MESSAGES_PER_S, capacity=2)
         self._highlight_score = highlight_score
         self._silent_below = silent_below
+        self._zone = zone
         self._t = i18n.get(language)
 
     @property
@@ -176,7 +179,8 @@ class TelegramSender:
                 seller += f" ({item.seller_rating:.0%})"
             lines.append(t("Seller: {seller}", seller=seller))
         if item.listed_at:
-            lines.append(t("Listed {time} UTC", time=item.listed_at.strftime("%H:%M")))
+            local = item.listed_at.astimezone(self._zone)
+            lines.append(t("Listed at {time}", time=local.strftime("%H:%M")))
 
         keyboard: list[list[dict[str, str]]] = [_link_row(item, t)]
         # A second row of actions the bot handles itself: the two things people most
