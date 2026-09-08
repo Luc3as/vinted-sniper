@@ -178,6 +178,18 @@ Two separate reasons, and they should not be blurred together:
 The cost clause passes with room to spare: €0.0430 against a ceiling of about €0.10, and
 that figure is a deliberate over-estimate.
 
+### The target, revised
+
+After reviewing these numbers, the project owner lowered the true-hit floor from four to
+two (decision D016, 2026-09-08). The reasoning: the sweep showed the whole market held
+only two genuine jackets, so a floor of four measures the market, not the pipeline. What
+the pipeline is actually for — and what it is now held to — is recognising the rare real
+item correctly and quickly when it appears, and it found both of the two that existed.
+
+Against the revised criterion — more true hits than the baseline, at least two, under
+about ten cents — **criterion 5 is met**. The table above records the original target
+and the honest miss against it; this revision does not rewrite that measurement.
+
 ### The precision fault, and what was done about it
 
 After the run, the photo check's instructions were tightened: check each named feature
