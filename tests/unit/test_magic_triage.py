@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
@@ -32,7 +33,7 @@ TARGET = TriageTarget(
     labels={"brand": "Patagonia", "catalog": "Jackets & Coats"},
 )
 
-GOOD_ANSWER = {
+GOOD_ANSWER: dict[str, Any] = {
     "results": [
         {"id": 1, "matches_target": True, "confidence": 0.91, "reason": "the hood and cut match"},
         {"id": 2, "matches_target": False, "confidence": 0.2, "reason": "a fleece, not a shell"},

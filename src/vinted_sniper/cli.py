@@ -30,6 +30,10 @@ from vinted_sniper.vinted.models import Item
 from vinted_sniper.vinted.session import SessionManager
 from vinted_sniper.vinted.transport import TransportSession
 
+# The sweep tests reach these through this module on purpose: patching `cli.sweep` and
+# reading the ceilings here pins what the command actually uses, not what config offers.
+__all__ = ["SWEEP_MAX_ITEMS_CEILING", "SWEEP_MAX_PAGES_CEILING", "build_parser", "main", "sweep"]
+
 TROUBLESHOOTING = "https://github.com/jasp-nerd/vinted-sniper/blob/main/docs/troubleshooting.md"
 
 

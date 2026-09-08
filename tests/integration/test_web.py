@@ -1954,7 +1954,7 @@ def test_a_sweep_without_the_params_it_needs_is_refused_by_shape(
 # gates on that watch rather than as filters on the search.
 
 
-WATCH_BODY = {
+WATCH_BODY: dict[str, Any] = {
     "params": {
         "catalog_ids": "1206",
         "brand_ids": "7",
