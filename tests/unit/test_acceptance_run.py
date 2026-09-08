@@ -171,3 +171,48 @@ def test_the_console_renderer_is_filtered_too(script: ModuleType) -> None:
 
     assert len(kept) == 1
     assert "sweep_id=7" in kept[0]
+
+
+# -------------------------------------------------------------- reading the sweep id
+
+
+class FakePage:
+    """A page that behaves the way `/magic` really does during a run.
+
+    `#m-results` is absent for the whole sweep — `magic.html` renders that section only
+    for a `?sweep=N` request — and the address only gains `?sweep=N` when the browser is
+    redirected on the last poll. A reader that asks for the attribute first, on a page
+    object that blocks while a selector is missing, therefore never gets to look at the
+    address at all. That is the failure this pins.
+    """
+
+    def __init__(self, redirect_after: int) -> None:
+        self._redirect_after = redirect_after
+        self.ticks = 0
+        self.selector_asks = 0
+
+    @property
+    def url(self) -> str:
+        return "http://x/magic?sweep=41" if self.ticks >= self._redirect_after else "http://x/magic"
+
+    def query_selector(self, _selector: str) -> None:
+        self.selector_asks += 1
+
+    def wait_for_timeout(self, _ms: int) -> None:
+        self.ticks += 1
+
+
+def test_the_sweep_id_is_read_from_the_redirect_the_page_makes_when_it_finishes(
+    script: ModuleType,
+) -> None:
+    page = FakePage(redirect_after=3)
+    assert script._await_sweep_id(page, timeout=5.0) == 41
+
+
+def test_waiting_for_the_id_outlasts_a_short_timeout_because_it_waits_for_the_sweep(
+    script: ModuleType,
+) -> None:
+    # A sweep takes minutes; --timeout is the page-render budget. Reading the id has to
+    # use the longer of the two or the runner abandons a sweep it has already paid for.
+    page = FakePage(redirect_after=200)
+    assert script._await_sweep_id(page, timeout=1.0) == 41

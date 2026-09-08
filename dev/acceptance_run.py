@@ -21,7 +21,7 @@ Two modes, and only one of them can spend anything:
 
 Start the app yourself with its log going somewhere this can read, e.g.
 
-    .venv/bin/python -m vinted_sniper.cli serve --log-format json \\
+    VINTED_SNIPER_LOG_FORMAT=json .venv/bin/python -m vinted_sniper run \\
         > data/acceptance/app.log 2>&1 &
 """
 
@@ -256,16 +256,25 @@ def drive_sweep(base: str, tld: str, timeout: float) -> int:
 
 
 def _await_sweep_id(page: object, timeout: float) -> int:
-    """Read the id from `#m-results[data-sweep-id]`, or from the ?sweep= the page goes to."""
-    deadline = time.monotonic() + timeout
+    """Read the id from the `?sweep=` the page goes to, or from `#m-results[data-sweep-id]`.
+
+    The page publishes the id only once the run is over. While it is going, the progress
+    card is on screen, the address is still `/magic`, and `#m-results` is not in the
+    document at all — `magic.html` renders that section only for a `?sweep=N` request, and
+    the browser is sent there by `window.location.replace` when polling sees a terminal
+    status. So this waits for the length of a sweep rather than the length of a render,
+    and it asks with `query_selector`, because `get_attribute` blocks for its own 30s on a
+    selector that is legitimately absent until the redirect happens.
+    """
+    deadline = time.monotonic() + max(timeout, 600.0)
     while time.monotonic() < deadline:
-        found = page.get_attribute("#m-results", "data-sweep-id")  # type: ignore[attr-defined]
-        if found:
-            return int(found)
         url = page.url  # type: ignore[attr-defined]
         if "sweep=" in url:
             return int(url.split("sweep=", 1)[1].split("&", 1)[0])
-        page.wait_for_timeout(500)  # type: ignore[attr-defined]
+        found = page.query_selector("#m-results")  # type: ignore[attr-defined]
+        if found is not None and (attr := found.get_attribute("data-sweep-id")):
+            return int(attr)
+        page.wait_for_timeout(1000)  # type: ignore[attr-defined]
     raise TimeoutError("the page never published a sweep id")
 
 
