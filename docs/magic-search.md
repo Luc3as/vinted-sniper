@@ -501,25 +501,32 @@ button that spends money is never reached.
 ## The four states
 
 1. **Type.** One box, five hundred characters, and the site to search. Pressing *Work out
-   the search* is free: it is one call to the mapper and nothing is bought.
+   the search* is one call to the mapper — a fraction of a cent — and nothing more is
+   bought yet.
 2. **Confirm.** The mapping comes back as names, not ids — *Category: Men's jackets*,
    *Brand: Patagonia*, *Size: M*, with the price and the words underneath. That is the
    whole reason the step exists: an id nobody can read is an id nobody can check, and a
    wrong category is a sweep that looks in the wrong place and finds nothing. If a name is
    wrong, *Start over* and reword it. There is no field to edit by hand, because a
    hand-typed id would skip the validation that makes the mapping worth trusting.
-3. **Running.** Pages read, listings seen, listings kept, photos checked and opinions
-   bought, refreshed every three seconds. A sweep takes a minute or two and waits its turn
+3. **Running.** A spinner, the stage the money is going into right now — reading listings,
+   checking photos, writing the full opinions — and the photos, opinions, tokens and euros
+   so far, refreshed every three seconds. A sweep takes a few minutes and waits its turn
    behind the standing searches already being checked, so a screen that sits still for a
-   while is normal. Reloading is safe — the page picks the same run back up instead of
-   starting another. If the dashboard goes missing for five polls in a row, the page says
-   so rather than spinning; the sweep itself carries on without it.
-4. **Results.** In the order the sweep ranked them, not the order Vinted returned: what the
-   photo check recognised comes above what only matched on words. Every card carries what
-   the photos said, the one line explaining why, how much of the title matched, and — for
-   the best two or three — the full opinion. The address holds the run's number
-   (`/magic?sweep=41`), so it is a link worth keeping: opening it later shows the same
-   results without running or paying for anything again.
+   while is normal. The address bar points at the run from the second it starts, so
+   reloading is safe — the page picks the same run back up instead of starting another. If
+   the dashboard goes missing for five polls in a row, the page says so rather than
+   spinning; the sweep itself carries on without it.
+4. **Results.** Grouped by what the photo check said, not a flat wall of cards: the
+   listings it picked out lead, and the ones it ruled out or never looked at fold away
+   under one line, openable when you want to disagree with it. The check compares each
+   photo to your *description*, and its answer is worded that way — "photo fits your
+   description, 88% sure" is not a claim about the exact model; only the 🤖 deal score,
+   bought for the best two or three, judges that. Every card carries the photo check's
+   answer, the one line explaining why, which of your words the title mentions, and — where
+   one was bought — the full opinion. The address holds the run's number
+   (`/magic?sweep=41`), so it is a link worth keeping, and every earlier judged sweep is
+   listed at the bottom of the page — nothing you paid for depends on remembering a URL.
 
 ## What it will spend, before it spends it
 
@@ -1078,26 +1085,31 @@ tlačidlo, ktoré míňa peniaze, sa vôbec nedostaneš.
 ## Štyri obrazovky
 
 1. **Napíš.** Jedno políčko, päťsto znakov a stránka, na ktorej sa má hľadať. Stlačiť
-   *Work out the search* je zadarmo: je to jedno volanie mapovacieho flowu a nič sa
-   nekupuje.
+   *Work out the search* je jedno volanie mapovacieho flowu — zlomok centa — a nič
+   viac sa zatiaľ nekupuje.
 2. **Potvrď.** Mapovanie sa vráti ako mená, nie ako id — *Category: Men's jackets*,
    *Brand: Patagonia*, *Size: M*, pod tým cena a slová. Presne kvôli tomu ten krok
    existuje: id, ktoré nikto neprečíta, je id, ktoré nikto neskontroluje, a zlá kategória
    znamená sweep, ktorý hľadá na nesprávnom mieste a nenájde nič. Ak je niektoré meno zlé,
    daj *Start over* a preformuluj vetu. Ručne prepísať sa nedá nič, lebo ručne napísané id
    by obišlo práve to overenie, vďaka ktorému sa dá mapovaniu veriť.
-3. **Beží.** Prečítané stránky, videné inzeráty, ponechané inzeráty, skontrolované fotky a
-   kúpené posudky, obnovované každé tri sekundy. Sweep trvá minútu-dve a čaká, kým prídu na
+3. **Beží.** Krútiaci sa indikátor, fáza, do ktorej práve idú peniaze — čítanie inzerátov,
+   kontrola fotiek, písanie plných posudkov — a priebežne skontrolované fotky, posudky,
+   tokeny a eurá, obnovované každé tri sekundy. Sweep trvá pár minút a čaká, kým prídu na
    rad hľadania, ktoré sa práve kontrolujú, takže obrazovka, ktorá chvíľu stojí, je normálna.
-   Obnoviť stránku je bezpečné — nadviaže na ten istý beh, nespustí ďalší. Ak sa dashboard
-   stratí päťkrát po sebe, stránka to napíše namiesto toho, aby sa točila donekonečna; sweep
-   beží ďalej aj bez nej.
-4. **Výsledky.** V poradí, v akom ich zoradil sweep, nie v tom, v akom ich vrátil Vinted:
-   to, čo spoznala kontrola fotiek, je nad tým, čo sa trafilo len slovami. Na každej karte
-   je, čo povedali fotky, jeden riadok prečo, koľko z názvu sedelo a — pri dvoch či troch
-   najlepších — celý posudok. V adrese je číslo behu (`/magic?sweep=41`), takže je to odkaz,
-   ktorý sa oplatí odložiť: otvoríš ho neskôr a uvidíš tie isté výsledky bez toho, aby sa
-   čokoľvek znova spúšťalo a platilo.
+   Adresa ukazuje na beh od sekundy, keď sa spustí, takže obnoviť stránku je bezpečné —
+   nadviaže na ten istý beh, nespustí ďalší. Ak sa dashboard stratí päťkrát po sebe, stránka
+   to napíše namiesto toho, aby sa točila donekonečna; sweep beží ďalej aj bez nej.
+4. **Výsledky.** Zoskupené podľa toho, čo povedala kontrola fotiek, nie plochá stena kariet:
+   inzeráty, ktoré vybrala, sú navrchu, a tie, ktoré vylúčila alebo sa na ne nepozrela, sú
+   zložené pod jedným riadkom — otvoríš si ich, keď s ňou chceš nesúhlasiť. Kontrola
+   porovnáva fotku s tvojím *popisom* a jej odpoveď je tak aj napísaná — „photo fits your
+   description, 88% sure" nie je tvrdenie o presnom modeli; to posudzuje len 🤖 skóre,
+   kúpené pre dvoch-troch najlepších. Na každej karte je odpoveď kontroly fotiek, jeden
+   riadok prečo, ktoré z tvojich slov názov spomína a — kde bol kúpený — celý posudok.
+   V adrese je číslo behu (`/magic?sweep=41`), takže je to odkaz, ktorý sa oplatí odložiť,
+   a všetky staršie posúdené sweepy sú vypísané dole na stránke — nič, za čo si zaplatil,
+   nezávisí od zapamätanej adresy.
 
 ## Čo to minie, skôr než to minie
 

@@ -262,7 +262,7 @@ def test_the_judged_output_carries_the_photo_verdicts_and_a_cost_line(
     out = capsys.readouterr().out
 
     assert code == 0
-    assert "photos: looks like it, 86% sure" in out
+    assert "photos: fits your description, 86% sure" in out
     assert "Grey three-layer shell with the hood described." in out
     # Rendered through Enrichment.summary()/.lines(), not a second renderer.
     assert "verdict: deal 82/100" in out

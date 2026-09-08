@@ -130,6 +130,16 @@ def score_title(title: str, keywords: list[str]) -> float:
     return matched / len(wanted)
 
 
+def title_words(title: str, keywords: list[str]) -> list[str]:
+    """Which of the sweep's words the title actually says, in the order they were asked.
+
+    The pages print this instead of a percentage: "title mentions patagonia" is something
+    a person can check against the title with their own eyes, "title match 50%" is not.
+    """
+    haystack = _fold(title)
+    return [word for word in keywords if (folded := _fold(word)) and folded in haystack]
+
+
 def funnel(
     items: list[Item],
     query: Query,

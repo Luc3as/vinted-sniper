@@ -476,7 +476,7 @@ def _triage_line(ranked: sweep.RankedItem) -> str:
     """
     if ranked.matches_target is None:
         return "photos: not checked"
-    verdict = "looks like it" if ranked.matches_target else "not this"
+    verdict = "fits your description" if ranked.matches_target else "does not fit your description"
     return f"photos: {verdict}, {round((ranked.confidence or 0.0) * 100)}% sure"
 
 

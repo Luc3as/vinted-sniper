@@ -420,6 +420,17 @@ def create_app(
 
         run = None if sweep_id is None else await repo.get_sweep_run(sweep_id)
         watched_tlds = [query.tld for query in await repo.list_queries()]
+        now = int(time.time())
+        # The same bounded read /history does: without a list of earlier runs, a sweep's
+        # results only exist for whoever kept its link — knowing "?sweep=3" by heart is
+        # not a UI. The run being read right now is left out of its own footer.
+        recent = await repo.recent_sweep_runs(limit=SWEEP_HISTORY_RUNS)
+        recent_candidates = {row.id: await repo.sweep_candidates(row.id) for row in recent}
+        past_sweeps = [
+            view
+            for view in _sweep_views(recent, recent_candidates, now=now)
+            if run is None or view["id"] != run.id
+        ]
         return TEMPLATES.TemplateResponse(
             request,
             "magic.html",
@@ -442,10 +453,9 @@ def create_app(
                 "sweep": (
                     None
                     if run is None
-                    else _sweep_run_view(
-                        run, await repo.sweep_candidates(run.id), int(time.time()), limit=None
-                    )
+                    else _sweep_run_view(run, await repo.sweep_candidates(run.id), now, limit=None)
                 ),
+                "past_sweeps": past_sweeps,
                 # A link to a sweep this database never had, or one a prune removed: said
                 # plainly rather than dropped into an empty page.
                 "missing_sweep": sweep_id if sweep_id is not None and run is None else None,
@@ -1240,7 +1250,10 @@ def _sweep_run_view(
         "tokens": run.tokens,
         "cost_eur": f"{run.cost_eur:.4f}",
         "error": run.error,
-        "matches": [_sweep_match_view(row) for row in (rows if limit is None else rows[:limit])],
+        "matches": [
+            _sweep_match_view(row, run.keywords)
+            for row in (rows if limit is None else rows[:limit])
+        ],
     }
 
 
@@ -1262,22 +1275,33 @@ def _sweep_views(
     return views
 
 
-def _sweep_match_view(row: SweepCandidate) -> dict[str, Any]:
-    """One of a sweep's top matches, in the words the page prints."""
+def _sweep_match_view(row: SweepCandidate, keywords: list[str]) -> dict[str, Any]:
+    """One of a sweep's top matches, in the words the page prints.
+
+    The photo check compares a photo against the *description* of the thing, not against
+    the exact model — a plain rain jacket passes it whether or not it is the model asked
+    for. Its answer is worded to say exactly that, so its confidence number cannot be read
+    as "this is the one": only a paid full opinion says that, and it says it separately.
+    """
     enrichment = Enrichment.from_candidate(row)
     payable = _payable(row)
     currency = row.currency or ""
     if row.matches_target is None:
-        photos = "not checked"
+        photos = "photo not checked"
     else:
         sure = round((row.confidence or 0.0) * 100)
-        photos = f"{'looks like it' if row.matches_target else 'not this'}, {sure}% sure"
+        photos = (
+            f"photo fits your description, {sure}% sure"
+            if row.matches_target
+            else f"photo does not fit your description, {sure}% sure"
+        )
     return {
         "title": row.title,
         "url": row.url,
         "photo": row.thumb_url or row.photo_url,
         "price": f"{payable:.2f} {currency}".strip() if payable is not None else None,
         "match": round(row.rank_score * 100),
+        "title_words": sweep.title_words(row.title, keywords),
         "photos": photos,
         "matches_target": row.matches_target,
         "reason": row.triage_reason,

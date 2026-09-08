@@ -11,6 +11,22 @@
 {% endblock %}
 
 {% block content %}
+<style>
+  /* Page-local: the shared sheet styles cards and grids, not this page's grouping. */
+  #m-results .m-group { margin: 1.1rem 0 .2rem; }
+  #m-results .m-group-note { margin: 0 0 .6rem; }
+  #m-results details.m-others { margin: .9rem 0; }
+  #m-results details.m-others summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
+  #m-results #m-watch-card { margin-top: 1.1rem; }
+  .m-spin { display: inline-block; width: .85rem; height: .85rem; border: 2px solid var(--muted);
+    border-top-color: transparent; border-radius: 999px; animation: m-spin .8s linear infinite; }
+  @keyframes m-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .m-spin { animation: none; } }
+</style>
+{# One vocabulary for a run's state, everywhere on this page: the raw column values are
+   for the database, not for a person reading a pill. #}
+{% set status_words = {"ok": "finished", "running": "running",
+                       "partial": "stopped early", "blocked": "could not run"} %}
 {% if missing_sweep %}
 <p class="flash error" role="alert">There is no sweep numbered {{ missing_sweep }} on this
   dashboard — it was never started here, or it has since been cleared out.</p>
@@ -33,9 +49,9 @@
 
   <div class="card">
     <div class="row" style="gap:.6rem;align-items:baseline">
-      <span class="pill {{ 'sent' if sweep.status == 'ok' else ('failed' if sweep.status == 'blocked' else ('pending' if sweep.status in ('running', 'partial') else 'disabled')) }}">{{ sweep.status }}</span>
-      {% if sweep.keywords %}<span class="muted">{{ sweep.keywords }}</span>{% endif %}
-      <span class="muted">{{ sweep.age }}</span>
+      <span class="pill {{ 'sent' if sweep.status == 'ok' else ('failed' if sweep.status == 'blocked' else ('pending' if sweep.status in ('running', 'partial') else 'disabled')) }}">{{ status_words.get(sweep.status, sweep.status) }}</span>
+      {% if sweep.keywords %}{% for word in sweep.keywords.split(", ") %}<span class="tag">{{ word }}</span>{% endfor %}{% endif %}
+      <span class="muted">vinted.{{ sweep.tld }} · {{ sweep.age }}</span>
     </div>
     <div class="muted">Read {{ sweep.pages_fetched }} page(s), saw {{ sweep.items_seen }} listing(s), kept {{ sweep.kept }}.</div>
     <div class="muted">Cost: {{ sweep.kept }} listing(s) through the filters, {{ sweep.triaged }} photo(s) checked,
@@ -53,9 +69,7 @@
     {% endif %}
   </div>
 
-  {% if sweep.matches %}
-  <div class="listing-grid">
-    {% for match in sweep.matches %}
+  {% macro listing_card(match) %}
     <article class="listing">
       {% if match.photo %}
       <a class="photo" href="{{ match.url }}" target="_blank" rel="noreferrer" style="cursor:pointer"
@@ -70,18 +84,43 @@
           <span class="total">{{ match.price or '—' }}</span>
           {% if match.score is not none %}
           <span class="tag score {{ 'hot' if match.score >= 75 else ('cold' if match.score < 40 else '') }}"
-                data-tip="The agent’s deal score, 0–100 — higher is a better deal.">🤖 {{ match.score }}</span>
+                data-tip="The agent’s deal score, 0–100 — higher is a better deal. Unlike the photo check, this paid opinion judges the exact thing you asked for.">🤖 {{ match.score }}</span>
           {% endif %}
         </div>
         <div class="says {{ 'yes' if match.matches_target else ('unchecked' if match.matches_target is none else 'no') }}">{{ match.photos }}</div>
         {% if match.reason %}<div class="why">{{ match.reason }}</div>{% endif %}
-        <div class="meta">title match {{ match.match }}%</div>
+        <div class="meta">{% if match.title_words %}title mentions {{ match.title_words | join(', ') }}{% else %}the title has none of your words{% endif %}</div>
         {% if match.verdict %}<div class="opinion">{{ match.verdict }}</div>{% endif %}
         {% if match.verdict_text %}<div class="opinion">{{ match.verdict_text }}</div>{% endif %}
       </div>
     </article>
-    {% endfor %}
+  {% endmacro %}
+
+  {# The photo check's yes-pile leads; its no-pile and the never-checked are one click away
+     rather than seventy equal cards. The check compares a photo to the *description* — it
+     cannot name the model, so its pile is worded that way and only the 🤖 score claims more. #}
+  {% set picks = sweep.matches | selectattr('matches_target') | list %}
+  {% set others = sweep.matches | rejectattr('matches_target') | list %}
+  {% if picks %}
+  <h3 class="m-group">{{ picks | length }} the photo check picked out</h3>
+  <p class="muted m-group-note">“Fits your description” means the photo shows the kind of thing you described.
+    Only the 🤖 deal score is a paid opinion on whether it is the exact one.</p>
+  <div class="listing-grid">
+    {% for match in picks %}{{ listing_card(match) }}{% endfor %}
   </div>
+  {% elif sweep.matches and sweep.status != 'running' %}
+  <div class="card"><div class="empty"><strong>The photo check picked out none of the {{ sweep.kept }} listing(s) it read.</strong>
+    The ones it ruled out are below, so you can disagree with it.</div></div>
+  {% endif %}
+  {% if others %}
+  <details class="m-others" {% if not picks %}open{% endif %}>
+    <summary>The other {{ others | length }} listing(s) — the photo check said no, or never looked</summary>
+    <div class="listing-grid" style="margin-top:.6rem">
+      {% for match in others %}{{ listing_card(match) }}{% endfor %}
+    </div>
+  </details>
+  {% endif %}
+  {% if sweep.matches %}
   {% elif sweep.status == 'running' %}
   <div class="card"><div class="empty">Nothing to show yet — the first listings appear as they are read.</div></div>
   {% elif sweep.error %}
@@ -148,7 +187,7 @@
     </div>
     <div class="row" style="margin-top:.75rem">
       <button type="button" id="m-map">Work out the search</button>
-      <span class="muted">Free — nothing is bought until you confirm the next screen.</span>
+      <span class="muted">One small AI call — a fraction of a cent. The paid sweep starts only after you confirm on the next screen.</span>
     </div>
     <p class="error error-line" id="m-type-msg" role="alert" hidden style="margin:.6rem 0 0"></p>
   </div>
@@ -174,18 +213,42 @@
   <!-- (3) Running ---------------------------------------------------------------- -->
   <div class="card" id="m-step-progress" hidden>
     <h3>{{ icon('search') }}Looking…</h3>
-    <div class="row" style="gap:.6rem;align-items:baseline">
+    <div class="row" style="gap:.6rem;align-items:center">
+      <span class="m-spin" aria-hidden="true"></span>
       <span class="pill pending" data-field="status">running</span>
-      <span class="muted">A sweep takes a minute or so. It waits its turn behind the searches already
-        being checked, so a quiet screen is normal — these numbers move as it goes.</span>
+      <span class="muted" data-field="stage">Waiting its turn behind the searches already being checked…</span>
     </div>
-    <div class="muted counts" style="margin-top:.5rem">Read <span data-field="pages_fetched">0</span> page(s),
-      saw <span data-field="items_seen">0</span> listing(s), kept <span data-field="kept">0</span>.</div>
-    <div class="muted counts"><span data-field="triaged">0</span> photo(s) checked,
+    <div class="muted counts" style="margin-top:.5rem"><span data-field="triaged">0</span> photo(s) checked,
       <span data-field="verdicts">0</span> full opinion(s) so far.</div>
+    <div class="muted counts"><span data-field="tokens">0</span> tokens billed so far —
+      €<span data-field="cost_eur">0.0000</span>.</div>
+    <p class="muted" style="margin:.4rem 0 0">A sweep takes a few minutes and this page keeps itself up to
+      date — no need to reload. If you do reload, the address bar already points at this sweep, so nothing
+      is lost.</p>
     <p class="error error-line" id="m-progress-msg" role="alert" hidden style="margin:.6rem 0 0"></p>
   </div>
 </section>
+
+{% if past_sweeps %}
+<section id="m-past">
+  <div class="section-head">
+    <h2>{{ icon('search') }}Earlier sweeps</h2>
+    <span class="lede">Every judged sweep this dashboard remembers. Each one is a link — what you paid
+      for is kept here, not lost when the page moves on.</span>
+  </div>
+  <div class="card">
+    {% for past in past_sweeps %}
+    <div class="row" style="gap:.6rem;align-items:baseline{% if not loop.first %};margin-top:.55rem{% endif %}">
+      <a href="/magic?sweep={{ past.id }}"><strong>Sweep #{{ past.id }}</strong></a>
+      <span class="pill {{ 'sent' if past.status == 'ok' else ('failed' if past.status == 'blocked' else 'pending') }}">{{ status_words.get(past.status, past.status) }}</span>
+      <span class="muted">vinted.{{ past.tld }}{% if past.keywords %} · {{ past.keywords }}{% endif %}</span>
+      <span class="muted">{{ past.age }}</span>
+      <span class="muted">{{ past.triaged }} photo(s) checked, {{ past.verdicts }} opinion(s) — €{{ past.cost_eur }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
 
 <script>
 (() => {
@@ -355,6 +418,9 @@
           JSON.stringify(mapped.watch_hints || {}),
         );
       } catch { /* private mode, or a full quota: the watch just loses its title rules */ }
+      // The address bar points at the run from the second it starts, so a reload — or a
+      // link copied mid-run — lands back on this sweep instead of on an empty form.
+      history.replaceState(null, "", `/magic?sweep=${started.sweep_id}`);
       typeCard.hidden = true;
       confirmCard.hidden = true;
       progressCard.hidden = false;
@@ -376,15 +442,30 @@
     }
   }
 
+  // The same vocabulary the server renders pills with; a person never reads a column value.
+  const STATUS_WORDS = { ok: "finished", running: "running", partial: "stopped early", blocked: "could not run" };
+
   function paint(run) {
     const pill = progressCard.querySelector('[data-field="status"]');
-    if (pill && pill.textContent !== run.status) {
-      pill.textContent = run.status;
+    const word = STATUS_WORDS[run.status] || run.status;
+    if (pill && pill.textContent !== word) {
+      pill.textContent = word;
       pill.className = `pill ${run.status === "ok" ? "sent" : (run.status === "blocked" ? "failed" : "pending")}`;
     }
-    for (const field of ["pages_fetched", "items_seen", "kept", "triaged", "verdicts"]) {
+    for (const field of ["triaged", "verdicts", "tokens"]) {
       const cell = progressCard.querySelector(`[data-field="${field}"]`);
       if (cell) cell.textContent = run[field];
+    }
+    const cost = progressCard.querySelector('[data-field="cost_eur"]');
+    if (cost) cost.textContent = Number(run.cost_eur || 0).toFixed(4);
+    // Which stage the money is going into right now. The page-count fields are only
+    // written when the run closes, so the honest live signals are the judged counters.
+    const stage = progressCard.querySelector('[data-field="stage"]');
+    if (stage) {
+      stage.textContent =
+        run.verdicts > 0 ? "writing the full opinions…"
+        : run.triaged > 0 ? "checking photos against your description…"
+        : "reading what is for sale…";
     }
     // An error while it is still going is a real thing that happened, not an empty screen.
     say($("m-progress-msg"), run.error || "");

@@ -1377,7 +1377,7 @@ async def test_the_history_page_shows_a_judged_sweep_with_its_scores_and_cost(
     assert "Judged sweeps" in page.text
     assert "Panska bunda M" in page.text
     assert "https://www.vinted.sk/items/5551234" in page.text
-    assert "looks like it, 86% sure" in page.text
+    assert "photo fits your description, 86% sure" in page.text
     assert "Grey three-layer shell with the hood described." in page.text
     assert "82" in page.text
     assert "41840 tokens billed — €0.0421" in page.text
@@ -1450,13 +1450,13 @@ async def test_a_judged_sweep_is_rendered_on_the_magic_page(
     # The card leads with a title that names no model at all; what puts it first is the
     # photo check's answer, printed right under it.
     assert "Panska bunda M" in page.text
-    assert "looks like it, 86% sure" in page.text
+    assert "photo fits your description, 86% sure" in page.text
     assert "Grey three-layer shell with the hood described." in page.text
     # The opinion that was bought for it, in the same words every alert uses.
     assert "deal 82/100" in page.text
     assert "Genuine, and well under what it usually goes for." in page.text
     # The rejection is shown as a rejection rather than quietly dropped.
-    assert "not this, 71% sure" in page.text
+    assert "photo does not fit your description, 71% sure" in page.text
     # Ranked as the API ranked it: the photo check's match first, despite the worse title.
     assert page.text.index("Panska bunda M") < page.text.index("Torrentshell fleece")
     assert "41840 tokens billed — €0.0421" in page.text
