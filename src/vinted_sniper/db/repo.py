@@ -1185,6 +1185,57 @@ class Repo:
             (limit,),
         )
 
+    # --- Listing liveness ------------------------------------------------------------
+
+    async def sellers_due_liveness(
+        self, *, recheck_after_s: int, limit: int = 25
+    ) -> list[tuple[str, int]]:
+        """Sellers whose recorded listings deserve a fresh look at their wardrobe.
+
+        A seller is due when any still-live listing of theirs was never checked or was
+        last checked more than `recheck_after_s` ago. The longest-unchecked come first,
+        so nobody starves under the per-cycle cap.
+        """
+        cutoff = int(time.time()) - recheck_after_s
+        rows = await self._db.fetch_all(
+            "SELECT tld, seller_id, MIN(COALESCE(sold_checked_at, 0)) AS oldest "
+            "FROM items WHERE sold_at IS NULL AND seller_id IS NOT NULL "
+            "GROUP BY tld, seller_id HAVING oldest <= ? ORDER BY oldest LIMIT ?",
+            (cutoff, limit),
+        )
+        return [(row["tld"], row["seller_id"]) for row in rows]
+
+    async def live_item_ids(self, tld: str, seller_id: int) -> set[int]:
+        """The recorded listings by this seller still assumed to be up."""
+        rows = await self._db.fetch_all(
+            "SELECT item_id FROM items WHERE tld = ? AND seller_id = ? AND sold_at IS NULL",
+            (tld, seller_id),
+        )
+        return {row["item_id"] for row in rows}
+
+    async def record_liveness(self, tld: str, seller_id: int, gone_ids: Iterable[int]) -> int:
+        """One wardrobe read, applied: every still-live listing of the seller gets its
+        check timestamp, the ids in `gone_ids` are marked gone. Empty `gone_ids` is a
+        valid answer — "looked, learned nothing" still pushes the next look out."""
+        now = int(time.time())
+        gone = list(gone_ids)
+        async with self._db.transaction() as conn:
+            await conn.execute(
+                "UPDATE items SET sold_checked_at = ? "
+                "WHERE tld = ? AND seller_id = ? AND sold_at IS NULL",
+                (now, tld, seller_id),
+            )
+            marked = 0
+            if gone:
+                placeholders = ",".join("?" * len(gone))
+                cursor = await conn.execute(
+                    f"UPDATE items SET sold_at = ? "
+                    f"WHERE item_id IN ({placeholders}) AND sold_at IS NULL",
+                    [now, *gone],
+                )
+                marked = cursor.rowcount
+        return marked
+
     # --- Outbox delivery -----------------------------------------------------------
 
     async def destinations_with_work(self) -> list[int]:

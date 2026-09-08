@@ -69,6 +69,7 @@
           <span class="total">{{ row.price or '—' }}</span>
           {% endif %}
           {% if row.price_dropped %}<span class="tag drop" data-tip="The price fell after this listing was first seen.">📉 dropped</span>{% endif %}
+          {% if row.gone %}<span class="tag gone" data-tip="This listing has disappeared from the seller’s wardrobe — sold or withdrawn, Vinted doesn’t say which.">✕ gone</span>{% endif %}
           {% if row.deal_score is not none %}
           <span class="tag score {{ 'hot' if row.deal_score >= 75 else ('cold' if row.deal_score < 40 else '') }}"
                 data-tip="The agent’s deal score, 0–100 — higher is a better deal. The full opinion is written out on the card.">🤖 {{ row.deal_score }}</span>

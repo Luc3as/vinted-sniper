@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import random
 import time
+from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, Final
 
@@ -48,6 +49,26 @@ PER_PAGE = 96
 _SELLER_TTL_S = 6 * 3600
 _SELLER_FAILURE_TTL_S = 600
 _SELLER_CACHE_MAX = 512
+
+# A wardrobe is read a page at a time and most sellers fit in one. The cap keeps a
+# thousand-listing power seller from eating the site budget; an item past the cap is
+# simply "not seen this time", never "gone".
+WARDROBE_PER_PAGE = 20
+WARDROBE_PAGE_CAP = 5
+
+
+@dataclass(frozen=True, slots=True)
+class Wardrobe:
+    """What one read of a seller's public wardrobe showed.
+
+    `statuses` maps each listing id seen to its `is_closed` flag. `complete` says whether
+    every page was read — only then does "absent from `statuses`" mean absent from the
+    wardrobe rather than merely beyond the page cap.
+    """
+
+    statuses: dict[int, bool]
+    total: int
+    complete: bool
 
 
 class VintedClient:
@@ -148,6 +169,49 @@ class VintedClient:
         await self._sessions.merge_cookies(session, response.cookies)
         return _parse_user(response, tld)
 
+    async def seller_wardrobe(self, tld: str, user_id: int) -> Wardrobe | None:
+        """Read a seller's public wardrobe, up to the page cap.
+
+        Returns None on a 404 — a deleted or hidden account looks exactly like that, and
+        the caller must treat it as "could not tell", never as "everything sold".
+        Uses the same session, headers and per-site budget as every other read here.
+        """
+        statuses: dict[int, bool] = {}
+        total = 0
+        complete = False
+
+        for page in range(1, WARDROBE_PAGE_CAP + 1):
+            session = await self._sessions.get(tld)
+            transport = self._transport or self._sessions.transport_for(session)
+            if self._budget is not None:
+                await self._budget.acquire(tld)
+
+            try:
+                response = await transport.get(
+                    urls.wardrobe_endpoint(tld, user_id),
+                    headers=hdr.api_headers(tld, session.identity),
+                    cookies=session.cookie_header,
+                    params={"page": str(page), "per_page": str(WARDROBE_PER_PAGE)},
+                )
+            except TransportError as exc:
+                raise NetworkError(str(exc)) from exc
+
+            if response.status_code == HTTPStatus.NOT_FOUND:
+                return None
+            raise_for_status(response, tld)
+            await self._sessions.note_request(session)
+            await self._sessions.merge_cookies(session, response.cookies)
+
+            page_statuses, total_pages, total_entries = _parse_wardrobe(response, tld)
+            statuses.update(page_statuses)
+            if total_entries is not None:
+                total = total_entries
+            if total_pages is None or page >= total_pages:
+                complete = True
+                break
+
+        return Wardrobe(statuses=statuses, total=max(total, len(statuses)), complete=complete)
+
     def _remember_seller(
         self, key: tuple[str, int], expires_at: float, rating: float | None, reviews: int | None
     ) -> None:
@@ -228,6 +292,34 @@ def _parse_catalog(response: Response, tld: str, *, keep_raw: bool) -> list[Item
             # One malformed listing should not cost you the other ninety-five.
             log.warning("item.unparsed", tld=tld, error=str(exc))
     return items
+
+
+def _parse_wardrobe(response: Response, tld: str) -> tuple[dict[int, bool], int | None, int | None]:
+    """One wardrobe page: each listing's id and `is_closed`, plus the pagination totals."""
+    try:
+        payload: Any = response.json()
+    except ValueError as exc:
+        preview = response.text[:200].replace("\n", " ")
+        raise MalformedResponseError(
+            f"vinted.{tld} did not return JSON for a wardrobe: {preview!r}"
+        ) from exc
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise MalformedResponseError(f"vinted.{tld} returned no wardrobe items list")
+
+    statuses: dict[int, bool] = {}
+    for entry in payload["items"]:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), int):
+            statuses[entry["id"]] = bool(entry.get("is_closed"))
+
+    pagination = payload.get("pagination")
+    total_pages = total_entries = None
+    if isinstance(pagination, dict):
+        if isinstance(pagination.get("total_pages"), int):
+            total_pages = pagination["total_pages"]
+        if isinstance(pagination.get("total_entries"), int):
+            total_entries = pagination["total_entries"]
+    return statuses, total_pages, total_entries
 
 
 def _parse_user(response: Response, tld: str) -> tuple[float | None, int | None]:

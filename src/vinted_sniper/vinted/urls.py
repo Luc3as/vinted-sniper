@@ -187,6 +187,12 @@ def user_endpoint(tld: str, user_id: int) -> str:
     return f"https://www.vinted.{tld}/api/v2/users/{user_id}"
 
 
+def wardrobe_endpoint(tld: str, user_id: int) -> str:
+    """One seller's public wardrobe — the only anonymous way to tell a live listing
+    from a gone one, because sold items simply disappear from it."""
+    return f"https://www.vinted.{tld}/api/v2/wardrobe/{user_id}/items"
+
+
 def catalog_page(tld: str) -> str:
     """The search page itself — its HTML embeds the category tree and the CSRF token."""
     return f"https://www.vinted.{tld}/catalog"

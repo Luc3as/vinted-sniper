@@ -24,6 +24,7 @@ from vinted_sniper.db import Database, apply_pending
 from vinted_sniper.db.repo import Query, Repo
 from vinted_sniper.deliver.dispatcher import Dispatcher
 from vinted_sniper.engine.health import Heartbeat
+from vinted_sniper.engine.liveness import LivenessChecker
 from vinted_sniper.engine.poller import Poller
 from vinted_sniper.engine.report import WeeklyReport
 from vinted_sniper.engine.watchdog import Watchdog
@@ -110,6 +111,7 @@ class Application:
                     announce=dispatcher.notify_status,
                 )
                 heartbeat = Heartbeat(repo, self._stop)
+                liveness = LivenessChecker(repo, client, self._stop)
 
                 self._install_signal_handlers()
                 log.info(
@@ -124,6 +126,7 @@ class Application:
                         tg.create_task(dispatcher.run(), name="dispatcher")
                         tg.create_task(watchdog.run(), name="watchdog")
                         tg.create_task(heartbeat.run(), name="heartbeat")
+                        tg.create_task(liveness.run(), name="liveness")
                         tg.create_task(self._housekeeping(repo), name="housekeeping")
                         if settings.weekly_report:
                             report = WeeklyReport(

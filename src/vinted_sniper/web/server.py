@@ -1223,6 +1223,7 @@ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
                 "seller_feedback_count": row["seller_feedback_count"],
                 "favourite_count": row["favourite_count"] or 0,
                 "price_dropped": bool(row["price_changed_at"]),
+                "gone": row["sold_at"] is not None,
                 "deal_score": row["enrich_score"] if row["enriched_at"] else None,
                 "verdict": row["enrich_verdict"] if row["enriched_at"] else None,
                 "verdict_summary": verdict_summary or None,
