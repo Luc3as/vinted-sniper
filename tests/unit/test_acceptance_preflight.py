@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[2] / "dev" / "acceptance_preflight.py"
 
 MAGIC_URL_VARS = (
@@ -118,3 +120,59 @@ def test_the_scrubber_blanks_a_url_inside_arbitrary_text() -> None:
 
     assert "example.test" not in _scrub("failed for https://n8n.example.test/webhook/abc")
     assert _scrub("no address here") == "no address here"
+
+
+class _Answer:
+    """The parts of an httpx response the probes actually read."""
+
+    def __init__(self, status_code: int, text: str = "") -> None:
+        self.status_code = status_code
+        self.text = text
+        self.content = text.encode()
+
+
+def _answers_200(_url: str, **_kwargs: object) -> _Answer:
+    """Stand in for `httpx.get` so the GO case is provable without a network."""
+    return _Answer(200, "n8n")
+
+
+def test_a_fully_configured_checkout_is_a_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the promise: this same script says GO once the path is there.
+
+    The probes are answered in-process rather than over the network, so the GO case is
+    provable in CI. Everything else — settings, checks, verdict, exit code — is the real
+    code path, and `main` is called directly so the assertion covers its return value.
+    """
+    module = load_script()
+    monkeypatch.setattr(module.httpx, "get", _answers_200)
+    for var in MAGIC_URL_VARS:
+        monkeypatch.setenv(var, "https://n8n.example.test/webhook/flow")
+    monkeypatch.setenv("VINTED_SNIPER_WEB_ENABLED", "true")
+    # An empty cwd so a developer's own `.env` cannot contribute to this verdict.
+    monkeypatch.chdir(tmp_path)
+
+    assert module.main([]) == 0
+
+
+def test_the_go_path_also_leaks_no_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Configured means URLs are in memory — the scrubber still has to hold on the way out."""
+    module = load_script()
+    monkeypatch.setattr(module.httpx, "get", _answers_200)
+    for var in MAGIC_URL_VARS:
+        monkeypatch.setenv(var, "https://n8n.example.test/webhook/flow")
+    monkeypatch.setenv("VINTED_SNIPER_WEB_ENABLED", "true")
+    monkeypatch.chdir(tmp_path)
+
+    module.main([])
+
+    stdout = capsys.readouterr().out
+    assert stdout.strip().splitlines()[-1] == "GO"
+    assert "n8n.example.test" not in stdout
+    assert "http://" not in stdout
+    assert "https://" not in stdout
