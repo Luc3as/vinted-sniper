@@ -104,6 +104,7 @@ The other way round is fine — the photo check on its own is the cheap setup.
 |---|---|---|
 | `WEB_ENABLED` | `true` | The dashboard. Turn it off if you only use the CLI. |
 | `WEB_AUTH_TOKEN` | unset | Optional. With no token the dashboard has no sign-in, which is fine while it listens on localhost. **Set one before exposing it further** — it shows your webhook URLs and chat ids. Generate with `openssl rand -hex 32`. |
+| `CALLBACK_AUTH_TOKEN` | unset | Optional. A dedicated bearer token for the enrichment verdict callback (`POST /api/items/{id}/enrichment`) and nothing else. Give it to the outside agent instead of the dashboard password; `WEB_AUTH_TOKEN` keeps working on that endpoint too, so the two rotate independently. |
 | `WEB_HOST` | `127.0.0.1` | Loopback by default. Only widen behind a reverse proxy you trust. |
 | `WEB_PORT` | `8000` | |
 | `WEB_PUBLIC_URL` | unset | The address the dashboard is reachable at from wherever you read your alerts — set it when the dashboard sits behind a reverse proxy or a tunnel. It becomes the Dashboard link in Discord messages; unset, that link points at `http://<WEB_HOST>:<WEB_PORT>`. |
@@ -397,6 +398,7 @@ možnosť.
 |---|---|---|
 | `WEB_ENABLED` | `true` | Dashboard. Vypni, ak používaš iba CLI. |
 | `WEB_AUTH_TOKEN` | nenastavené | Voliteľné. Bez tokenu dashboard nemá prihlásenie, čo je v poriadku, kým počúva na localhoste. **Nastav ho skôr, než ho vystavíš ďalej** — ukazuje tvoje webhook URL a chat id. Vygeneruj cez `openssl rand -hex 32`. |
+| `CALLBACK_AUTH_TOKEN` | nenastavené | Voliteľné. Samostatný bearer token pre callback s verdiktom (`POST /api/items/{id}/enrichment`) a nič iné. Daj ho externému agentovi namiesto hesla k dashboardu; `WEB_AUTH_TOKEN` na tom endpointe funguje ďalej, takže sa dajú rotovať nezávisle. |
 | `WEB_HOST` | `127.0.0.1` | Predvolene loopback. Rozširuj len za reverse proxy, ktorej veríš. |
 | `WEB_PORT` | `8000` | |
 | `WEB_PUBLIC_URL` | nenastavené | Adresa, na ktorej je dashboard dosiahnuteľný odtiaľ, kde čítaš alerty — nastav, keď dashboard sedí za reverse proxy alebo tunelom. Stane sa z nej Dashboard odkaz v Discord správach; nenastavená, odkaz mieri na `http://<WEB_HOST>:<WEB_PORT>`. |

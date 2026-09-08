@@ -236,6 +236,7 @@ def create_app(
     launch: Callable[[Coroutine[Any, Any, None]], None] | None = None,
 ) -> FastAPI:
     token = settings.web_auth_token  # None means no password: the dashboard just opens
+    callback_token = settings.callback_auth_token  # opens the enrichment callback only
 
     app = FastAPI(title="vinted-sniper", docs_url=None, redoc_url=None)
     app.add_middleware(SecurityHeadersMiddleware)
@@ -288,6 +289,22 @@ def create_app(
             raise HTTPException(status_code=401, detail="not signed in")
 
     guard = Depends(require_login)
+
+    async def require_enrichment_auth(
+        session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> None:
+        # The verdict callback also takes its own token, so the outside agent never has
+        # to hold the dashboard password and either secret can rotate without breaking
+        # the other. The `is not None` check matters: `_authorised` reads an unset
+        # expected token as "open", which is right for a localhost dashboard but would
+        # turn an unset callback token into a skeleton key here.
+        bearer = authorization.removeprefix("Bearer ").strip() if authorization else None
+        if callback_token is not None and bearer and _authorised(bearer, callback_token):
+            return
+        await require_login(session, authorization)
+
+    enrichment_guard = Depends(require_enrichment_auth)
 
     # --- Health, unauthenticated on purpose: the container check runs it ------------
 
@@ -490,7 +507,9 @@ def create_app(
         )
 
     @app.post("/api/items/{item_id}/enrichment")
-    async def post_enrichment(item_id: int, verdict: EnrichmentIn, _: None = guard) -> JSONResponse:
+    async def post_enrichment(
+        item_id: int, verdict: EnrichmentIn, _: None = enrichment_guard
+    ) -> JSONResponse:
         """What an outside agent concluded about a listing. Releases any held alert."""
         if not await repo.store_enrichment(
             item_id, verdict, followup_min_score=settings.enrichment_highlight_score

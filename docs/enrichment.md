@@ -34,9 +34,11 @@ that says "nothing special" is kept quiet: it would not earn a second message.
 1. Add a webhook destination pointing at your agent (n8n: a Webhook node's production URL).
    Route the searches you want judged to it, alongside your Telegram destination.
 2. Set `VINTED_SNIPER_ENRICHMENT_WAIT_S=90` (or however long your agent usually takes) and
-   restart. Set `VINTED_SNIPER_WEB_AUTH_TOKEN` if it is not already — the callback needs it.
+   restart. Set `VINTED_SNIPER_CALLBACK_AUTH_TOKEN` — a token that opens only this
+   callback, so the agent never holds the dashboard password.
 3. Have the agent `POST` its verdict to `enrichment_url` with
-   `Authorization: Bearer <WEB_AUTH_TOKEN>`.
+   `Authorization: Bearer <CALLBACK_AUTH_TOKEN>`. A flow still sending
+   `WEB_AUTH_TOKEN` keeps working, so you can switch tokens without downtime.
 
 ## What the agent receives
 
@@ -153,9 +155,11 @@ nezaslúžil.
 1. Pridaj webhook cieľ mieriaci na tvojho agenta (n8n: produkčná URL Webhook nodu). Nasmeruj
    naň vyhľadávania, ktoré chceš posudzovať, popri tvojom Telegram cieli.
 2. Nastav `VINTED_SNIPER_ENRICHMENT_WAIT_S=90` (alebo koľko tvoj agent obvykle potrebuje) a
-   reštartuj. Nastav `VINTED_SNIPER_WEB_AUTH_TOKEN`, ak ešte nie je — callback ho potrebuje.
+   reštartuj. Nastav `VINTED_SNIPER_CALLBACK_AUTH_TOKEN` — token, ktorý otvára iba tento
+   callback, takže agent nikdy nedrží heslo k dashboardu.
 3. Agent nech `POST`-ne verdikt na `enrichment_url` s hlavičkou
-   `Authorization: Bearer <WEB_AUTH_TOKEN>`.
+   `Authorization: Bearer <CALLBACK_AUTH_TOKEN>`. Flow, ktorý stále posiela
+   `WEB_AUTH_TOKEN`, funguje ďalej, takže tokeny vymeníš bez výpadku.
 
 ## Čo agent dostane
 

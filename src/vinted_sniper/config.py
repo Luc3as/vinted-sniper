@@ -291,6 +291,13 @@ class Settings(BaseSettings):
         description="Optional. When set, the dashboard asks for it as a password. Set it "
         "before exposing the dashboard beyond localhost: it shows your webhook URLs.",
     )
+    callback_auth_token: SecretStr | None = Field(
+        default=None,
+        description="Optional. A dedicated bearer token for the enrichment verdict "
+        "callback (POST /api/items/{id}/enrichment) and nothing else. Give this to the "
+        "outside agent instead of the dashboard password; the dashboard token keeps "
+        "working on that endpoint too, so the two can rotate independently.",
+    )
     web_public_url: str | None = Field(
         default=None,
         description="The address the dashboard is reachable at from wherever you read your "
