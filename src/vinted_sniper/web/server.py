@@ -79,6 +79,11 @@ SESSION_COOKIE = "vinted_sniper_session"
 SWEEP_HISTORY_RUNS = 5
 SWEEP_HISTORY_MATCHES = 3
 
+# Where a full opinion's score changes what a card claims, cut the same way the templates
+# cut the 🤖 tag: 75 and up wears green, under 40 red, the band between is a maybe.
+_SCORE_GOOD = 75
+_SCORE_MID = 40
+
 
 def _authorised(supplied: str | None, expected: SecretStr | None) -> bool:
     if expected is None:
@@ -1295,7 +1300,26 @@ def _sweep_match_view(row: SweepCandidate, keywords: list[str]) -> dict[str, Any
             if row.matches_target
             else f"photo does not fit your description, {sure}% sure"
         )
+    # One colour per card, and the paid opinion owns it. The photo check only guesses at
+    # the kind of thing, so its "yes" can never paint a card green by itself: green is a
+    # full opinion that scored the listing well, red is one that scored it badly — however
+    # sure the photo check sounded. The rank sorts the picks the same way.
+    if row.verdict_score is not None:
+        if row.verdict_score >= _SCORE_GOOD:
+            state, state_rank = "good", 0
+        elif row.verdict_score >= _SCORE_MID:
+            state, state_rank = "mid", 1
+        else:
+            state, state_rank = "bad", 3
+    elif row.matches_target:
+        state, state_rank = "maybe", 2
+    elif row.matches_target is None:
+        state, state_rank = "unchecked", 4
+    else:
+        state, state_rank = "no", 4
     return {
+        "state": state,
+        "state_rank": state_rank,
         "title": row.title,
         "url": row.url,
         "photo": row.thumb_url or row.photo_url,

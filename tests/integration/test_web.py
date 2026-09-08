@@ -1460,6 +1460,75 @@ async def test_a_judged_sweep_is_rendered_on_the_magic_page(
     # Ranked as the API ranked it: the photo check's match first, despite the worse title.
     assert page.text.index("Panska bunda M") < page.text.index("Torrentshell fleece")
     assert "41840 tokens billed — €0.0421" in page.text
+    # The card's colour is the paid opinion's: 82 is a good deal, so this card is green;
+    # the rejection carries no colour that could be read as a recommendation.
+    assert 'class="listing m-good"' in page.text
+    assert 'class="listing m-no"' in page.text
+
+
+async def test_a_bad_verdict_paints_its_card_red_and_sinks_it_below_unconfirmed_picks(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """The photo check's confidence never makes a card green — the paid opinion owns the
+    colour. A pick the opinion scored badly turns red and drops below a pick nothing has
+    contradicted yet, however sure the photo check sounded about it.
+    """
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=["torrentshell"])
+    wrong = parse_item(
+        {
+            "id": 111,
+            "title": "Patagonia nylon jacket",
+            "url": "https://www.vinted.sk/items/111",
+            "price": {"amount": "39.91", "currency_code": "EUR"},
+        },
+        "sk",
+    )
+    unconfirmed = parse_item(
+        {
+            "id": 222,
+            "title": "Modra vetrovka",
+            "url": "https://www.vinted.sk/items/222",
+            "price": {"amount": "40.60", "currency_code": "EUR"},
+        },
+        "sk",
+    )
+    await repo.record_sweep_candidates(
+        sweep_id,
+        [
+            sweep._to_candidate(sweep.RankedItem(item=wrong, rank_score=1.0), 0),
+            sweep._to_candidate(sweep.RankedItem(item=unconfirmed, rank_score=0.5), 1),
+        ],
+    )
+    await repo.record_triage(
+        sweep_id,
+        [
+            TriageItem(id=111, matches_target=True, confidence=0.92, reason="Dark shell."),
+            TriageItem(id=222, matches_target=True, confidence=0.79, reason="Blue shell."),
+        ],
+    )
+    await repo.record_verdict(
+        sweep_id,
+        111,
+        EnrichmentIn(
+            score=18,
+            model="Patagonia Guide Jacket",
+            matches_query=False,
+            verdict="Not the model searched for.",
+        ),
+        1_760_000_000,
+    )
+    await repo.finish_sweep_run(
+        sweep_id, status="ok", pages_fetched=1, items_seen=2, candidates=2, funnel={}
+    )
+
+    page = signed_in.get(f"/magic?sweep={sweep_id}")
+
+    assert page.status_code == 200
+    assert 'class="listing m-bad"' in page.text
+    assert 'class="listing m-maybe"' in page.text
+    assert 'class="listing m-good"' not in page.text
+    # 92%-sure photos with a bad opinion sit below the 79%-sure pick nobody contradicted.
+    assert page.text.index("Modra vetrovka") < page.text.index("Patagonia nylon jacket")
 
 
 async def test_a_sweep_that_stopped_early_shows_why_instead_of_an_empty_page(

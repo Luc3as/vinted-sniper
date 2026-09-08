@@ -18,6 +18,16 @@
   #m-results details.m-others { margin: .9rem 0; }
   #m-results details.m-others summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
   #m-results #m-watch-card { margin-top: 1.1rem; }
+  /* One colour per card, owned by the paid opinion: green only when a full opinion scored
+     it well, orange for a photo-check guess nothing has confirmed, red when the opinion
+     said it is not the thing. The says-line repeats the same colour in words. */
+  #m-results .listing { border-left: 3px solid transparent; }
+  #m-results .listing.m-good { border-left-color: var(--ok); }
+  #m-results .listing.m-mid, #m-results .listing.m-maybe { border-left-color: var(--warn); }
+  #m-results .listing.m-bad { border-left-color: var(--bad); }
+  #m-results .says.good { color: var(--ok); }
+  #m-results .says.mid, #m-results .says.maybe { color: var(--warn); }
+  #m-results .says.bad { color: var(--bad); }
   .m-spin { display: inline-block; width: .85rem; height: .85rem; border: 2px solid var(--muted);
     border-top-color: transparent; border-radius: 999px; animation: m-spin .8s linear infinite; }
   @keyframes m-spin { to { transform: rotate(360deg); } }
@@ -70,7 +80,7 @@
   </div>
 
   {% macro listing_card(match) %}
-    <article class="listing">
+    <article class="listing m-{{ match.state }}">
       {% if match.photo %}
       <a class="photo" href="{{ match.url }}" target="_blank" rel="noreferrer" style="cursor:pointer"
          aria-label="Open {{ match.title }} on Vinted"><img src="{{ match.photo }}" alt="" loading="lazy"></a>
@@ -87,7 +97,7 @@
                 data-tip="The agent’s deal score, 0–100 — higher is a better deal. Unlike the photo check, this paid opinion judges the exact thing you asked for.">🤖 {{ match.score }}</span>
           {% endif %}
         </div>
-        <div class="says {{ 'yes' if match.matches_target else ('unchecked' if match.matches_target is none else 'no') }}">{{ match.photos }}</div>
+        <div class="says {{ match.state }}">{{ match.photos }}</div>
         {% if match.reason %}<div class="why">{{ match.reason }}</div>{% endif %}
         <div class="meta">{% if match.title_words %}title mentions {{ match.title_words | join(', ') }}{% else %}the title has none of your words{% endif %}</div>
         {% if match.verdict %}<div class="opinion">{{ match.verdict }}</div>{% endif %}
@@ -99,12 +109,14 @@
   {# The photo check's yes-pile leads; its no-pile and the never-checked are one click away
      rather than seventy equal cards. The check compares a photo to the *description* — it
      cannot name the model, so its pile is worded that way and only the 🤖 score claims more. #}
-  {% set picks = sweep.matches | selectattr('matches_target') | list %}
+  {% set picks = sweep.matches | selectattr('matches_target') | sort(attribute='state_rank') | list %}
   {% set others = sweep.matches | rejectattr('matches_target') | list %}
   {% if picks %}
   <h3 class="m-group">{{ picks | length }} the photo check picked out</h3>
-  <p class="muted m-group-note">“Fits your description” means the photo shows the kind of thing you described.
-    Only the 🤖 deal score is a paid opinion on whether it is the exact one.</p>
+  <p class="muted m-group-note"><span style="color:var(--ok)">Green</span> — a paid opinion scored it a good
+    deal on the exact thing you asked for. <span style="color:var(--warn)">Orange</span> — only the photo guess
+    says it fits; nothing has confirmed it is the one. <span style="color:var(--bad)">Red</span> — a paid
+    opinion looked and said it is not the thing.</p>
   <div class="listing-grid">
     {% for match in picks %}{{ listing_card(match) }}{% endfor %}
   </div>
