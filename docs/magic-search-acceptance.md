@@ -259,6 +259,11 @@ Observed, and passing. `/history` shows Sweep #1 with its `ok` pill, the sentenc
 page(s), saw 91 listing(s), kept 74."*, the same `Cost:` sentence word for word, and
 per-match rows carrying the photo-check reason, the score tag and the verdict text.
 
+Re-observed at closeout: the same page, rendered signed-in by the real app against the
+captured `data/acceptance.db`, carries every one of those elements word for word — the
+`ok` pill beside Sweep #1, the Read/saw/kept sentence, the identical `Cost:` sentence,
+the verdict scores and the verdict text *"Pravá Torrentshell za tretinu ceny"*.
+
 ### The three failure-mode rows
 
 **Still NEEDS-HUMAN.** This run finished `ok`: no batch failed, no verdict failed, and the
@@ -273,11 +278,16 @@ manufacture one. Each keeps its deterministic coverage:
 - a cap of zero buys nothing and is not an error —
   `test_a_cap_of_zero_buys_nothing_and_is_not_an_error`
 
+All three live in `tests/integration/test_sweep_judge.py` and were re-run at closeout:
+3 passed.
+
 ## From S02 — the live flow, and mapping in three languages
 
-The mapper flow answered live for this run, and for two more sentences afterwards. Each was
-sent to `POST /api/magic-search/map`, so every id in every answer was confirmed against
-Vinted before it came back:
+### The bilingual mapping row
+
+Observed, and passing. The mapper flow answered live for this run, and for two more
+sentences afterwards. Each was sent to `POST /api/magic-search/map`, so every id in every
+answer was confirmed against Vinted before it came back:
 
 | Sentence | Site | Category | Brand | Size | Price | Currency |
 |---|---|---|---|---|---|---|
@@ -286,10 +296,34 @@ Vinted before it came back:
 | mens Patagonia Torrentshell rain jacket size M under 60 pounds | co.uk | Jackets 2052 | Patagonia 90804 | M 208 | 60 | GBP |
 
 Slovak, Czech and English all map to the same real ids and each picks up its own currency.
-Both checks are observed and passing.
+The captured `data/acceptance/app.log` carries the three `magic.flow_answered` /
+`magic.mapped` pairs, one per language, each resolving to catalog 2052, brand 90804,
+size 208. The known trap on Haiku 4.5 — Slovak and Czech drifting apart unless the flow's
+prompt names the output language — did not show itself here: the three answers agree.
 
 A site code that is not a Vinted country site is refused before anything is spent:
 `{"detail": "vinted.cs is not a known site"}`, HTTP 404.
+
+### The labels row — what the card said against what the node is called
+
+Validation proves an id exists, never that it is the id the user meant, so the confirm
+card's words are the only thing standing between a wrong mapping and spent money.
+Observed, and the S02 caveat is confirmed rather than gone:
+
+- The confirm card for the paid run said **`Category: Jackets`** — captured verbatim in
+  `data/acceptance/confirm-card.json`.
+- Vinted's own category tree — the very copy this run validated against, cached in
+  `data/acceptance.db` — titles node 2052 **"Bundy"** on vinted.sk and vinted.cz, and
+  "Jackets" only on vinted.co.uk.
+
+So the card echoes the flow's own name for the node, exactly as S02 predicted: `labels`
+is built from the name the model returned, not from the taxonomy
+(`src/vinted_sniper/web/server.py`, the `labels` block of the map endpoint). Here that
+name was a correct English rendering of the right node, so the card confirmed the mapping
+the user meant — the id was right. But a Slovak user searching a Slovak site was shown the
+English word for a node the site itself calls *Bundy*: the right thing, named in the wrong
+language. That is a flow-wording limitation to keep in mind when reading a confirm card,
+not an id error, and it is now written down with the node titles beside it.
 
 ---
 
