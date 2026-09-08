@@ -610,11 +610,24 @@ def test_a_form_posted_from_another_site_is_refused(signed_in: TestClient, repo:
 
 
 def test_wrong_tokens_are_throttled(client: TestClient) -> None:
-    for _ in range(5):
+    for _ in range(4):
         assert client.post("/login", data={"access_token": "nope"}).status_code == 401
+    # The attempt that fills the strike quota is told to wait right away, with a
+    # countdown, instead of a "wrong password" followed by a surprise block.
     blocked = client.post("/login", data={"access_token": "nope"})
     assert blocked.status_code == 429
     assert "Retry-After" in blocked.headers
+    assert "try again" in blocked.text.lower()
+
+    still_blocked = client.post("/login", data={"access_token": "nope"})
+    assert still_blocked.status_code == 429
+
+
+def test_a_pasted_password_with_stray_whitespace_still_works(client: TestClient) -> None:
+    response = client.post("/login", data={"access_token": f"  {TOKEN}\n"}, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.cookies[SESSION_COOKIE] == TOKEN
 
 
 def test_the_session_cookie_is_httponly_and_strict(client: TestClient) -> None:

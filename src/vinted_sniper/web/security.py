@@ -107,20 +107,29 @@ def _same_origin(request: Request) -> bool:
 
 
 class LoginThrottle:
-    """After a few wrong tokens from one address, make it wait.
+    """After a few wrong passwords from one address, make it wait.
 
     Enough to turn guessing a 64-hex token from impossible-in-theory into
     impossible-in-practice-too, without ever locking the owner out for long.
+    A client that keeps hammering after a block earns a longer one each time,
+    doubling up to a ceiling; one correct sign-in wipes the slate.
     """
 
     def __init__(
-        self, *, attempts: int = 5, window_s: float = 600.0, cooldown_s: float = 60.0
+        self,
+        *,
+        attempts: int = 5,
+        window_s: float = 600.0,
+        cooldown_s: float = 60.0,
+        max_cooldown_s: float = 900.0,
     ) -> None:
         self._attempts = attempts
         self._window_s = window_s
         self._cooldown_s = cooldown_s
+        self._max_cooldown_s = max_cooldown_s
         self._failures: dict[str, deque[float]] = defaultdict(deque)
         self._blocked_until: dict[str, float] = {}
+        self._strikes: dict[str, int] = {}
 
     def retry_after(self, client: str, now: float | None = None) -> float:
         """Seconds this client must wait before another try; zero when it may try now."""
@@ -128,19 +137,26 @@ class LoginThrottle:
         until = self._blocked_until.get(client, 0.0)
         return max(0.0, until - now)
 
-    def failed(self, client: str, now: float | None = None) -> None:
+    def failed(self, client: str, now: float | None = None) -> float:
+        """Record one wrong password; returns the cooldown just imposed, or zero."""
         now = time.monotonic() if now is None else now
         recent = self._failures[client]
         recent.append(now)
         while recent and now - recent[0] > self._window_s:
             recent.popleft()
         if len(recent) >= self._attempts:
-            self._blocked_until[client] = now + self._cooldown_s
+            strikes = self._strikes.get(client, 0)
+            cooldown = min(self._cooldown_s * (2.0**strikes), self._max_cooldown_s)
+            self._strikes[client] = strikes + 1
+            self._blocked_until[client] = now + cooldown
             recent.clear()
+            return cooldown
+        return 0.0
 
     def succeeded(self, client: str) -> None:
         self._failures.pop(client, None)
         self._blocked_until.pop(client, None)
+        self._strikes.pop(client, None)
 
 
 def client_address(request: Request) -> str:

@@ -5,15 +5,37 @@
 <section class="login-wrap">
   {% include "_wordmark.svg" %}
   <div class="card">
-    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    {% if error %}<p class="error" id="login-error" role="alert">{{ error }}</p>{% endif %}
     <form method="post" action="/login">
-      <label for="access_token">Access token</label>
-      <input type="password" id="access_token" name="access_token" autofocus required>
-      <p class="muted" style="margin: .6rem 0 1rem;">
-        The value of <code>VINTED_SNIPER_WEB_AUTH_TOKEN</code> from the container’s environment.
-      </p>
-      <button type="submit" style="width:100%">Sign in</button>
+      <label for="access_token">Password</label>
+      <input type="password" id="access_token" name="access_token"
+             autocomplete="current-password" autofocus required
+             {% if retry_after %}disabled{% endif %}>
+      <button type="submit" id="login-submit" style="width:100%; margin-top:1rem;"
+              {% if retry_after %}disabled{% endif %}>Sign in</button>
     </form>
   </div>
 </section>
+{% if retry_after %}
+<script>
+  (function () {
+    let left = {{ retry_after }};
+    const msg = document.getElementById("login-error");
+    const field = document.getElementById("access_token");
+    const btn = document.getElementById("login-submit");
+    const tick = setInterval(function () {
+      left -= 1;
+      if (left <= 0) {
+        clearInterval(tick);
+        msg.textContent = "You can try again now.";
+        field.disabled = false;
+        btn.disabled = false;
+        field.focus();
+        return;
+      }
+      msg.textContent = "Too many attempts. You can try again in " + left + " seconds.";
+    }, 1000);
+  })();
+</script>
+{% endif %}
 {% endblock %}

@@ -302,35 +302,57 @@ def create_app(
     async def login_form(request: Request) -> Response:
         if token is None:
             return RedirectResponse("/", status_code=303)
-        return TEMPLATES.TemplateResponse(request, "login.html", {"error": None})
+        return TEMPLATES.TemplateResponse(
+            request, "login.html", {"error": None, "retry_after": None}
+        )
 
     @app.post("/login")
     async def login(request: Request, access_token: Annotated[str, Form()]) -> Response:
         if token is None:
             return RedirectResponse("/", status_code=303)
         client = client_address(request)
+        # A password pasted from a manager or a chat often drags whitespace along;
+        # no real password here ever contains any, so stripping only fixes typos.
+        supplied = access_token.strip()
         if (wait := throttle.retry_after(client)) > 0:
+            retry = int(wait) + 1
             return TEMPLATES.TemplateResponse(
                 request,
                 "login.html",
-                {"error": f"Too many wrong tokens. Try again in {int(wait) + 1} s."},
+                {
+                    "error": f"Too many attempts. You can try again in {retry} seconds.",
+                    "retry_after": retry,
+                },
                 status_code=429,
-                headers={"Retry-After": str(int(wait) + 1)},
+                headers={"Retry-After": str(retry)},
             )
-        if not _authorised(access_token, token):
-            throttle.failed(client)
+        if not _authorised(supplied, token):
+            cooldown = throttle.failed(client)
             log.warning("web.login_failed", client=client)
+            if cooldown > 0:
+                log.warning("web.login_blocked", client=client, cooldown_s=int(cooldown))
+                retry = int(cooldown)
+                return TEMPLATES.TemplateResponse(
+                    request,
+                    "login.html",
+                    {
+                        "error": f"Too many attempts. You can try again in {retry} seconds.",
+                        "retry_after": retry,
+                    },
+                    status_code=429,
+                    headers={"Retry-After": str(retry)},
+                )
             return TEMPLATES.TemplateResponse(
                 request,
                 "login.html",
-                {"error": "That token does not match."},
+                {"error": "That password is not right. Please try again.", "retry_after": None},
                 status_code=401,
             )
         throttle.succeeded(client)
         response = RedirectResponse("/", status_code=303)
         response.set_cookie(
             SESSION_COOKIE,
-            access_token,
+            supplied,
             httponly=True,
             samesite="strict",
             secure=request.url.scheme == "https",
