@@ -158,6 +158,8 @@ async def test_the_item_block_is_the_webhooks_shape_without_the_callback() -> No
             "https://images.vinted.net/f800/1-b.jpeg",
         ],
         "seller": "hikergirl",
+        "seller_rating": None,
+        "seller_reviews": None,
     }
 
 

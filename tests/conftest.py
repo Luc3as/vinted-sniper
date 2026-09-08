@@ -25,6 +25,9 @@ class ScriptedTransport:
         # catalog response should not have it swallowed by the session bootstrap.
         self.responses: list[Response] = []
         self.root_responses: list[Response] = []
+        # Seller-profile requests are routed separately too, so a hydration read can
+        # never swallow a catalog response a test lined up.
+        self.user_responses: list[Response] = []
         self.requests: list[dict[str, Any]] = []
         self.closed = False
         self._default_cookies = {"access_token_web": "test-token"}
@@ -48,6 +51,17 @@ class ScriptedTransport:
     def queue_status(self, status_code: int, body: str = "", **headers: str) -> None:
         self.queue(Response(status_code=status_code, text=body, headers=headers, cookies={}))
 
+    def queue_user(self, **fields: Any) -> None:
+        """Line up one seller-profile answer for the next reputation read."""
+        self.user_responses.append(
+            Response(
+                status_code=200,
+                text=json.dumps({"user": fields}),
+                headers={"content-type": "application/json"},
+                cookies={},
+            )
+        )
+
     async def get(
         self,
         url: str,
@@ -67,6 +81,13 @@ class ScriptedTransport:
             return Response(
                 status_code=200, text="<html></html>", headers={}, cookies=self._default_cookies
             )
+
+        if "/api/v2/users/" in url:
+            if self.user_responses:
+                return self.user_responses.pop(0)
+            # An unscripted reputation read fails like a network blip: hydration is
+            # best-effort, so the item keeps whatever the catalog said.
+            return Response(status_code=500, text="", headers={}, cookies={})
 
         if not self.responses:
             return Response(

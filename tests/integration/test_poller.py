@@ -646,3 +646,62 @@ async def test_the_market_filter_waits_until_there_is_a_market(
     await poller.tick()
 
     assert await repo.outbox_depth() == 1, "too few points to judge, so nothing is withheld"
+
+
+async def test_a_seller_the_catalog_says_nothing_about_gets_their_profile_read(
+    transport: ScriptedTransport,
+    repo: Repo,
+    settings: Settings,
+    db: Any,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    """The catalog stopped carrying reputation, so the recorded listings buy one profile
+    read per seller — and a seller with 2351 reviews stops being called new."""
+    poller, _ = await make_poller(transport, repo, settings, db=db)
+    now = int(time.time())
+    transport.queue_catalog(
+        [
+            make_item(1, photo_ts=now - 10, user={"id": 42, "login": "matessw"}),
+            make_item(2, photo_ts=now - 20, user={"id": 42, "login": "matessw"}),
+        ]
+    )
+    transport.queue_user(id=42, login="matessw", feedback_reputation=0.98, feedback_count=2351)
+
+    await poller.tick()
+
+    rows = await repo.recent_items()
+    assert {row["seller_feedback_count"] for row in rows} == {2351}
+    assert {row["seller_rating"] for row in rows} == {0.98}
+    reads = [r for r in transport.requests if "/api/v2/users/" in r["url"]]
+    assert len(reads) == 1, "one seller, one read — the second listing must hit the cache"
+
+
+async def test_a_seller_gate_reads_the_profile_rather_than_rejecting_blind(
+    transport: ScriptedTransport,
+    repo: Repo,
+    settings: Settings,
+    db: Any,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    query_id = await repo.add_query(
+        name="trusted sellers only",
+        url="https://www.vinted.fr/catalog?search_text=x",
+        tld="fr",
+        params={"search_text": "x"},
+        poll_interval_s=60,
+        min_seller_reviews=100,
+    )
+    query = await repo.get_query(query_id)
+    assert query is not None
+    poller, _ = poller_for(query, transport, repo, settings, db=db)
+
+    now = int(time.time())
+    transport.queue_catalog([make_item(1, photo_ts=now - 10, user={"id": 42, "login": "matessw"})])
+    transport.queue_user(id=42, feedback_reputation=0.98, feedback_count=2351)
+    await poller.tick()
+    assert len(await repo.known_item_ids([1])) == 1, "2351 reviews clears a floor of 100"
+
+    transport.queue_catalog([make_item(2, photo_ts=now - 5, user={"id": 43, "login": "brandnew"})])
+    transport.queue_user(id=43, feedback_reputation=1.0, feedback_count=3)
+    await poller.tick()
+    assert len(await repo.known_item_ids([2])) == 0, "3 reviews does not"

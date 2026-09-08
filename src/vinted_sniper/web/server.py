@@ -1146,6 +1146,20 @@ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
         total = row["total_price"]
         # The same 0..1-to-stars reading the notifications use.
         stars = round(row["seller_rating"] * 50) / 10 if row["seller_rating"] is not None else None
+        # The whole paid opinion, rendered the same way the Telegram alert renders it:
+        # the compact summary line, the one-sentence verdict, and the identified product.
+        enrichment = Enrichment.from_row(row)
+        payable_amount = total if total is not None else price
+        payable = Decimal(str(payable_amount)) if payable_amount is not None else None
+        verdict_summary = enrichment.summary(payable, currency) if enrichment else None
+        state = None
+        if enrichment is not None and enrichment.score is not None:
+            if enrichment.score >= _SCORE_GOOD:
+                state = "good"
+            elif enrichment.score >= _SCORE_MID:
+                state = "mid"
+            else:
+                state = "bad"
         views.append(
             {
                 "title": row["title"] or f"Listing {row['item_id']}",
@@ -1170,6 +1184,9 @@ def _listing_views(rows: list[Any], now: int) -> list[dict[str, Any]]:
                 "price_dropped": bool(row["price_changed_at"]),
                 "deal_score": row["enrich_score"] if row["enriched_at"] else None,
                 "verdict": row["enrich_verdict"] if row["enriched_at"] else None,
+                "verdict_summary": verdict_summary or None,
+                "verdict_model": enrichment.model if enrichment else None,
+                "verdict_state": state,
                 "query_name": row["query_name"],
                 "age": _age(now - row["first_seen_at"]),
             }

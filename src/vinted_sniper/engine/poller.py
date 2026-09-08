@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import bisect
 import contextlib
+import dataclasses
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -28,6 +29,7 @@ from vinted_sniper.vinted.errors import (
     MalformedResponseError,
     NetworkError,
     RateLimitedError,
+    VintedError,
 )
 from vinted_sniper.vinted.models import Item
 from vinted_sniper.vinted.session import SessionManager
@@ -153,6 +155,57 @@ class Poller:
         self._consecutive_errors = 0
         return self._interval()
 
+    async def _passes_gates(self, item: Item) -> Item | None:
+        """The item if it clears the query's filters, else None.
+
+        A seller gate that would reject on *missing* data first reads the seller's
+        profile: the catalog stopped saying anything about sellers, so the gate can only
+        be answered there — for the listing that got this far, not for the whole page.
+        """
+        rejection = filters.check(item, self.query)
+        if rejection is None:
+            return item
+        if rejection.reason not in ("seller_rating", "seller_reviews"):
+            return None
+        hydrated = await self._hydrate_seller(item, force=True)
+        return hydrated if filters.check(hydrated, self.query) is None else None
+
+    async def _hydrate_seller(self, item: Item, *, force: bool = False) -> Item:
+        """The seller's rating and review count, read off their profile when the catalog
+        gave none.
+
+        Best-effort on purpose: a failure costs the numbers staying unknown, never the
+        alert. `force` re-reads even a partly-known seller — the seller gates need the
+        exact field they filter on, not whichever one the catalog happened to include.
+        """
+        if item.seller_id is None:
+            return item
+        known = item.seller_rating is not None and item.seller_feedback_count is not None
+        if known or (not force and item.seller_rating is not None):
+            return item
+        try:
+            rating, reviews = await self._client.seller_reputation(self.query.tld, item.seller_id)
+        except VintedError as exc:
+            self._log.debug("seller.unfetched", seller_id=item.seller_id, error=str(exc))
+            return item
+        return item.model_copy(update={"seller_rating": rating, "seller_feedback_count": reviews})
+
+    async def _with_seller_reputation(self, selection: dedup.Selection) -> dedup.Selection:
+        """The selection with each recorded listing's seller numbers filled in.
+
+        The few listings about to become alerts get their seller's real numbers, so
+        neither the reader nor the verdict agent mistakes 2351 reviews for none.
+        """
+        if not selection.to_record:
+            return selection
+        hydrated = [await self._hydrate_seller(item) for item in selection.to_record]
+        by_id = {item.item_id: item for item in hydrated}
+        return dataclasses.replace(
+            selection,
+            to_record=hydrated,
+            to_notify=[by_id.get(item.item_id, item) for item in selection.to_notify],
+        )
+
     async def _check(self) -> None:
         items = await self._client.search(self.query.tld, self.query.params)
         state = await self._repo.get_state(self.query.id)
@@ -161,8 +214,8 @@ class Poller:
 
         candidates: list[Item] = []
         for item in items:
-            if filters.check(item, self.query) is None:
-                candidates.append(item)
+            if (passed := await self._passes_gates(item)) is not None:
+                candidates.append(passed)
 
         # Where does each candidate's price sit among what this search has been seeing?
         # Used as a filter if the search asks for one, and remembered for the alert either
@@ -189,6 +242,8 @@ class Poller:
             is_first_run=state.is_first_run,
             first_run_mode=self._settings.first_run_mode,
         )
+
+        selection = await self._with_seller_reputation(selection)
 
         destination_ids = await self._repo.destination_ids_for_query(self.query.id)
         if selection.to_record:

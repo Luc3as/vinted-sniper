@@ -182,6 +182,11 @@ def filters_facets_endpoint(tld: str) -> str:
     return f"https://www.vinted.{tld}/api/v2/catalog/filters/facets"
 
 
+def user_endpoint(tld: str, user_id: int) -> str:
+    """One seller's public profile — the reputation numbers the catalog stopped carrying."""
+    return f"https://www.vinted.{tld}/api/v2/users/{user_id}"
+
+
 def catalog_page(tld: str) -> str:
     """The search page itself — its HTML embeds the category tree and the CSRF token."""
     return f"https://www.vinted.{tld}/catalog"

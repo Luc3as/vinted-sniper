@@ -511,7 +511,12 @@ async def judge_sweep(
         # A triage stage that failed partway does not get to open the expensive one: the
         # same rule that stops a blocked `run_sweep()` reaching the photo check. The
         # answers triage did pay for are already on disk and already reported.
-        winners = [ranked for ranked in judged if ranked.matches_target][:max_verdicts]
+        winners = await _hydrate_winner_sellers(
+            [ranked for ranked in judged if ranked.matches_target][:max_verdicts],
+            client=client,
+            tld=tld,
+            run_log=run_log,
+        )
         verdicts, spent_tokens, spent_cost, failure = await _buy_verdicts(
             winners,
             verdict=verdict,
@@ -561,6 +566,39 @@ async def judge_sweep(
         status=status,
         error=error,
     )
+
+
+async def _hydrate_winner_sellers(
+    winners: Sequence[RankedItem],
+    *,
+    client: VintedClient,
+    tld: str,
+    run_log: structlog.stdlib.BoundLogger,
+) -> list[RankedItem]:
+    """The winners with their seller's reputation filled in from the profile.
+
+    The verdict agent reads seller reputation too, and the catalog stopped carrying it —
+    so the two or three listings about to buy a full opinion each buy one profile read
+    first. Best-effort: a failure here costs the numbers, never the verdict.
+    """
+    hydrated: list[RankedItem] = []
+    for ranked in winners:
+        winner = ranked.item
+        if (
+            winner.seller_id is not None
+            and winner.seller_rating is None
+            and winner.seller_feedback_count is None
+        ):
+            try:
+                rating, reviews = await client.seller_reputation(tld, winner.seller_id)
+            except VintedError as exc:
+                run_log.debug("sweep.seller_unfetched", item_id=winner.item_id, error=str(exc))
+            else:
+                winner = winner.model_copy(
+                    update={"seller_rating": rating, "seller_feedback_count": reviews}
+                )
+        hydrated.append(replace(ranked, item=winner))
+    return hydrated
 
 
 async def _buy_verdicts(

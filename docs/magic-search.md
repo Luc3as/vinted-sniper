@@ -364,7 +364,9 @@ sends a standing watch's enrichment flow, minus the `enrichment_url` callback:
       "currency": "EUR",
       "photo_url": "https://images1.vinted.net/t/.../f800/....jpeg?s=...",
       "photo_urls": ["https://images1.vinted.net/t/.../f800/....jpeg?s=..."],
-      "seller": "some_seller"
+      "seller": "some_seller",
+      "seller_rating": 0.98,
+      "seller_reviews": 2351
     }
   ]
 }
@@ -947,7 +949,9 @@ teraz posiela enrichment flowu trvalého striehnutia, bez callbacku `enrichment_
       "currency": "EUR",
       "photo_url": "https://images1.vinted.net/t/.../f800/....jpeg?s=...",
       "photo_urls": ["https://images1.vinted.net/t/.../f800/....jpeg?s=..."],
-      "seller": "some_seller"
+      "seller": "some_seller",
+      "seller_rating": 0.98,
+      "seller_reviews": 2351
     }
   ]
 }

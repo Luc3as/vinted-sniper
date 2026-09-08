@@ -66,10 +66,11 @@
        below must not shrink it, hence the explicit size. Colours ride the theme tokens. */
     .brand a svg.lockup { width: auto; height: 2.1rem; flex: none; display: block; }
     @media (max-width: 40rem) { .brand a svg.lockup { height: 1.6rem; } }
-    /* --- Login: no chrome, one centred card under a big lockup ---------------------- */
+    /* --- Login: no chrome, one centred card under the full wordmark — the variant with
+       the claim under the name, since this is the one page that introduces the app. ---- */
     .login-wrap { min-height: 78vh; display: flex; flex-direction: column;
                   align-items: center; justify-content: center; gap: 1.75rem; }
-    .login-wrap svg.lockup { width: min(22rem, 82vw); height: auto; display: block; }
+    .login-wrap svg.wordmark { width: min(26rem, 86vw); height: auto; display: block; color: var(--ink); }
     .login-wrap .card { width: min(24rem, 92vw); margin: 0; }
     nav { display: flex; gap: .25rem; }
     nav a { color: var(--muted); text-decoration: none; font-weight: 500; padding: .35rem .7rem;
@@ -92,6 +93,21 @@
     @keyframes refresh-drain { from { stroke-dashoffset: 0; } to { stroke-dashoffset: 28.3; } }
     @media (prefers-reduced-motion: reduce) { .refresh-ind .hand { animation: none; } }
 
+    /* --- Small screens: the same header, adapted rather than amputated. Brand and
+       controls share the top row; the five sections take a full-width second row that
+       scrolls sideways when it must, so no link ever hides behind a hamburger. The
+       break sits where the one-row header actually stops fitting, not at a device width. */
+    @media (max-width: 56rem) {
+      header { flex-wrap: wrap; gap: .4rem .75rem; padding: .55rem .75rem;
+               padding-left: max(.75rem, env(safe-area-inset-left));
+               padding-right: max(.75rem, env(safe-area-inset-right)); }
+      .header-right { gap: .5rem; flex-wrap: wrap; justify-content: flex-end; }
+      nav { order: 3; flex: 1 1 100%; overflow-x: auto; scrollbar-width: none;
+            margin: 0 -.75rem; padding: 0 .75rem; }
+      nav::-webkit-scrollbar { display: none; }
+      nav a { white-space: nowrap; }
+      .status { font-size: .8rem; }
+    }
     /* Wide enough for the tables to breathe, capped so a 4K monitor doesn't stretch
        rows into unreadable ribbons; the viewport term keeps side gutters on laptops. */
     main { max-width: min(100rem, 100vw - 2rem); margin: 0 auto; padding: 1.5rem; }
@@ -315,6 +331,17 @@
                          border-radius: 0; padding: .4rem .6rem; text-align: left;
                          font-weight: 400; }
     .combo-list button:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+    /* --- Touch --------------------------------------------------------------------- */
+    /* Last on purpose: these must out-cascade every sizing rule above them. Touch gets
+       targets a thumb can hit (44px ≈ 2.75rem). The help "?" stays small — its answer
+       is a footnote, not a control someone must land on. */
+    @media (pointer: coarse) {
+      nav a { padding: .55rem .8rem; min-height: 2.75rem; }
+      button:not(.help), input, select { min-height: 2.75rem; }
+      button.iconbtn { width: 2.75rem; height: 2.75rem; }
+      .lightbox button { width: 2.75rem; height: 2.75rem; }
+    }
   </style>
 </head>
 <body>

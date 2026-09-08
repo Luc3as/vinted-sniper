@@ -16,6 +16,18 @@
 {% endblock %}
 
 {% block content %}
+<style>
+  /* Page-local: the same colour language as /magic — the paid opinion owns the card's
+     accent, green for a good deal, orange for the middle, red for "not the thing". */
+  #recent .listing { border-left: 3px solid transparent; }
+  #recent .listing.v-good { border-left-color: var(--ok); }
+  #recent .listing.v-mid { border-left-color: var(--warn); }
+  #recent .listing.v-bad { border-left-color: var(--bad); }
+  #recent .opinion.lead { font-weight: 600; color: var(--muted); }
+  #recent .listing.v-good .opinion.lead { color: var(--ok); }
+  #recent .listing.v-mid .opinion.lead { color: var(--warn); }
+  #recent .listing.v-bad .opinion.lead { color: var(--bad); }
+</style>
 <section id="recent">
   <div class="section-head">
     <h2>{{ icon('sparkle') }}Found</h2>
@@ -35,7 +47,7 @@
   </div>
   <div class="listing-grid">
     {% for row in recent %}
-    <article class="listing">
+    <article class="listing{% if row.verdict_state %} v-{{ row.verdict_state }}{% endif %}">
       {% if row.photos %}
       <button type="button" class="photo" data-photos='{{ row.photos | tojson }}'
               aria-label="View {{ row.photos | length }} photo{{ 's' if row.photos | length > 1 }} of {{ row.title }}">
@@ -59,7 +71,7 @@
           {% if row.price_dropped %}<span class="tag drop" data-tip="The price fell after this listing was first seen.">📉 dropped</span>{% endif %}
           {% if row.deal_score is not none %}
           <span class="tag score {{ 'hot' if row.deal_score >= 75 else ('cold' if row.deal_score < 40 else '') }}"
-                data-tip="{{ row.verdict or 'The agent’s deal score, 0–100 — higher is a better deal.' }}">🤖 {{ row.deal_score }}</span>
+                data-tip="The agent’s deal score, 0–100 — higher is a better deal. The full opinion is written out on the card.">🤖 {{ row.deal_score }}</span>
           {% endif %}
           {% if row.total_price and row.price %}
           <span class="base" data-tip="The seller’s asking price, before the buyer-protection fee.">{{ row.price }} + fee</span>
@@ -85,6 +97,11 @@
           {% if row.favourite_count %}<span>♥ {{ row.favourite_count }}</span>{% endif %}
         </div>
         {% endif %}
+        {# The paid opinion, laid out the way the Telegram alert lays it out: the compact
+           summary, the one-sentence verdict, then what the model thinks the product is. #}
+        {% if row.verdict_summary %}<div class="opinion lead">🤖 {{ row.verdict_summary }}</div>{% endif %}
+        {% if row.verdict %}<div class="opinion">💬 {{ row.verdict }}</div>{% endif %}
+        {% if row.verdict_model %}<div class="opinion">🔎 Looks like: {{ row.verdict_model }}</div>{% endif %}
         <div class="meta foot">
           <span class="search-name">{{ row.query_name or '—' }}</span>
           <span class="age">{{ row.age }}</span>

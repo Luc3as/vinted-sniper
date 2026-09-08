@@ -164,6 +164,8 @@ def _item_json(item: Item) -> dict[str, Any]:
         "photo_url": item.photo_url,
         "photo_urls": list(item.photo_urls),
         "seller": item.seller_login,
+        "seller_rating": item.seller_rating,
+        "seller_reviews": item.seller_feedback_count,
     }
 
 
