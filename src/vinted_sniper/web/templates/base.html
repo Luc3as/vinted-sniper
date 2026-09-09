@@ -241,8 +241,23 @@
     .listing .photo .count { position: absolute; top: .45rem; right: .45rem;
                              background: rgb(0 0 0 / .55); color: #fff; border-radius: 6px;
                              padding: .06rem .45rem; font-size: .72rem; font-weight: 600; }
-    .listing .no-photo { display: flex; align-items: center; justify-content: center;
-                         aspect-ratio: 4 / 5; color: var(--muted); background: var(--bg); }
+    .listing .no-photo { position: relative; display: flex; align-items: center;
+                         justify-content: center; aspect-ratio: 4 / 5; color: var(--muted);
+                         background: var(--bg); }
+    /* The gone marker, the way Vinted itself marks a sold listing: a red band straight
+       across the picture, not a chip you have to hunt for. The photo behind it is drained
+       of colour so a whole grid reads at a glance. `pointer-events: none` keeps the
+       lightbox and the "open on Vinted" link underneath still clickable. */
+    .listing .sold-band { position: absolute; left: 0; right: 0; top: 50%;
+                          transform: translateY(-50%); display: flex; gap: .35rem;
+                          align-items: center; justify-content: center;
+                          background: color-mix(in srgb, var(--bad) 92%, #000);
+                          color: #fff; font-weight: 800; letter-spacing: .12em;
+                          text-transform: uppercase; font-size: .82rem;
+                          padding: .3rem .4rem; pointer-events: none;
+                          box-shadow: 0 2px 10px rgb(0 0 0 / .35); }
+    .listing .sold-band svg { width: 1em; height: 1em; flex-shrink: 0; }
+    .listing.is-gone .photo img { filter: grayscale(1) brightness(.72); }
     .listing .body { display: flex; flex-direction: column; gap: .4rem; flex: 1;
                      padding: .6rem .7rem .7rem; }
     .listing .title { color: var(--ink); text-decoration: none; font-weight: 600;

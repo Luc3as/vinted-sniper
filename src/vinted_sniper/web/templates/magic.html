@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import icon, help %}
+{% from "_macros.html" import icon, help, sold_band %}
 {% block title %}Magic Search · vinted-sniper{% endblock %}
 
 {% block header_extra %}
@@ -80,12 +80,12 @@
   </div>
 
   {% macro listing_card(match) %}
-    <article class="listing m-{{ match.state }}">
+    <article class="listing m-{{ match.state }}{% if match.gone %} is-gone{% endif %}">
       {% if match.photo %}
       <a class="photo" href="{{ match.url }}" target="_blank" rel="noreferrer" style="cursor:pointer"
-         aria-label="Open {{ match.title }} on Vinted"><img src="{{ match.photo }}" alt="" loading="lazy"></a>
+         aria-label="Open {{ match.title }} on Vinted"><img src="{{ match.photo }}" alt="" loading="lazy">{% if match.gone %}{{ sold_band() }}{% endif %}</a>
       {% else %}
-      <div class="no-photo">no photo</div>
+      <div class="no-photo">no photo{% if match.gone %}{{ sold_band() }}{% endif %}</div>
       {% endif %}
       <div class="body">
         <a class="title" href="{{ match.url }}" target="_blank" rel="noreferrer"

@@ -31,6 +31,11 @@ _GONE_GRACE_S = 7200
 _SOLD_FAST_S = 86_400
 _MIN_GROUP = 5
 
+# How far back a sweep's listings stay worth a liveness recheck. A sweep is a one-shot
+# look at existing stock; without a bound its sellers stay due forever and keep spending
+# the shared per-site budget refreshing a badge on a run nobody opens any more.
+_SWEEP_LIVENESS_WINDOW_S = 30 * 86_400
+
 
 @dataclass(frozen=True, slots=True)
 class Query:
@@ -213,8 +218,14 @@ class SweepCandidate:
     photo_url: str | None = None
     photo_urls: list[str] = field(default_factory=list)
     seller_login: str | None = None
+    # The wardrobe endpoint is addressed by id, not login, so the liveness recheck needs
+    # this one kept even though nothing on the page prints it.
+    seller_id: int | None = None
     promoted: bool = False
     sweep_id: int = 0
+    # When the liveness recheck concluded this listing had left the seller's wardrobe.
+    # Same meaning, and the same "sold or withdrawn, cannot tell which", as items.sold_at.
+    sold_at: int | None = None
     # The small variant the triage stage is billed on; falls back to the full-size cover.
     thumb_url: str | None = None
     # Three-valued on purpose: None = never triaged, False = rejected, True = recognised.
@@ -1188,35 +1199,58 @@ class Repo:
     # --- Listing liveness ------------------------------------------------------------
 
     async def sellers_due_liveness(
-        self, *, recheck_after_s: int, limit: int = 25
+        self,
+        *,
+        recheck_after_s: int,
+        sweep_window_s: int = _SWEEP_LIVENESS_WINDOW_S,
+        limit: int = 25,
     ) -> list[tuple[str, int]]:
         """Sellers whose recorded listings deserve a fresh look at their wardrobe.
 
         A seller is due when any still-live listing of theirs was never checked or was
         last checked more than `recheck_after_s` ago. The longest-unchecked come first,
         so nobody starves under the per-cycle cap.
+
+        Both halves of the app count: an alerted listing in `items` and a swept listing in
+        `sweep_candidates` live in different tables but on the same seller's wardrobe, so
+        one read settles both. Sweep candidates age out after `sweep_window_s` — a sweep
+        is a one-shot look at existing stock, and rechecking a months-old run forever
+        would spend the shared per-site budget on a page nobody reads.
         """
-        cutoff = int(time.time()) - recheck_after_s
+        now = int(time.time())
+        cutoff = now - recheck_after_s
         rows = await self._db.fetch_all(
-            "SELECT tld, seller_id, MIN(COALESCE(sold_checked_at, 0)) AS oldest "
-            "FROM items WHERE sold_at IS NULL AND seller_id IS NOT NULL "
-            "GROUP BY tld, seller_id HAVING oldest <= ? ORDER BY oldest LIMIT ?",
-            (cutoff, limit),
+            "SELECT tld, seller_id, MIN(checked) AS oldest FROM ("
+            "  SELECT tld, seller_id, COALESCE(sold_checked_at, 0) AS checked FROM items"
+            "   WHERE sold_at IS NULL AND seller_id IS NOT NULL"
+            "  UNION ALL"
+            "  SELECT r.tld, c.seller_id, COALESCE(c.sold_checked_at, 0) AS checked"
+            "    FROM sweep_candidates c JOIN sweep_runs r ON r.id = c.sweep_id"
+            "   WHERE c.sold_at IS NULL AND c.seller_id IS NOT NULL AND r.started_at >= ?"
+            ") GROUP BY tld, seller_id HAVING oldest <= ? ORDER BY oldest LIMIT ?",
+            (now - sweep_window_s, cutoff, limit),
         )
         return [(row["tld"], row["seller_id"]) for row in rows]
 
     async def live_item_ids(self, tld: str, seller_id: int) -> set[int]:
-        """The recorded listings by this seller still assumed to be up."""
+        """The recorded listings by this seller still assumed to be up, from both tables."""
         rows = await self._db.fetch_all(
-            "SELECT item_id FROM items WHERE tld = ? AND seller_id = ? AND sold_at IS NULL",
-            (tld, seller_id),
+            "SELECT item_id FROM items WHERE tld = ? AND seller_id = ? AND sold_at IS NULL"
+            " UNION"
+            " SELECT c.item_id FROM sweep_candidates c JOIN sweep_runs r ON r.id = c.sweep_id"
+            "  WHERE r.tld = ? AND c.seller_id = ? AND c.sold_at IS NULL",
+            (tld, seller_id, tld, seller_id),
         )
         return {row["item_id"] for row in rows}
 
     async def record_liveness(self, tld: str, seller_id: int, gone_ids: Iterable[int]) -> int:
         """One wardrobe read, applied: every still-live listing of the seller gets its
         check timestamp, the ids in `gone_ids` are marked gone. Empty `gone_ids` is a
-        valid answer — "looked, learned nothing" still pushes the next look out."""
+        valid answer — "looked, learned nothing" still pushes the next look out.
+
+        The count returned is listings, not rows: one listing can sit in `items` and in
+        several sweeps at once, and "marked 4 gone" must mean four listings.
+        """
         now = int(time.time())
         gone = list(gone_ids)
         async with self._db.transaction() as conn:
@@ -1225,15 +1259,36 @@ class Repo:
                 "WHERE tld = ? AND seller_id = ? AND sold_at IS NULL",
                 (now, tld, seller_id),
             )
+            await conn.execute(
+                "UPDATE sweep_candidates SET sold_checked_at = ? "
+                "WHERE seller_id = ? AND sold_at IS NULL "
+                "AND sweep_id IN (SELECT id FROM sweep_runs WHERE tld = ?)",
+                (now, seller_id, tld),
+            )
             marked = 0
             if gone:
                 placeholders = ",".join("?" * len(gone))
                 cursor = await conn.execute(
+                    f"SELECT COUNT(*) AS n FROM ("
+                    f"  SELECT item_id FROM items"
+                    f"   WHERE item_id IN ({placeholders}) AND sold_at IS NULL"
+                    f"  UNION"
+                    f"  SELECT item_id FROM sweep_candidates"
+                    f"   WHERE item_id IN ({placeholders}) AND sold_at IS NULL)",
+                    [*gone, *gone],
+                )
+                counted = await cursor.fetchone()
+                marked = 0 if counted is None else int(counted["n"])
+                await conn.execute(
                     f"UPDATE items SET sold_at = ? "
                     f"WHERE item_id IN ({placeholders}) AND sold_at IS NULL",
                     [now, *gone],
                 )
-                marked = cursor.rowcount
+                await conn.execute(
+                    f"UPDATE sweep_candidates SET sold_at = ? "
+                    f"WHERE item_id IN ({placeholders}) AND sold_at IS NULL",
+                    [now, *gone],
+                )
         return marked
 
     # --- Outbox delivery -----------------------------------------------------------
@@ -1446,10 +1501,11 @@ class Repo:
         await self._db.execute_many(
             "INSERT INTO sweep_candidates (sweep_id, item_id, rank_score, position, stage, "
             "reason, title, url, price, total_price, currency, brand, size, condition, "
-            "photo_url, photo_urls_json, thumb_url, seller_login, promoted) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "photo_url, photo_urls_json, thumb_url, seller_login, seller_id, promoted) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(sweep_id, item_id) DO UPDATE SET rank_score = excluded.rank_score, "
-            "position = excluded.position, stage = excluded.stage, reason = excluded.reason",
+            "position = excluded.position, stage = excluded.stage, reason = excluded.reason, "
+            "seller_id = excluded.seller_id",
             [
                 (
                     sweep_id,
@@ -1470,6 +1526,7 @@ class Repo:
                     json.dumps(candidate.photo_urls),
                     candidate.thumb_url,
                     candidate.seller_login,
+                    candidate.seller_id,
                     int(candidate.promoted),
                 )
                 for position, candidate in enumerate(candidates)
@@ -1655,8 +1712,10 @@ class Repo:
             photo_url=row["photo_url"],
             photo_urls=_json_list(row["photo_urls_json"]) or [],
             seller_login=row["seller_login"],
+            seller_id=row["seller_id"],
             promoted=bool(row["promoted"]),
             thumb_url=row["thumb_url"],
+            sold_at=row["sold_at"],
             # NULL stays None: "never triaged" is not "triaged and rejected".
             matches_target=None if row["matches_target"] is None else bool(row["matches_target"]),
             confidence=row["confidence"],

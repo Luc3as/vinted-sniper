@@ -4,7 +4,8 @@ Vinted's anonymous API never says "sold": a sold or withdrawn listing simply van
 from the seller's public wardrobe, and the two are indistinguishable from outside. So
 liveness is a presence check — read the wardrobe, and anything recorded but no longer
 present (or flagged closed) is gone. One request covers every recorded listing of that
-seller, which is what makes the recheck affordable under the shared per-site budget.
+seller, which is what makes the recheck affordable under the shared per-site budget —
+including the sweep's copies, which live in their own table but on the same wardrobe.
 """
 
 from __future__ import annotations

@@ -740,6 +740,9 @@ def _to_candidate(ranked: RankedItem, position: int) -> SweepCandidate:
         # full-size photo it did not need.
         thumb_url=item.thumb_url,
         seller_login=item.seller_login,
+        # Not shown anywhere, but the liveness recheck reads wardrobes by id: without it
+        # a swept listing can never learn that it has gone.
+        seller_id=item.seller_id,
         promoted=item.promoted,
     )
 

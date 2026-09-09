@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import icon, help, refresh_ring %}
+{% from "_macros.html" import icon, help, refresh_ring, sold_band %}
 {% block title %}vinted-sniper{% endblock %}
 
 {% block header_extra %}
@@ -47,7 +47,7 @@
   </div>
   <div class="listing-grid">
     {% for row in recent %}
-    <article class="listing{% if row.verdict_state %} v-{{ row.verdict_state }}{% endif %}">
+    <article class="listing{% if row.verdict_state %} v-{{ row.verdict_state }}{% endif %}{% if row.gone %} is-gone{% endif %}">
       {% if row.photos %}
       <button type="button" class="photo" data-photos='{{ row.photos | tojson }}'
               aria-label="View {{ row.photos | length }} photo{{ 's' if row.photos | length > 1 }} of {{ row.title }}">
@@ -55,9 +55,10 @@
         {% if row.photos | length > 1 %}
         <span class="count">{{ row.photos | length }} ▣</span>
         {% endif %}
+        {% if row.gone %}{{ sold_band() }}{% endif %}
       </button>
       {% else %}
-      <div class="no-photo">no photo</div>
+      <div class="no-photo">no photo{% if row.gone %}{{ sold_band() }}{% endif %}</div>
       {% endif %}
       <div class="body">
         <a class="title" href="{{ row.url }}" target="_blank" rel="noreferrer"

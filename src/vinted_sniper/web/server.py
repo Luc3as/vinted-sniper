@@ -1263,6 +1263,8 @@ def _sweep_candidate_view(row: SweepCandidate) -> dict[str, Any]:
         "photo_url": row.photo_url,
         "thumb_url": row.thumb_url,
         "seller": row.seller_login,
+        # None until a wardrobe read concluded it had gone; never a guess.
+        "sold_at": row.sold_at,
         "stage": row.stage,
         "position": row.position,
         "rank_score": row.rank_score,
@@ -1382,6 +1384,7 @@ def _sweep_match_view(row: SweepCandidate, keywords: list[str]) -> dict[str, Any
         "title": row.title,
         "url": row.url,
         "photo": row.thumb_url or row.photo_url,
+        "gone": row.sold_at is not None,
         "price": f"{payable:.2f} {currency}".strip() if payable is not None else None,
         "match": round(row.rank_score * 100),
         "title_words": sweep.title_words(row.title, keywords),

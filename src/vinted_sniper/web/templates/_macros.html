@@ -21,3 +21,11 @@
 {% macro refresh_ring(seconds) -%}
 <span class="refresh-ind" data-tip="This page refreshes itself every {{ seconds }} seconds — the ring shows how long until the next one." aria-label="Auto-refreshes every {{ seconds }} seconds"><svg viewBox="0 0 12 12" fill="none" stroke-width="1.6" aria-hidden="true"><circle class="track" cx="6" cy="6" r="4.5"/><circle class="hand" cx="6" cy="6" r="4.5" style="animation-duration:{{ seconds }}s"/></svg></span>
 {%- endmacro %}
+{# The band both grids print across a listing that has left the seller's wardrobe. The
+   word is "sold" because that is what it almost always is and what a glance needs; the
+   hover text carries the honest version, since Vinted's anonymous API cannot tell a sale
+   from a withdrawal. `title` rather than data-tip: the band ignores pointer events so the
+   photo underneath stays clickable, so the tooltip has to sit on the card's own hover. #}
+{% macro sold_band() -%}
+<span class="sold-band" title="This listing has disappeared from the seller's wardrobe — sold or withdrawn, Vinted does not say which."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M20.6 13.4 12 22 2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8Z"/><circle cx="7.5" cy="7.5" r="1.5" fill="currentColor" stroke="none"/></svg>Sold</span>
+{%- endmacro %}
