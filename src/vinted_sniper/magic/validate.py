@@ -57,9 +57,11 @@ def find_catalog(tree: list[dict[str, Any]], catalog_id: int) -> dict[str, Any] 
 async def validate(mapped: MappedQuery, *, tld: str, taxonomy: Taxonomy) -> None:
     """Confirm every id in `mapped` exists on vinted.`tld`. Raise `MappingError` if not.
 
-    Returns nothing on success — this is a gate, not a transform. A field left unset skips
-    its tier: a text-only search with no brand is a perfectly good search. What is *not* a
-    good search is one where every field is unset, so that case is refused first.
+    Returns nothing on success. Almost a pure gate: the one thing it changes is a size id
+    that names a real size of the mapped catalog under another chart's number, which it
+    corrects in place (see `_check_sizes`). A field left unset skips its tier: a text-only
+    search with no brand is a perfectly good search. What is *not* a good search is one
+    where every field is unset, so that case is refused first.
     """
     _check_something_is_filtered(mapped)
 
@@ -167,11 +169,18 @@ async def _brand_rows(
 async def _check_sizes(
     sizes: list[Named], *, catalog_id: int | None, tld: str, taxonomy: Taxonomy
 ) -> None:
-    """Tier 3: the size facet of the mapped catalog.
+    """Tier 3: the size facet of the mapped catalog, repairing an id off the wrong chart.
 
     Sizes are only meaningful inside a category — "M" is a different id for a jacket than
     for a pair of shoes — and the facet endpoint needs a catalog to answer at all, so a
     size without one cannot be confirmed and is refused rather than passed through.
+
+    That per-chart numbering is also something no model can be expected to get right:
+    Vinted has an "L" in every chart it publishes and gives each one its own id, so the
+    mapper naming the size correctly and numbering it from a neighbouring chart is the
+    normal failure, not an invented id. The facet just fetched holds the id that category
+    really uses, keyed by the name the mapper already returns, so a size whose name
+    matches exactly one option is corrected here instead of refused.
     """
     if catalog_id is None:
         named = ", ".join(f"{size.id} ({size.name!r})" for size in sizes)
@@ -186,10 +195,52 @@ async def _check_sizes(
         _unavailable("size", f"could not read the size options for category {catalog_id}: {exc}")
 
     known = {option.get("id") for option in options}
-    unknown = [size for size in sizes if size.id not in known]
+    unknown: list[Named] = []
+    for size in sizes:
+        if size.id in known:
+            continue
+        match = _size_named(options, size.name)
+        if match is None:
+            unknown.append(size)
+            continue
+        log.info(
+            "magic.size_repaired",
+            catalog=catalog_id,
+            name=size.name,
+            was=size.id,
+            now=match["id"],
+            title=match["title"],
+        )
+        size.id = int(match["id"])
+        size.name = str(match["title"])
+
     if unknown:
         named = ", ".join(f"{size.id} ({size.name!r})" for size in unknown)
-        _reject("size", f"category {catalog_id} has no size {named}")
+        titles = ", ".join(str(option.get("title")) for option in options[:_MAX_SUGGESTIONS])
+        detail = f" — it has: {titles}" if titles else ""
+        _reject("size", f"category {catalog_id} has no size {named}{detail}")
+
+
+def _size_named(options: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    """The one option this name means, or None when nothing or several things do.
+
+    A size's title carries every chart it is written in at once — "L/40/12" is one option,
+    not three — so each part is a name the size answers to. Two options answering to the
+    same name means the category carries two charts (a unisex category lists both), and
+    which of them was meant is not something to guess: that is a None, and a rejection.
+    """
+    wanted = name.strip().casefold()
+    if not wanted:
+        return None
+    matches = [option for option in options if wanted in _size_aliases(option)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _size_aliases(option: dict[str, Any]) -> set[str]:
+    title = str(option.get("title", ""))
+    return {part.strip().casefold() for part in title.split("/") if part.strip()} | {
+        title.strip().casefold()
+    }
 
 
 def _reject(tier: str, message: str) -> NoReturn:

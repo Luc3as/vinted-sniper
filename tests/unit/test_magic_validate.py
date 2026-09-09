@@ -438,3 +438,57 @@ async def test_a_filterless_mapping_is_not_reported_as_an_unreachable_vinted(
         await validate(MappedQuery.model_validate({"nonsense": True}), tld="fr", taxonomy=taxonomy)
 
     assert not isinstance(caught.value, TaxonomyUnavailableError)
+
+
+async def test_a_size_named_right_but_numbered_from_another_chart_is_repaired(
+    taxonomy: Taxonomy, transport: ScriptedTransport, repo: Repo, clock: Clock
+) -> None:
+    """Vinted numbers "L" once per size chart, so the mapper cannot know which id to send.
+
+    The real rejection this covers: a women's jacket search came back with 209, the "L" of
+    the men's chart, while catalog 1908 calls its "L" 5. The name was right, and the name
+    is what the facet can be read by.
+    """
+    await cache_tree(repo, clock)
+    queue_bootstrap(transport)
+    queue_page(transport, flight_page())
+    queue_json(
+        transport,
+        {"options": [{"id": 4, "title": "M/38/10"}, {"id": 5, "title": "L/40/12"}]},
+    )
+
+    mapped = mapping(
+        catalog={"id": 2052, "name": "Jackets & Coats"},
+        sizes=[{"id": 209, "name": "L"}],
+    )
+    await validate(mapped, tld="fr", taxonomy=taxonomy)
+
+    assert [size.id for size in mapped.sizes] == [5]
+    assert mapped.to_params()["size_ids"] == "5"
+
+
+async def test_a_size_that_matches_two_charts_is_refused_rather_than_guessed(
+    taxonomy: Taxonomy, transport: ScriptedTransport, repo: Repo, clock: Clock
+) -> None:
+    await cache_tree(repo, clock)
+    queue_bootstrap(transport)
+    queue_page(transport, flight_page())
+    queue_json(
+        transport,
+        {
+            "options": [
+                {"id": 5, "title": "L", "group": "Women"},
+                {"id": 209, "title": "L", "group": "Men"},
+            ]
+        },
+    )
+
+    with pytest.raises(MappingError, match="777"):
+        await validate(
+            mapping(
+                catalog={"id": 2052, "name": "Jackets & Coats"},
+                sizes=[{"id": 777, "name": "L"}],
+            ),
+            tld="fr",
+            taxonomy=taxonomy,
+        )
