@@ -20,6 +20,7 @@ and every extra moving part is another thing that can be broken at three in the 
                   dispatcher ──▶ Discord · Telegram · ntfy · your webhook
 
    watchdog    reads state across searches, spots a frozen catalog
+   liveness    rereads sellers' wardrobes, marks listings that vanished
    heartbeat   writes a timestamp the health check reads
    web         dashboard over the same database, on by default
 ```
@@ -40,8 +41,9 @@ autocomplete and filter options through live.
 
 **`engine/`** decides what to do with the results. `filters.py` applies your rules,
 `dedup.py` works out what is genuinely new, `poller.py` runs the loop and maps failures to
-actions, `watchdog.py` compares searches against each other, `health.py` assembles the status
-view.
+actions, `watchdog.py` compares searches against each other, `liveness.py` rereads sellers'
+wardrobes every ~6 hours and marks recorded listings that vanished from them, `health.py`
+assembles the status view.
 
 **`deliver/`** gets notifications out. Workers in `dispatcher.py` claim work from the
 database's outbox table in order, one destination at a time, through a token bucket in
@@ -146,6 +148,7 @@ nepotrebuje a každá ďalšia pohyblivá časť je ďalšia vec, ktorá sa mô�
                   dispatcher ──▶ Discord · Telegram · ntfy · tvoj webhook
 
    watchdog    číta stav naprieč vyhľadávaniami, odhalí zamrznutý katalóg
+   liveness    znovu číta šatníky predajcov, označí zmiznuté inzeráty
    heartbeat   zapisuje časovú pečiatku, ktorú číta health check
    web         dashboard nad tou istou databázou, zapnutý predvolene
 ```
@@ -166,7 +169,9 @@ naživo.
 
 **`engine/`** rozhoduje, čo s výsledkami. `filters.py` aplikuje tvoje pravidlá, `dedup.py`
 zisťuje, čo je naozaj nové, `poller.py` beží slučku a mapuje zlyhania na akcie, `watchdog.py`
-porovnáva vyhľadávania medzi sebou, `health.py` skladá stavový pohľad.
+porovnáva vyhľadávania medzi sebou, `liveness.py` každých ~6 hodín znovu číta šatníky
+predajcov a označí zaznamenané inzeráty, ktoré z nich zmizli, `health.py` skladá stavový
+pohľad.
 
 **`deliver/`** dostáva notifikácie von. Workery v `dispatcher.py` vyzdvihujú prácu z outbox
 tabuľky v databáze v poradí, jeden cieľ naraz, cez token bucket v `ratelimit.py`. Každý kanál

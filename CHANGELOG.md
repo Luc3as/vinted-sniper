@@ -34,6 +34,13 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 - The watchdog could crash, or rotate a session into a site that was already holding us off.
 
 ### Added
+- **Sold listings are struck through.** A recheck reads each seller's public wardrobe about
+  every six hours; anything recorded that is no longer there — or is flagged closed — gets a
+  red band across its photo reading **Sold**, on `/` and on a sweep's results. Vinted's
+  anonymous API cannot tell a sale from a withdrawal, so the band's hover text says which of
+  the two it actually knows. One wardrobe read settles both the watched listings and any
+  swept ones by the same seller, so the badge costs no extra requests against the per-site
+  budget. Swept sellers stop being rechecked after 30 days — a sweep is one-shot.
 - **Found page**: `/` now shows what turned up — listing photo cards with full galleries,
   the total price leading (the asking price as a muted "+ fee" footnote), a text filter,
   drops-only, and Show more. Searches, destinations and export moved to `/searches`.
@@ -85,7 +92,9 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 - Rate-limit primitives moved to `vinted_sniper.ratelimit`; `deliver.ratelimit` re-exports.
 
 ### Database
-Migrations 0004–0012: search filter columns, destination quiet hours, outbox rebuilt twice
+Migrations 0004–0017: search filter columns, destination quiet hours, outbox rebuilt twice
 (notification kinds, previous price), item enrichment columns, market memory and buyer
-feedback, market percentiles on notifications, destination language. Applied automatically
-at startup; all additive, existing rows behave as before.
+feedback, market percentiles on notifications, destination language, the sweep tables, and
+sold-status columns on both `items` (0016) and `sweep_candidates` (0017, which also stores
+the seller id a wardrobe recheck is addressed by). Applied automatically at startup; all
+additive, existing rows behave as before.
