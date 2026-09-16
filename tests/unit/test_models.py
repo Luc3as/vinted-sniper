@@ -155,6 +155,14 @@ def test_url_is_derived_when_the_payload_omits_it() -> None:
     assert parse_item(entry, "de").url == "https://www.vinted.de/items/9683334896"
 
 
+def test_a_relative_url_from_svc_catalogue_gains_the_country_host() -> None:
+    """The svc-catalogue payload sends '/items/…' — a link without a host is useless
+    everywhere downstream (Telegram rejects the whole keyboard over it)."""
+    entry = catalog_entry(url="/items/9683334896-nike-air")
+
+    assert parse_item(entry, "sk").url == "https://www.vinted.sk/items/9683334896-nike-air"
+
+
 def test_raw_payload_is_only_kept_when_asked_for() -> None:
     assert parse_item(catalog_entry(), "fr").raw is None
     assert parse_item(catalog_entry(), "fr", keep_raw=True).raw is not None

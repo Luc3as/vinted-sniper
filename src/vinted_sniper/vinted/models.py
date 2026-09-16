@@ -170,6 +170,9 @@ def parse_item(payload: dict[str, Any], tld: str, *, keep_raw: bool = False) -> 
         user = {}
 
     url = _first(payload, "url") or urls.item_url(tld, item_id)
+    # svc-catalogue sends the path alone; a link without a host breaks every consumer.
+    if isinstance(url, str) and url.startswith("/"):
+        url = f"https://www.vinted.{tld}{url}"
 
     size = _text(_first(payload, "size_title", "size.title"))
     condition = _text(_first(payload, "status", "condition"))
