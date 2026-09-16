@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Final
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from vinted_sniper import i18n
 from vinted_sniper.i18n import Translator
-from vinted_sniper.vinted import urls
+from vinted_sniper.vinted import slovak, urls
 
 # The width we want out of the thumbnail array. Vinted's ~310x430 variant is what the
 # AI cost model prices against, so the selector aims at it and takes the nearest match.
@@ -178,8 +178,12 @@ def parse_item(payload: dict[str, Any], tld: str, *, keep_raw: bool = False) -> 
     condition = _text(_first(payload, "status", "condition"))
     if size is None and condition is None:
         size, condition = _box_size_condition(payload)
+    # svc-catalogue answers in French whatever the session's locale; the site itself
+    # translates client-side, so the parser does the same for the closed vocabularies.
+    if size is not None:
+        size = slovak.size_label(size)
     if condition is not None:
-        condition = _CONDITIONS_BY_FRENCH.get(condition, condition)
+        condition = slovak.condition(condition)
 
     return Item(
         item_id=item_id,
@@ -206,20 +210,6 @@ def parse_item(payload: dict[str, Any], tld: str, *, keep_raw: bool = False) -> 
         summary=_text(_first(payload, "item_box.accessibility_label")),
         raw=payload if keep_raw else None,
     )
-
-
-# svc-catalogue (2026-09) answers in French for every session this app can mint —
-# cookies, Accept-Language and the anon id all leave it unmoved; the site itself
-# translates client-side. The five conditions are a closed set, so they are said in
-# Slovak here, the language the rest of the stored items already speak. Anything the
-# map does not know passes through untouched.
-_CONDITIONS_BY_FRENCH: Final[dict[str, str]] = {
-    "Neuf avec étiquette": "Nové s visačkou",
-    "Neuf sans étiquette": "Nové bez visačky",
-    "Très bon état": "Veľmi dobré",
-    "Bon état": "Dobré",
-    "Satisfaisant": "Uspokojivé",
-}
 
 
 def _box_size_condition(payload: dict[str, Any]) -> tuple[str | None, str | None]:

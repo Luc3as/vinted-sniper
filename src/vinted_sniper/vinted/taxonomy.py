@@ -21,7 +21,7 @@ from typing import Any, Final
 from vinted_sniper.db.repo import Repo
 from vinted_sniper.log import get_logger
 from vinted_sniper.vinted import headers as hdr
-from vinted_sniper.vinted import urls
+from vinted_sniper.vinted import slovak, urls
 from vinted_sniper.vinted.client import raise_for_status
 from vinted_sniper.vinted.errors import MalformedResponseError, NetworkError
 from vinted_sniper.vinted.session import SessionManager
@@ -269,7 +269,17 @@ class Taxonomy:
             params["attribute_ids[catalog]"] = catalog_ids
         payload = await self._api_get(tld, urls.filters_facets_endpoint(tld), params)
         raw = payload.get("options") if isinstance(payload, dict) else None
-        return flatten_options(raw or [])
+        options = flatten_options(raw or [])
+        # svc-filters answers in French whatever the session's locale — the site's own
+        # frontend translates client-side, so the picker does the same here.
+        for option in options:
+            if code == "size":
+                option["title"] = slovak.size_label(option["title"])
+                if "group" in option:
+                    option["group"] = slovak.size_group(option["group"])
+            else:
+                option["title"] = slovak.facet_title(code, option["id"], option["title"])
+        return options
 
     # --- Shared request path ---------------------------------------------------------
 

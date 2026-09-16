@@ -198,7 +198,9 @@ async def test_facet_options_come_from_svc_filters_in_its_own_dialect(
 
     options = await taxonomy.facet_options("fr", "status", "1242")
 
-    assert options == [{"id": 6, "title": "New", "count": 3}]
+    # svc-filters answers in French whatever the session's locale; option ids are a
+    # closed set, so the picker says them in Slovak regardless of the wire title.
+    assert options == [{"id": 6, "title": "Nové s visačkou", "count": 3}]
     api_request = transport.requests[-1]
     assert "/svc-filters/filters/facets" in api_request["url"]
     assert api_request["params"] == {"filter_code": "status", "attribute_ids[catalog]": "1242"}
@@ -223,9 +225,46 @@ async def test_a_401_gets_one_fresh_session_and_one_retry(
 
     options = await taxonomy.facet_options("fr", "color")
 
-    assert options == [{"id": 1, "title": "Black"}]
+    assert options == [{"id": 1, "title": "Čierna"}]
     facet_calls = [r for r in transport.requests if "filters/facets" in r["url"]]
     assert len(facet_calls) == 2
+
+
+async def test_size_options_and_their_charts_read_in_slovak(
+    taxonomy: Taxonomy, transport: ScriptedTransport
+) -> None:
+    """Sizes have no title map — most are numbers — but the French phrases and the
+    French size-chart group names still need saying in Slovak."""
+    queue_bootstrap(transport)
+    transport.queue(
+        Response(
+            status_code=200,
+            text=json.dumps(
+                {
+                    "filter_code": "size",
+                    "options": [
+                        {
+                            "id": "chart",
+                            "title": "Soutiens-gorge",
+                            "options": [
+                                {"id": "90", "title": "Taille unique"},
+                                {"id": "776", "title": "38"},
+                            ],
+                        }
+                    ],
+                }
+            ),
+            headers={},
+            cookies={},
+        )
+    )
+
+    options = await taxonomy.facet_options("fr", "size")
+
+    assert options == [
+        {"id": 90, "title": "Univerzálna", "group": "Podprsenky"},
+        {"id": 776, "title": "38", "group": "Podprsenky"},
+    ]
 
 
 async def test_an_unknown_facet_is_refused_locally(taxonomy: Taxonomy) -> None:

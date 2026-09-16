@@ -301,3 +301,17 @@ def test_a_condition_the_map_does_not_know_passes_through_untouched() -> None:
     item = parse_item(catalog_entry(status="Brand new in box"), "sk")
 
     assert item.condition == "Brand new in box"
+
+
+def test_a_french_child_size_reads_in_slovak() -> None:
+    """Kid sizes come as "10 ans / 140 cm" — French, straight into the alert's size
+    line, so the parser says them in Slovak like the site does."""
+    entry = catalog_entry()
+    for gone in ("brand_title", "size_title", "status"):
+        del entry[gone]
+    entry["item_box"] = {"first_line": "Next", "second_line": "10 ans / 140 cm · Bon état"}
+
+    item = parse_item(entry, "sk")
+
+    assert item.size == "10 rokov / 140 cm"
+    assert item.condition == "Dobré"
