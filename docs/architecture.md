@@ -35,9 +35,9 @@ browser would, stores it so a restart does not need a new handshake, and replace
 timer. `client.py` makes the one request this app makes and refuses to believe a 200 is a
 catalog until it has checked. `urls.py` turns a pasted address-bar URL into a canonical form
 plus API parameters. `taxonomy.py` feeds the dashboard's search builder: it mines the
-category tree and CSRF token out of the search page's HTML (the JSON endpoints that used to
-serve the tree are gone), caches the tree in the database for a week, and passes brand
-autocomplete and filter options through live.
+category tree out of the search page's HTML (the JSON endpoints that used to serve the
+tree are gone), caches the tree in the database for a week, and passes brand autocomplete
+and filter options through live from the svc-filters service.
 
 **`engine/`** decides what to do with the results. `filters.py` applies your rules,
 `dedup.py` works out what is genuinely new, `poller.py` runs the loop and maps failures to
@@ -162,10 +162,10 @@ prehliadača, keď ho zapneš, alebo replay-z-disku transport pre testy a offlin
 prehliadač, uloží ju, aby reštart nepotreboval nový handshake, a na časovači ju obmieňa.
 `client.py` robí ten jediný request, ktorý táto appka robí, a odmieta veriť, že 200 je
 katalóg, kým si to neoverí. `urls.py` premení URL z adresného riadku na kanonickú formu plus
-API parametre. `taxonomy.py` kŕmi builder vyhľadávaní v dashboarde: vyťaží strom kategórií a
-CSRF token z HTML stránky vyhľadávania (JSON endpointy, ktoré strom kedysi servírovali, už
-neexistujú), strom cachuje v databáze na týždeň a brand autocomplete s filtrami preposiela
-naživo.
+API parametre. `taxonomy.py` kŕmi builder vyhľadávaní v dashboarde: vyťaží strom kategórií
+z HTML stránky vyhľadávania (JSON endpointy, ktoré strom kedysi servírovali, už neexistujú),
+strom cachuje v databáze na týždeň a brand autocomplete s filtrami preposiela naživo zo
+služby svc-filters.
 
 **`engine/`** rozhoduje, čo s výsledkami. `filters.py` aplikuje tvoje pravidlá, `dedup.py`
 zisťuje, čo je naozaj nové, `poller.py` beží slučku a mapuje zlyhania na akcie, `watchdog.py`

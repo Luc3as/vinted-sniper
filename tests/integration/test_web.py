@@ -371,7 +371,7 @@ def test_brands_pass_through_with_ids_and_counts(
     transport.queue(
         Response(
             status_code=200,
-            text=json.dumps({"brands": [{"id": 53, "title": "Nike", "item_count": 9}]}),
+            text=json.dumps({"options": [{"id": "53", "title": "Nike", "items_count": 9}]}),
             headers={},
             cookies={},
         )
@@ -393,7 +393,7 @@ def test_junk_in_catalog_ids_never_reaches_vinted(
 
     builder_client.get("/api/filters/fr/brands?q=nike&catalog_ids=12,drop%20table,34")
 
-    assert transport.requests[-1]["params"]["catalog_ids"] == "12,34"
+    assert transport.requests[-1]["params"]["attribute_ids[catalog]"] == "12,34"
 
 
 def test_an_unknown_facet_is_a_404(builder_client: TestClient) -> None:

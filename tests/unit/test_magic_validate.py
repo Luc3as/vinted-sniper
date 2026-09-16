@@ -146,7 +146,9 @@ async def test_a_mapping_whose_ids_all_exist_passes(
     )
 
     scoped = [r for r in transport.requests if "filters/search" in r["url"]]
-    assert scoped[0]["params"]["catalog_ids"] == "2052", "the brand lookup is scoped to the catalog"
+    assert scoped[0]["params"]["attribute_ids[catalog]"] == "2052", (
+        "the brand lookup is scoped to the catalog"
+    )
 
 
 async def test_a_search_with_no_ids_at_all_asks_vinted_nothing(
@@ -221,9 +223,8 @@ async def test_an_empty_scoped_brand_lookup_falls_back_to_the_global_endpoint(
 ) -> None:
     await cache_tree(repo, clock)
     queue_bootstrap(transport)
-    queue_page(transport, flight_page())
     queue_json(transport, {"options": []})
-    queue_json(transport, {"brands": [{"id": 90804, "title": "Patagonia", "item_count": 4}]})
+    queue_json(transport, {"options": [{"id": 90804, "title": "Patagonia"}]})
 
     await validate(
         mapping(
@@ -234,9 +235,10 @@ async def test_an_empty_scoped_brand_lookup_falls_back_to_the_global_endpoint(
         taxonomy=taxonomy,
     )
 
-    urls = [r["url"] for r in transport.requests]
-    assert any("filters/search" in url for url in urls), "the scoped lookup ran first"
-    assert any("/api/v2/brands" in url for url in urls), "the global one ran after it was empty"
+    lookups = [r["params"] for r in transport.requests if "filters/search" in r["url"]]
+    assert len(lookups) == 2
+    assert lookups[0].get("attribute_ids[catalog]") == "2052", "the scoped lookup ran first"
+    assert "attribute_ids[catalog]" not in lookups[1], "the global one ran after it was empty"
 
 
 # --- Tier 3: the sizes ----------------------------------------------------------------

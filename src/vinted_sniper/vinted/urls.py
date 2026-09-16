@@ -201,19 +201,20 @@ def catalog_api_params(params: dict[str, str]) -> dict[str, str]:
     return translated
 
 
-def brands_endpoint(tld: str) -> str:
-    """Brand autocomplete, the same one the site's search box uses."""
-    return f"https://www.vinted.{tld}/api/v2/brands"
-
-
 def filters_search_endpoint(tld: str) -> str:
-    """Search within one filter's options — e.g. brands that exist in a category."""
-    return f"https://www.vinted.{tld}/api/v2/catalog/filters/search"
+    """Search within one filter's options — e.g. brand autocomplete.
+
+    The picker's data moved with the catalog: /api/v2/catalog/filters/* and
+    /api/v2/brands all answer 403 since ~2026-09-16, and the site's frontend asks
+    the svc-filters service instead. Category scoping travels as
+    `attribute_ids[catalog]`, the same dialect as `catalog_api_params()`.
+    """
+    return f"https://api.vinted.{tld}/svc-filters/filters/search"
 
 
 def filters_facets_endpoint(tld: str) -> str:
     """The options of one filter (condition, colour, size…), scoped to a category."""
-    return f"https://www.vinted.{tld}/api/v2/catalog/filters/facets"
+    return f"https://api.vinted.{tld}/svc-filters/filters/facets"
 
 
 def user_endpoint(tld: str, user_id: int) -> str:

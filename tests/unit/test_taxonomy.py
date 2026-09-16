@@ -1,4 +1,4 @@
-"""The advanced-search data layer: page mining, caching, and the CSRF dance."""
+"""The advanced-search data layer: page mining, caching, and the svc-filters lookups."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from vinted_sniper.vinted.taxonomy import (
     Taxonomy,
     compact_tree,
     extract_catalog_tree,
-    extract_csrf,
     flatten_options,
 )
 from vinted_sniper.vinted.transport import Response
@@ -78,12 +77,6 @@ def test_a_truncated_tree_is_refused_rather_than_half_parsed() -> None:
 
     with pytest.raises(MalformedResponseError):
         extract_catalog_tree(cut)
-
-
-def test_the_csrf_token_is_found_in_flight_data_and_meta_tags() -> None:
-    assert extract_csrf(flight_page(csrf="11112222-3333-4444")) == "11112222-3333-4444"
-    assert extract_csrf('<meta name="csrf-token" content="tok"/>') == "tok"
-    assert extract_csrf("<html>nothing</html>") is None
 
 
 def test_compacting_keeps_only_what_the_picker_needs() -> None:
@@ -183,16 +176,20 @@ async def test_the_cached_tree_expires_and_is_refetched(
     assert tree == [{"id": 1, "title": "Everything", "children": []}]
 
 
-async def test_facet_requests_carry_the_csrf_token_from_the_page(
+async def test_facet_options_come_from_svc_filters_in_its_own_dialect(
     taxonomy: Taxonomy, transport: ScriptedTransport
 ) -> None:
+    """The retired /api/v2 filter endpoints wanted a CSRF token mined from the page;
+    svc-filters wants neither the token nor the page — ids travel as attribute_ids."""
     queue_bootstrap(transport)
-    queue_page(transport, flight_page(csrf="csrf-from-the-page"))
     transport.queue(
         Response(
             status_code=200,
             text=json.dumps(
-                {"filter_code": "status", "options": [{"id": 6, "title": "New", "items_count": 3}]}
+                {
+                    "filter_code": "status",
+                    "options": [{"id": "6", "title": "New", "items_count": 3}],
+                }
             ),
             headers={},
             cookies={},
@@ -203,19 +200,18 @@ async def test_facet_requests_carry_the_csrf_token_from_the_page(
 
     assert options == [{"id": 6, "title": "New", "count": 3}]
     api_request = transport.requests[-1]
-    assert api_request["headers"]["X-Csrf-Token"] == "csrf-from-the-page"
-    assert api_request["params"] == {"filter_code": "status", "catalog_ids": "1242"}
+    assert "/svc-filters/filters/facets" in api_request["url"]
+    assert api_request["params"] == {"filter_code": "status", "attribute_ids[catalog]": "1242"}
+    assert "X-Csrf-Token" not in api_request["headers"]
 
 
 async def test_a_401_gets_one_fresh_session_and_one_retry(
     taxonomy: Taxonomy, transport: ScriptedTransport
 ) -> None:
     queue_bootstrap(transport)
-    queue_page(transport, flight_page(csrf="stale"))
     transport.queue_status(401, json.dumps({"code": 100, "message": "expired"}))
-    # The retry starts from scratch: new session, new page read, new token.
+    # The retry starts from scratch: a new session on a fresh handshake.
     queue_bootstrap(transport)
-    queue_page(transport, flight_page(csrf="fresh"))
     transport.queue(
         Response(
             status_code=200,
@@ -230,7 +226,6 @@ async def test_a_401_gets_one_fresh_session_and_one_retry(
     assert options == [{"id": 1, "title": "Black"}]
     facet_calls = [r for r in transport.requests if "filters/facets" in r["url"]]
     assert len(facet_calls) == 2
-    assert facet_calls[-1]["headers"]["X-Csrf-Token"] == "fresh"
 
 
 async def test_an_unknown_facet_is_refused_locally(taxonomy: Taxonomy) -> None:
@@ -238,15 +233,16 @@ async def test_an_unknown_facet_is_refused_locally(taxonomy: Taxonomy) -> None:
         await taxonomy.facet_options("fr", "shoe_smell")
 
 
-async def test_brand_search_without_a_category_uses_the_global_endpoint(
+async def test_brand_search_uses_svc_filters(
     taxonomy: Taxonomy, transport: ScriptedTransport
 ) -> None:
+    """/api/v2/brands answers 403 since ~2026-09-16; global and category-scoped
+    autocomplete both go through svc-filters' search now."""
+    queue_bootstrap(transport)
     transport.queue(
         Response(
             status_code=200,
-            text=json.dumps(
-                {"brands": [{"id": 53, "title": "Nike", "item_count": 9, "slug": "nike"}]}
-            ),
+            text=json.dumps({"options": [{"id": "53", "title": "Nike", "type": "default"}]}),
             headers={},
             cookies={},
         )
@@ -254,17 +250,16 @@ async def test_brand_search_without_a_category_uses_the_global_endpoint(
 
     brands = await taxonomy.brands("fr", "nik")
 
-    assert brands == [{"id": 53, "title": "Nike", "count": 9}]
+    assert brands == [{"id": 53, "title": "Nike"}]
     request = transport.requests[-1]
-    assert "/api/v2/brands" in request["url"]
-    assert request["params"] == {"keyword": "nik"}
+    assert "/svc-filters/filters/search" in request["url"]
+    assert request["params"] == {"filter_search_code": "brand", "filter_search_text": "nik"}
 
 
-async def test_brand_search_within_a_category_uses_the_scoped_endpoint(
+async def test_brand_search_within_a_category_is_scoped_by_attribute_ids(
     taxonomy: Taxonomy, transport: ScriptedTransport
 ) -> None:
     queue_bootstrap(transport)
-    queue_page(transport, flight_page())
     transport.queue(
         Response(
             status_code=200,
@@ -278,10 +273,9 @@ async def test_brand_search_within_a_category_uses_the_scoped_endpoint(
 
     assert brands == [{"id": 53, "title": "Nike"}]
     request = transport.requests[-1]
-    assert "/api/v2/catalog/filters/search" in request["url"]
+    assert "/svc-filters/filters/search" in request["url"]
     assert request["params"]["filter_search_text"] == "nik"
-    assert request["params"]["catalog_ids"] == "1242"
-    assert "X-Csrf-Token" in request["headers"]
+    assert request["params"]["attribute_ids[catalog]"] == "1242"
 
 
 async def test_a_blank_brand_query_asks_vinted_nothing(

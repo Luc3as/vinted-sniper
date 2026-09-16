@@ -157,6 +157,14 @@ def test_the_catalog_endpoint_is_the_svc_catalogue_service() -> None:
     assert urls.catalog_endpoint("fr") == "https://api.vinted.fr/svc-catalogue/items"
 
 
+def test_the_filter_endpoints_are_the_svc_filters_service() -> None:
+    """The picker's data moved with the catalog: /api/v2/catalog/filters/* and
+    /api/v2/brands all answer 403 since ~2026-09-16, and the site's frontend now asks
+    the svc-filters service on the api. subdomain instead."""
+    assert urls.filters_facets_endpoint("sk") == "https://api.vinted.sk/svc-filters/filters/facets"
+    assert urls.filters_search_endpoint("fr") == "https://api.vinted.fr/svc-filters/filters/search"
+
+
 def test_filter_ids_are_folded_into_attribute_ids_for_svc_catalogue() -> None:
     """svc-catalogue accepts the old /api/v2 filter names without error and ignores them
     entirely (verified live 2026-09-16: identical result sets with and without
