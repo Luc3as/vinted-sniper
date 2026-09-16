@@ -46,7 +46,7 @@ def test_a_full_entry_parses() -> None:
     assert item.title == "Nike Air"
     assert item.brand == "Nike Air"
     assert item.size == "38.5"
-    assert item.condition == "Bon état"
+    assert item.condition == "Dobré"
     assert item.price == Decimal("15.0")
     assert item.total_price == Decimal("16.45")
     assert item.currency == "EUR"
@@ -263,7 +263,7 @@ def test_svc_catalogue_entries_recover_brand_size_and_condition_from_the_item_bo
 
     assert item.brand == "Nike"
     assert item.size == "40"
-    assert item.condition == "Très bon état"
+    assert item.condition == "Veľmi dobré"
 
 
 def test_an_item_box_without_a_size_reads_as_condition_only() -> None:
@@ -275,4 +275,29 @@ def test_an_item_box_without_a_size_reads_as_condition_only() -> None:
     item = parse_item(entry, "fr")
 
     assert item.size is None
-    assert item.condition == "Très bon état"
+    assert item.condition == "Veľmi dobré"
+
+
+@pytest.mark.parametrize(
+    ("french", "slovak"),
+    [
+        ("Neuf avec étiquette", "Nové s visačkou"),
+        ("Neuf sans étiquette", "Nové bez visačky"),
+        ("Très bon état", "Veľmi dobré"),
+        ("Bon état", "Dobré"),
+        ("Satisfaisant", "Uspokojivé"),
+    ],
+)
+def test_every_french_condition_reads_in_slovak(french: str, slovak: str) -> None:
+    """svc-catalogue answers in French no matter what locale the session asks for; the
+    five conditions are a closed set, so the parser says them the way the rest of the
+    database already does."""
+    item = parse_item(catalog_entry(status=french), "sk")
+
+    assert item.condition == slovak
+
+
+def test_a_condition_the_map_does_not_know_passes_through_untouched() -> None:
+    item = parse_item(catalog_entry(status="Brand new in box"), "sk")
+
+    assert item.condition == "Brand new in box"
