@@ -100,7 +100,7 @@ class VintedClient:
         """
         session = await self._sessions.get(tld)
         transport = self._transport or self._sessions.transport_for(session)
-        query = dict(params)
+        query = urls.catalog_api_params(params)
         query["per_page"] = str(PER_PAGE)
         query["time"] = str(int(time.time()) - self._rng.randint(*_TIME_SKEW_RANGE_S))
 

@@ -155,3 +155,36 @@ def test_the_catalog_endpoint_is_the_svc_catalogue_service() -> None:
     frontend now calls the svc-catalogue service on the api. subdomain."""
     assert urls.catalog_endpoint("sk") == "https://api.vinted.sk/svc-catalogue/items"
     assert urls.catalog_endpoint("fr") == "https://api.vinted.fr/svc-catalogue/items"
+
+
+def test_filter_ids_are_folded_into_attribute_ids_for_svc_catalogue() -> None:
+    """svc-catalogue accepts the old /api/v2 filter names without error and ignores them
+    entirely (verified live 2026-09-16: identical result sets with and without
+    brand_ids). What it filters on is `attribute_ids[<facet>]`, comma-joined — repeating
+    the key is a 400 — so the wire params must speak that dialect."""
+    params = {
+        "search_text": "mikina",
+        "order": "newest_first",
+        "price_to": "80",
+        "brand_ids": "209084,563992",
+        "size_ids": "208,209",
+        "status_ids": "2,1,6",
+        "catalog_ids": "2050",
+        "color_ids": "22",
+        "material_ids": "44",
+    }
+
+    sent = urls.catalog_api_params(params)
+
+    assert sent["attribute_ids[brand]"] == "209084,563992"
+    assert sent["attribute_ids[size]"] == "208,209"
+    assert sent["attribute_ids[status]"] == "2,1,6"
+    assert sent["attribute_ids[catalog]"] == "2050"
+    assert sent["attribute_ids[color]"] == "22"
+    assert sent["attribute_ids[material]"] == "44"
+    for dead in ("brand_ids", "size_ids", "status_ids", "catalog_ids"):
+        assert dead not in sent, f"{dead} would be silently ignored by svc-catalogue"
+    # Scalars still work server-side (price_to verified live) and pass through as-is.
+    assert sent["search_text"] == "mikina"
+    assert sent["order"] == "newest_first"
+    assert sent["price_to"] == "80"

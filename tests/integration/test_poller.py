@@ -92,6 +92,42 @@ def poller_for(
     return poller, work
 
 
+async def test_the_catalog_request_speaks_svc_catalogues_filter_dialect(
+    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
+) -> None:
+    """svc-catalogue silently ignores the old /api/v2 filter names (verified live
+    2026-09-16: 48 identical results with and without brand_ids), which is how a
+    brand-and-size-filtered search flooded 48 off-brand alerts. The filters only work
+    when sent as `attribute_ids[<facet>]`."""
+    query_id = await repo.add_query(
+        name="filtered search",
+        url="https://www.vinted.fr/catalog?search_text=mikina&brand_ids[]=209084",
+        tld="fr",
+        params={
+            "search_text": "mikina",
+            "order": "newest_first",
+            "brand_ids": "209084",
+            "size_ids": "208,209",
+        },
+        poll_interval_s=60,
+    )
+    query = await repo.get_query(query_id)
+    assert query is not None
+    poller, _ = poller_for(query, transport, repo, settings, db=db)
+    transport.queue_catalog([])
+
+    await poller.tick()
+
+    catalog_requests = [r for r in transport.requests if "/svc-catalogue/" in r["url"]]
+    assert catalog_requests, "the check never reached the catalog"
+    sent = catalog_requests[0]["params"]
+    assert sent["attribute_ids[brand]"] == "209084"
+    assert sent["attribute_ids[size]"] == "208,209"
+    assert "brand_ids" not in sent, "svc-catalogue ignores this name silently"
+    assert "size_ids" not in sent, "svc-catalogue ignores this name silently"
+    assert sent["search_text"] == "mikina"
+
+
 async def test_empty_results_are_a_success_not_a_failure(
     transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
 ) -> None:

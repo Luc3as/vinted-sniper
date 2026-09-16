@@ -166,8 +166,39 @@ def build_search_url(tld: str, params: dict[str, str]) -> str:
 def catalog_endpoint(tld: str) -> str:
     """The catalog search service. Vinted retired /api/v2/catalog/items (an HTML 404
     since ~2026-09-16); the frontend now calls svc-catalogue on the api. subdomain,
-    with the same query parameters and the same response shape."""
+    with the same response shape but its own filter dialect (`catalog_api_params()`)."""
     return f"https://api.vinted.{tld}/svc-catalogue/items"
+
+
+# The facets svc-catalogue folds ids under. Stored searches keep the /api/v2 names —
+# they round-trip through `parse_search_params()` and `build_search_url()` — and are
+# translated at the wire, so nothing saved in the database had to change.
+_ATTRIBUTE_FACETS: Final[dict[str, str]] = {
+    "catalog_ids": "catalog",
+    "brand_ids": "brand",
+    "size_ids": "size",
+    "status_ids": "status",
+    "color_ids": "color",
+    "material_ids": "material",
+}
+
+
+def catalog_api_params(params: dict[str, str]) -> dict[str, str]:
+    """A stored search's params, said the way svc-catalogue filters.
+
+    The old endpoint filtered on `brand_ids=…&size_ids=…`; svc-catalogue accepts those
+    names without complaint and ignores them entirely (verified live 2026-09-16 —
+    identical result sets with and without). It filters on `attribute_ids[<facet>]`,
+    comma-joined; repeating the key instead is a 400. Scalars — search_text, price_to,
+    order and friends — still work under their old names and pass through unchanged.
+    """
+    translated: dict[str, str] = {}
+    for key, value in params.items():
+        if facet := _ATTRIBUTE_FACETS.get(key):
+            translated[f"attribute_ids[{facet}]"] = value
+        else:
+            translated[key] = value
+    return translated
 
 
 def brands_endpoint(tld: str) -> str:
