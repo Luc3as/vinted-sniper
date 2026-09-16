@@ -82,13 +82,14 @@ def test_no_keywords_means_no_gate_so_every_candidate_is_a_baseline_hit() -> Non
 def test_an_accented_title_answers_exactly_as_the_filter_gate_does() -> None:
     """The extraction and the gate cannot drift, because there is one implementation.
 
-    `score_title` folds accents, the gate does not. "Kurtká" is a keyword miss for the
-    gate and would be a match for the ranker — this asserts the baseline follows the gate.
+    Since the svc-catalogue migration the gate folds accents just as `score_title`
+    always has: "Kurtká" now satisfies the keyword "kurtka" for both, and this asserts
+    the baseline follows the gate through that change.
     """
     title = "Patagonia Kurtká Torrentshell"
 
-    assert baseline_title_hits([candidate(3, title)], ["kurtka"]) == []
-    assert filters.missing_keyword_in_title(title, ["kurtka"]) == "kurtka"
+    assert baseline_title_hits([candidate(3, title)], ["kurtka"]) == [candidate(3, title)]
+    assert filters.missing_keyword_in_title(title, ["kurtka"]) is None
     assert sweep.score_title(title, ["kurtka"]) == 1.0
 
 

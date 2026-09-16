@@ -263,6 +263,36 @@ def test_required_words_ignore_case() -> None:
     assert filters.matches(item(1, title="RAB DOWNPOUR"), search(required_keywords=["downpour"]))
 
 
+def test_a_required_word_found_only_in_the_brand_still_counts() -> None:
+    """svc-catalogue's search is fuzzy, and many titles omit the brand the listing
+    carries in its brand field — the keyword gate must look at both."""
+    listing = item(1, title="Bavlnená mikina pánska", brand="Mammut")
+
+    assert filters.matches(listing, search(required_keywords=["mammut"]))
+
+
+def test_required_words_match_across_diacritics() -> None:
+    listing = item(1, title="Mikina Fjällräven Greenland")
+
+    assert filters.matches(listing, search(required_keywords=["fjallraven"]))
+
+
+def test_a_required_word_absent_from_title_and_brand_still_rejects() -> None:
+    rejection = filters.check(
+        item(1, title="Flísová bunda", brand="Japan Style"),
+        search(required_keywords=["mammut"]),
+    )
+
+    assert rejection is not None
+    assert rejection.reason == "missing_keyword"
+
+
+def test_an_excluded_word_found_only_in_the_brand_still_rejects() -> None:
+    listing = item(1, title="Zimná bunda detská", brand="Replica Co")
+
+    assert not filters.matches(listing, search(banned_keywords=["replica"]))
+
+
 def test_the_title_pattern_is_case_insensitive_and_anchored_nowhere() -> None:
     query = search(title_pattern=r"\b(m|l)\b")
     assert filters.matches(item(1, title="Nike jacket size M"), query)

@@ -117,11 +117,11 @@
                 <input type="text" id="e-score-{{ q.id }}" name="min_enrich_score" value="{{ q.min_enrich_score or '' }}" placeholder="e.g. 60" inputmode="numeric">
               </div>
               <div>
-                <label for="e-req-{{ q.id }}">Title must contain (all) {{ help('Comma-separated words that must all be in the title. Vinted’s text search also matches descriptions, which is where most of the noise comes from.') }}</label>
+                <label for="e-req-{{ q.id }}">Title must contain (all) {{ help('Comma-separated words that must all be in the title or brand. Vinted’s text search matches loosely, which is where most of the noise comes from.') }}</label>
                 <input type="text" id="e-req-{{ q.id }}" name="required_keywords" value="{{ q.required_keywords | join(', ') }}" placeholder="torrentshell, 3l">
               </div>
               <div>
-                <label for="e-ban-{{ q.id }}">Exclude words {{ help('Skip listings whose title contains any of these.') }}</label>
+                <label for="e-ban-{{ q.id }}">Exclude words {{ help('Skip listings whose title or brand contains any of these.') }}</label>
                 <input type="text" id="e-ban-{{ q.id }}" name="banned_keywords" value="{{ q.banned_keywords | join(', ') }}" placeholder="replica, fake, kids">
               </div>
               <div>
@@ -293,7 +293,7 @@
           <input type="text" id="min_enrich_score" name="min_enrich_score" placeholder="e.g. 60" inputmode="numeric">
         </div>
         <div>
-          <label for="banned_keywords">Exclude words {{ help('Skip listings whose title contains any of these.') }}</label>
+          <label for="banned_keywords">Exclude words {{ help('Skip listings whose title or brand contains any of these.') }}</label>
           <input type="text" id="banned_keywords" name="banned_keywords" placeholder="replica, fake, kids">
         </div>
       </div>
@@ -301,7 +301,7 @@
         <summary>More filters — title and seller</summary>
         <div class="grid" style="margin-top:.5rem">
           <div>
-            <label for="required_keywords">Title must contain (all) {{ help('All of these words must be in the title. Cuts the noise from Vinted matching descriptions.') }}</label>
+            <label for="required_keywords">Title must contain (all) {{ help('All of these words must be in the title or brand. Cuts the noise from Vinted matching loosely.') }}</label>
             <input type="text" id="required_keywords" name="required_keywords" placeholder="torrentshell, 3l">
           </div>
           <div>

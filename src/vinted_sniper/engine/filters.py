@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import functools
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -62,13 +63,13 @@ def _promoted(item: Item, _query: Query) -> Rejection | None:
 
 def _banned(item: Item, query: Query) -> Rejection | None:
     if banned := _banned_keyword(item, query.banned_keywords):
-        return Rejection("banned_keyword", f"title contains {banned!r}")
+        return Rejection("banned_keyword", f"listing mentions {banned!r}")
     return None
 
 
 def _required(item: Item, query: Query) -> Rejection | None:
     if missing := _missing_keyword(item, query.required_keywords):
-        return Rejection("missing_keyword", f"title lacks {missing!r}")
+        return Rejection("missing_keyword", f"listing does not mention {missing!r}")
     return None
 
 
@@ -177,19 +178,35 @@ def missing_keyword_in_title(title: str, required: list[str]) -> str | None:
     baseline in engine/sweep_report.py re-applies exactly this switched-off gate to the
     candidates a sweep kept. Sharing the one implementation is what stops the baseline
     from quietly disagreeing with the filter it is supposed to be measuring against.
+
+    Matching folds diacritics on both sides: users on the Slovak and Czech sites type
+    "fjalraven" and sellers write "Fjällräven", and neither should lose the other.
     """
     if not required:
         return None
-    haystack = title.lower()
+    haystack = _fold(title)
     for word in required:
-        candidate = word.strip().lower()
+        candidate = _fold(word.strip())
         if candidate and candidate not in haystack:
             return word
     return None
 
 
+def _fold(text: str) -> str:
+    """Lowercase with diacritics stripped, so 'muži' and 'muzi' compare equal."""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def _keyword_haystack(item: Item) -> str:
+    """Where the keyword gates look. The catalog moved to svc-catalogue, whose search is
+    fuzzy and whose listings often carry the brand only in the brand field — a keyword
+    filter that reads the title alone would reject the very listings it exists to keep."""
+    return " ".join(part for part in (item.title, item.brand, item.summary) if part)
+
+
 def _missing_keyword(item: Item, required: list[str]) -> str | None:
-    return missing_keyword_in_title(item.title, required)
+    return missing_keyword_in_title(_keyword_haystack(item), required)
 
 
 @functools.lru_cache(maxsize=256)
@@ -214,9 +231,9 @@ def validate_pattern(pattern: str) -> str | None:
 def _banned_keyword(item: Item, banned: list[str]) -> str | None:
     if not banned:
         return None
-    haystack = item.title.lower()
+    haystack = _fold(_keyword_haystack(item))
     for word in banned:
-        candidate = word.strip().lower()
+        candidate = _fold(word.strip())
         if candidate and candidate in haystack:
             return word
     return None
