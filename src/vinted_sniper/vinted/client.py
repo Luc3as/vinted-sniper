@@ -112,7 +112,7 @@ class VintedClient:
         try:
             response = await transport.get(
                 urls.catalog_endpoint(tld),
-                headers=hdr.api_headers(tld, session.identity),
+                headers=hdr.api_headers(tld, session.identity, cross_host=True),
                 cookies=session.cookie_header,
                 params=query,
             )

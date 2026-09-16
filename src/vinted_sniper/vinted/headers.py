@@ -169,8 +169,18 @@ def document_headers(tld: str, identity: BrowserIdentity) -> dict[str, str]:
     return headers
 
 
-def api_headers(tld: str, identity: BrowserIdentity, referer: str | None = None) -> dict[str, str]:
-    """Headers for the catalog call — the shape the site's own page scripts use."""
+def api_headers(
+    tld: str,
+    identity: BrowserIdentity,
+    referer: str | None = None,
+    *,
+    cross_host: bool = False,
+) -> dict[str, str]:
+    """Headers for the catalog call — the shape the site's own page scripts use.
+
+    `cross_host` is for endpoints on the api. subdomain: the page at www still makes the
+    request, so the browser marks it same-site rather than same-origin.
+    """
     origin = f"https://www.vinted.{tld}"
     headers = {
         "User-Agent": identity.user_agent,
@@ -183,7 +193,7 @@ def api_headers(tld: str, identity: BrowserIdentity, referer: str | None = None)
         "DNT": "1",
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Site": "same-site" if cross_host else "same-origin",
         "Connection": "keep-alive",
     }
     if sec_ch_ua := identity.sec_ch_ua:

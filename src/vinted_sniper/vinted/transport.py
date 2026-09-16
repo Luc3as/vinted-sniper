@@ -181,7 +181,7 @@ class MockTransport:
         follow_redirects: bool = True,
     ) -> Response:
         del headers, cookies, params, follow_redirects
-        name = "catalog" if "/api/v2/catalog/items" in url else "root"
+        name = "catalog" if "/svc-catalogue/items" in url else "root"
         path = self.scenario_dir / f"{name}.json"
         if not path.exists():
             raise TransportError(f"mock scenario has no {path.name} for {url}")

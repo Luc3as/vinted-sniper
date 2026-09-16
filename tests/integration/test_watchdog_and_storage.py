@@ -130,7 +130,10 @@ async def test_being_stale_starts_a_new_session(
     watchdog, _ = make_watchdog(repo, db, transport, settings)
     await watchdog.check()
 
-    assert any("/api/v2/" not in request["url"] for request in transport.requests)
+    assert any(
+        not ("/api/v2/" in request["url"] or "/svc-catalogue/" in request["url"])
+        for request in transport.requests
+    )
 
 
 async def test_warn_mode_does_not_claim_a_restart_that_never_happened(
@@ -149,7 +152,10 @@ async def test_warn_mode_does_not_claim_a_restart_that_never_happened(
 
     assert announcements, "warn mode must still warn"
     assert all("fresh session" not in message for message in announcements)
-    assert all("/api/v2/" in request["url"] for request in transport.requests)
+    assert all(
+        ("/api/v2/" in request["url"] or "/svc-catalogue/" in request["url"])
+        for request in transport.requests
+    )
 
 
 # --- Health reporting ---------------------------------------------------------------

@@ -75,7 +75,7 @@ class ScriptedTransport:
 
         # Homepage requests succeed with a session cookie unless a test says otherwise, so
         # that tests about the catalog do not have to set one up.
-        if "/api/v2/" not in url:
+        if "/api/v2/" not in url and "/svc-catalogue/" not in url:
             if self.root_responses:
                 return self.root_responses.pop(0)
             return Response(

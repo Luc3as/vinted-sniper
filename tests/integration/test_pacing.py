@@ -22,7 +22,11 @@ async def test_searches_starting_together_share_one_handshake(
 
     results = await asyncio.gather(*(sessions.get("fr") for _ in range(7)))
 
-    homepage_loads = [r for r in transport.requests if "/api/v2/" not in r["url"]]
+    homepage_loads = [
+        r
+        for r in transport.requests
+        if not ("/api/v2/" in r["url"] or "/svc-catalogue/" in r["url"])
+    ]
     assert len(homepage_loads) == 1
     assert len({id(session) for session in results}) == 1, "everyone gets the same session"
     assert len({session.identity.user_agent for session in results}) == 1
@@ -53,7 +57,11 @@ async def test_sites_are_bootstrapped_independently(transport: ScriptedTransport
 
     await asyncio.gather(sessions.get("fr"), sessions.get("de"))
 
-    homepage_loads = [r for r in transport.requests if "/api/v2/" not in r["url"]]
+    homepage_loads = [
+        r
+        for r in transport.requests
+        if not ("/api/v2/" in r["url"] or "/svc-catalogue/" in r["url"])
+    ]
     assert len(homepage_loads) == 2
 
 

@@ -237,3 +237,34 @@ def test_an_entirely_unusable_thumbnail_array_falls_back_to_the_full_photo() -> 
         item = parse_item(entry_with_thumbnails(variants), "fr")
 
         assert item.thumb_url == "https://images.vinted.net/full.jpeg"
+
+
+def test_svc_catalogue_entries_recover_brand_size_and_condition_from_the_item_box() -> None:
+    """The svc-catalogue service (2026-09) dropped brand_title/size_title/status; the
+    item box's lines still carry them, so a listing must not lose its facts."""
+    entry = catalog_entry()
+    for gone in ("brand_title", "size_title", "status"):
+        del entry[gone]
+    entry["item_box"] = {
+        "accessibility_label": "Nike cortez, Marque: Nike, État: Très bon état, Taille: 40",
+        "first_line": "Nike",
+        "second_line": "40 · Très bon état",
+    }
+
+    item = parse_item(entry, "fr")
+
+    assert item.brand == "Nike"
+    assert item.size == "40"
+    assert item.condition == "Très bon état"
+
+
+def test_an_item_box_without_a_size_reads_as_condition_only() -> None:
+    entry = catalog_entry()
+    for gone in ("brand_title", "size_title", "status"):
+        del entry[gone]
+    entry["item_box"] = {"first_line": "Nike", "second_line": "Très bon état"}
+
+    item = parse_item(entry, "fr")
+
+    assert item.size is None
+    assert item.condition == "Très bon état"

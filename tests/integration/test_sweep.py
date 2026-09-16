@@ -36,7 +36,11 @@ def client_for(transport: ScriptedTransport, db: Any) -> tuple[VintedClient, Ses
 
 def catalog_requests(transport: ScriptedTransport) -> list[dict[str, Any]]:
     """Only the catalog calls; the session bootstrap hits the homepage first."""
-    return [req for req in transport.requests if "/api/v2/" in req["url"]]
+    return [
+        req
+        for req in transport.requests
+        if ("/api/v2/" in req["url"] or "/svc-catalogue/" in req["url"])
+    ]
 
 
 def queue_page(

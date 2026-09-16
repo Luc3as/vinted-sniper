@@ -171,14 +171,19 @@ def parse_item(payload: dict[str, Any], tld: str, *, keep_raw: bool = False) -> 
 
     url = _first(payload, "url") or urls.item_url(tld, item_id)
 
+    size = _text(_first(payload, "size_title", "size.title"))
+    condition = _text(_first(payload, "status", "condition"))
+    if size is None and condition is None:
+        size, condition = _box_size_condition(payload)
+
     return Item(
         item_id=item_id,
         tld=tld,
         title=_text(_first(payload, "title")) or f"Listing {item_id}",
         url=url,
-        brand=_text(_first(payload, "brand_title", "brand.title")),
-        size=_text(_first(payload, "size_title", "size.title")),
-        condition=_text(_first(payload, "status", "condition")),
+        brand=_text(_first(payload, "brand_title", "brand.title", "item_box.first_line")),
+        size=size,
+        condition=condition,
         price=price,
         total_price=total_price,
         currency=currency or total_currency,
@@ -196,6 +201,22 @@ def parse_item(payload: dict[str, Any], tld: str, *, keep_raw: bool = False) -> 
         summary=_text(_first(payload, "item_box.accessibility_label")),
         raw=payload if keep_raw else None,
     )
+
+
+def _box_size_condition(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Read size and condition off the item box's second line.
+
+    The svc-catalogue service (2026-09) stopped sending `size_title` and `status`, but
+    the box the site renders still shows them as "size · condition" — condition alone
+    when the listing has no size, since the catalog always carries a condition.
+    """
+    line = _first(payload, "item_box.second_line")
+    if not isinstance(line, str):
+        return None, None
+    parts = [part.strip() for part in line.split(" · ")]
+    if len(parts) == 1:
+        return None, _text(parts[0])
+    return _text(parts[0]), _text(" · ".join(parts[1:]))
 
 
 def _photo_urls(photos: Any, cover: str | None) -> tuple[str, ...]:

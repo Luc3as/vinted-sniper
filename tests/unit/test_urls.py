@@ -148,3 +148,10 @@ def test_building_for_an_unknown_country_site_is_refused() -> None:
 def test_building_from_nothing_but_an_order_is_refused() -> None:
     with pytest.raises(urls.InvalidSearchURLError, match="no search filters"):
         urls.build_search_url("fr", {"order": "newest_first"})
+
+
+def test_the_catalog_endpoint_is_the_svc_catalogue_service() -> None:
+    """Vinted retired /api/v2/catalog/items (HTML 404 since ~2026-09-16); the site's own
+    frontend now calls the svc-catalogue service on the api. subdomain."""
+    assert urls.catalog_endpoint("sk") == "https://api.vinted.sk/svc-catalogue/items"
+    assert urls.catalog_endpoint("fr") == "https://api.vinted.fr/svc-catalogue/items"

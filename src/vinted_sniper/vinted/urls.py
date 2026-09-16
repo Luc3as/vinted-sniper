@@ -164,7 +164,10 @@ def build_search_url(tld: str, params: dict[str, str]) -> str:
 
 
 def catalog_endpoint(tld: str) -> str:
-    return f"https://www.vinted.{tld}/api/v2/catalog/items"
+    """The catalog search service. Vinted retired /api/v2/catalog/items (an HTML 404
+    since ~2026-09-16); the frontend now calls svc-catalogue on the api. subdomain,
+    with the same query parameters and the same response shape."""
+    return f"https://api.vinted.{tld}/svc-catalogue/items"
 
 
 def brands_endpoint(tld: str) -> str:

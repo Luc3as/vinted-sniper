@@ -193,7 +193,11 @@ async def test_a_blocked_request_backs_off_and_replaces_the_session(
     poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock)
     await poller.tick()  # a first, successful check establishes a session
     transport.queue_status(403, "Forbidden")
-    homepage_visits_before = sum(1 for r in transport.requests if "/api/v2/" not in r["url"])
+    homepage_visits_before = sum(
+        1
+        for r in transport.requests
+        if not ("/api/v2/" in r["url"] or "/svc-catalogue/" in r["url"])
+    )
 
     delay = await poller.tick()
 
@@ -202,7 +206,11 @@ async def test_a_blocked_request_backs_off_and_replaces_the_session(
     assert state.count_403 == 1
     assert delay > settings.poll_default_interval_s, "a block must slow us down, not speed us up"
 
-    homepage_visits_now = sum(1 for r in transport.requests if "/api/v2/" not in r["url"])
+    homepage_visits_now = sum(
+        1
+        for r in transport.requests
+        if not ("/api/v2/" in r["url"] or "/svc-catalogue/" in r["url"])
+    )
     assert homepage_visits_now == homepage_visits_before, (
         "being refused must not trigger another handshake on the spot; that is the one "
         "request guaranteed to make the block longer"
@@ -214,7 +222,11 @@ async def test_a_blocked_request_backs_off_and_replaces_the_session(
     transport.queue_catalog([])
     assert await poller.tick() > 0
     assert (await repo.get_state(poller.query.id)).last_status == "ok"
-    homepage_visits_after = sum(1 for r in transport.requests if "/api/v2/" not in r["url"])
+    homepage_visits_after = sum(
+        1
+        for r in transport.requests
+        if not ("/api/v2/" in r["url"] or "/svc-catalogue/" in r["url"])
+    )
     assert homepage_visits_after > homepage_visits_before, (
         "the next check should start a fresh session rather than reuse the refused one"
     )
