@@ -174,6 +174,47 @@ def test_the_watchdog_timestamp_ignores_filtering() -> None:
     assert result.to_notify == []
 
 
+def test_a_flood_of_new_listings_announces_only_the_newest_few() -> None:
+    """Vinted's loose matching can hand back a whole page of 'new' listings at once.
+
+    Announcing them all spams the chat and asks the AI agent about every one of them.
+    The overflow is still recorded — visible on Found, never re-announced later."""
+    flood = [item(i, ts=NOW - i) for i in range(1, 21)]
+
+    result = dedup.select(
+        candidates=flood,
+        all_items=flood,
+        known_ids=set(),
+        high_water_mark=None,
+        now=NOW,
+        freshness_window_s=1200,
+        is_first_run=False,
+        max_notify=5,
+    )
+
+    assert len(result.to_record) == 20
+    assert {i.item_id for i in result.to_notify} == {1, 2, 3, 4, 5}, "the newest five"
+    assert result.skipped_flood == 15
+
+
+def test_a_handful_of_new_listings_is_not_capped() -> None:
+    few = [item(1, ts=NOW), item(2, ts=NOW - 5)]
+
+    result = dedup.select(
+        candidates=few,
+        all_items=few,
+        known_ids=set(),
+        high_water_mark=None,
+        now=NOW,
+        freshness_window_s=1200,
+        is_first_run=False,
+        max_notify=5,
+    )
+
+    assert len(result.to_notify) == 2
+    assert result.skipped_flood == 0
+
+
 # --- Filters -----------------------------------------------------------------------
 
 

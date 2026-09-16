@@ -31,6 +31,7 @@ Every variable is prefixed `VINTED_SNIPER_`. All of them are optional except whe
 | `POLL_DEFAULT_INTERVAL_S` | `60` | Seconds between checks for a newly added search. Per-search values override it. Anything under 10 is refused. |
 | `FRESHNESS_WINDOW_MIN` | `20` | Ignore listings whose photo is older than this. Stops a restart from replaying old results. |
 | `FIRST_RUN_MODE` | `silent` | What a brand-new search does first time: `silent` notifies nothing, `newest` sends exactly one listing so you can confirm delivery works. |
+| `MAX_ALERTS_PER_POLL` | `10` | The most new listings one check may announce. Only the newest this-many are alerted and sent to the AI agent; the rest are recorded silently and shown on Found. |
 | `PRICE_DROP_MIN_PERCENT` | `10` | Announce a listing again when its total price has fallen by at least this much since it was recorded. Free: only listings still on the search's first page are compared, using the page already fetched. `0` turns it off. |
 | `REQUEST_TIMEOUT_S` | `15` | How long to wait for Vinted before giving up on one request. |
 
@@ -323,6 +324,7 @@ Každá premenná má prefix `VINTED_SNIPER_`. Všetky sú voliteľné, kde nie 
 | `POLL_DEFAULT_INTERVAL_S` | `60` | Sekundy medzi kontrolami novo pridaného vyhľadávania. Hodnoty per vyhľadávanie ho prebíjajú. Menej než 10 sa odmieta. |
 | `FRESHNESS_WINDOW_MIN` | `20` | Ignoruj inzeráty s fotkou staršou než toto. Bráni reštartu prehrať staré výsledky. |
 | `FIRST_RUN_MODE` | `silent` | Čo urobí úplne nové vyhľadávanie prvý raz: `silent` nenotifikuje nič, `newest` pošle presne jeden inzerát na overenie doručovania. |
+| `MAX_ALERTS_PER_POLL` | `10` | Najviac nových inzerátov, ktoré jedna kontrola smie ohlásiť. Ohlási sa a AI agentovi pošle len tento počet najnovších; zvyšok sa potichu zaznamená a zobrazí na stránke Found. |
 | `PRICE_DROP_MIN_PERCENT` | `10` | Ohlás inzerát znova, keď jeho celková cena klesla aspoň o toľkoto odvtedy, čo bol zaznamenaný. Zadarmo: porovnávajú sa len inzeráty stále na prvej stránke vyhľadávania, z už stiahnutej stránky. `0` to vypína. |
 | `REQUEST_TIMEOUT_S` | `15` | Ako dlho čakať na Vinted, kým to s jedným requestom vzdáme. |
 

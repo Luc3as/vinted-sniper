@@ -241,6 +241,7 @@ class Poller:
             freshness_window_s=self._settings.freshness_window_min * 60,
             is_first_run=state.is_first_run,
             first_run_mode=self._settings.first_run_mode,
+            max_notify=self._settings.max_alerts_per_poll,
         )
 
         selection = await self._with_seller_reputation(selection)
@@ -281,7 +282,18 @@ class Poller:
             stale_cycles=stale_cycles,
         )
 
-        if state.is_first_run:
+        self._log_outcome(selection, is_first_run=state.is_first_run, returned=len(items))
+
+    def _log_outcome(
+        self, selection: dedup.Selection, *, is_first_run: bool, returned: int
+    ) -> None:
+        if selection.skipped_flood:
+            self._log.warning(
+                "poll.flood_capped",
+                announced=len(selection.to_notify),
+                suppressed=selection.skipped_flood,
+            )
+        if is_first_run:
             self._log.info(
                 "poll.seeded",
                 recorded=len(selection.to_record),
@@ -289,9 +301,9 @@ class Poller:
                 mode=self._settings.first_run_mode,
             )
         elif selection.to_notify:
-            self._log.info("poll.new_items", count=len(selection.to_notify), returned=len(items))
+            self._log.info("poll.new_items", count=len(selection.to_notify), returned=returned)
         else:
-            self._log.debug("poll.nothing_new", returned=len(items))
+            self._log.debug("poll.nothing_new", returned=returned)
 
     async def _market_positions(self, items: list[Item]) -> dict[int, tuple[int, int]]:
         """Percentile (share of listings cheaper) and sample size, per listing with a price."""

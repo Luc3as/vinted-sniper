@@ -31,6 +31,7 @@ class Selection:
     newest_raw_ts: int | None
     newest_item_ts: int | None
     skipped_stale: int = 0
+    skipped_flood: int = 0
 
     @property
     def is_empty(self) -> bool:
@@ -53,11 +54,15 @@ def select(
     freshness_window_s: int,
     is_first_run: bool,
     first_run_mode: FirstRunMode = "silent",
+    max_notify: int | None = None,
 ) -> Selection:
     """Work out which of a search's results to store and which to send.
 
     `candidates` are the listings that passed the filters; `all_items` is everything the
-    search returned, used only to track how fresh the catalog itself looks.
+    search returned, used only to track how fresh the catalog itself looks. `max_notify`
+    caps how many of them one check may announce: a page's worth of loose matches arriving
+    at once is a flood, not forty-eight separate finds, and every announcement also asks
+    the AI agent for a verdict. The overflow is recorded silently, like a first run.
     """
     raw_ts = newest_timestamp(all_items)
     unseen = [item for item in candidates if item.item_id not in known_ids]
@@ -84,12 +89,20 @@ def select(
         fresh.append(item)
 
     fresh.sort(key=lambda item: item.photo_ts or 0)
+    to_notify = fresh
+    flood = 0
+    if max_notify is not None and len(fresh) > max_notify:
+        # Oldest-first ordering puts the newest listings at the end; those are the ones
+        # most likely to still be available, so they are the ones worth announcing.
+        to_notify = fresh[-max_notify:]
+        flood = len(fresh) - max_notify
     return Selection(
         to_record=fresh,
-        to_notify=fresh,
+        to_notify=to_notify,
         newest_raw_ts=raw_ts,
         newest_item_ts=newest_timestamp(fresh) or high_water_mark,
         skipped_stale=stale,
+        skipped_flood=flood,
     )
 
 

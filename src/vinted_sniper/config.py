@@ -132,6 +132,14 @@ class Settings(BaseSettings):
         description="What a brand-new search does on its first check: 'silent' notifies "
         "nothing, 'newest' sends exactly one item so you can confirm delivery works.",
     )
+    max_alerts_per_poll: int = Field(
+        default=10,
+        ge=1,
+        description="The most new listings one check may announce. Vinted's loose matching "
+        "can hand back a whole page of 'new' listings at once; only the newest this-many "
+        "are alerted and sent to the AI agent, the rest are recorded silently and shown "
+        "on Found.",
+    )
 
     # --- Watchdog ------------------------------------------------------------------
     watchdog_stale_cycles: int = Field(
