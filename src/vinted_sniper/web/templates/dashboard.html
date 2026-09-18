@@ -264,9 +264,9 @@
 
         <div style="margin-top:.75rem" id="b-size-wrap">
           <label>Size</label>
-          <div class="option-list" id="b-size">
-            <span class="muted">Pick a category first — sizes differ between clothes and shoes.</span>
-          </div>
+          <div id="b-size"><span class="muted">Loading…</span></div>
+          <span class="hint">Every size chart Vinted keeps is here. Pick a category and only
+            the charts that category uses are left.</span>
         </div>
 
         <p class="muted" id="b-preview" style="margin:.6rem 0 0"></p>
@@ -525,7 +525,6 @@
   };
   let nameAuto = ""; // the last name we filled in, so we never overwrite the user's own
 
-  const SIZE_HINT = "Pick a category first — sizes differ between clothes and shoes.";
 
   const tld = () => $("b-tld").value;
   const selectedCat = () => state.path[state.path.length - 1] || null;
@@ -602,10 +601,9 @@
     renderCats();
     // Sizes only mean something within a category, and they change with it.
     state.picked.size.clear();
-    const cat = selectedCat();
-    // The box stays put either way: an empty space would read as a missing feature.
-    if (cat) loadFacet("size", $("b-size"));
-    else $("b-size").replaceChildren(msg(SIZE_HINT));
+    // Sizes are offered with or without a category; a category only narrows the
+    // charts on show, so the list is reloaded either way.
+    loadFacet("size", $("b-size"));
     sync();
   }
 
@@ -692,38 +690,55 @@
     }
   }
 
+  function optionBox(code, option) {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = state.picked[code].has(option.id);
+    box.onchange = () => {
+      if (box.checked) state.picked[code].add(option.id);
+      else state.picked[code].delete(option.id);
+      sync();
+    };
+    label.append(box, option.title);
+    if (option.count) {
+      const count = document.createElement("span");
+      count.className = "count";
+      count.textContent = new Intl.NumberFormat().format(option.count);
+      label.append(count);
+    }
+    return label;
+  }
+
   function renderFacet(code, container, options) {
     container.replaceChildren();
     if (!options.length) {
       container.append(msg("Nothing to choose here."));
       return;
     }
-    let group = null;
-    for (const option of options) {
-      if (option.group && option.group !== group) {
-        group = option.group;
-        const label = document.createElement("span");
-        label.className = "group-label";
-        label.textContent = group;
-        container.append(label);
+    // Without a category Vinted answers with every size chart it keeps — over five
+    // hundred sizes. One scrolling box of those is unreadable, so each chart folds
+    // away behind its own name and the first one is the only one left open.
+    const grouped = new Map();
+    for (const option of options) grouped.set(option.group || "", []);
+    for (const option of options) grouped.get(option.group || "").push(option);
+    let first = true;
+    for (const [group, rows] of grouped) {
+      const list = document.createElement("div");
+      list.className = "option-list";
+      for (const option of rows) list.append(optionBox(code, option));
+      if (!group) {
+        container.append(list);
+        continue;
       }
-      const label = document.createElement("label");
-      const box = document.createElement("input");
-      box.type = "checkbox";
-      box.checked = state.picked[code].has(option.id);
-      box.onchange = () => {
-        if (box.checked) state.picked[code].add(option.id);
-        else state.picked[code].delete(option.id);
-        sync();
-      };
-      label.append(box, option.title);
-      if (option.count) {
-        const count = document.createElement("span");
-        count.className = "count";
-        count.textContent = new Intl.NumberFormat().format(option.count);
-        label.append(count);
-      }
-      container.append(label);
+      const fold = document.createElement("details");
+      fold.className = "option-group";
+      if (first) fold.open = true;
+      const head = document.createElement("summary");
+      head.textContent = `${group} (${rows.length})`;
+      fold.append(head, list);
+      container.append(fold);
+      first = false;
     }
   }
 
@@ -793,6 +808,7 @@
     loadTree();
     loadFacet("status", $("b-status"));
     loadFacet("color", $("b-color"));
+    loadFacet("size", $("b-size"));
     sync();
   }
 
@@ -802,7 +818,6 @@
     state.picked.status.clear();
     state.picked.color.clear();
     state.picked.size.clear();
-    $("b-size").replaceChildren(msg(SIZE_HINT));
     init();
   });
   for (const id of ["b-text", "b-price-from", "b-price-to"]) {

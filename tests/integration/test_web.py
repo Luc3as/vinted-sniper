@@ -327,15 +327,20 @@ def test_the_dashboard_offers_the_builder_when_the_service_is_wired(
 def test_the_size_picker_is_on_show_before_a_category_is_picked(
     builder_client: TestClient,
 ) -> None:
-    """Sizes load per category, but the box must not be invisible until then — an
-    empty space reads as a missing feature rather than as a next step."""
+    """Vinted answers with every size chart when no category is given, so the picker
+    offers sizes from the moment it opens — an empty space, or a "pick a category
+    first" note, reads as a missing feature rather than as a next step."""
     page = builder_client.get("/searches").text
     block = page[page.index('id="b-size-wrap"') :]
     assert "hidden" not in block[: block.index("</div>")]
-    assert "Pick a category first" in block
+    assert "Pick a category first" not in page
     # Nothing may hide the box again either: the switch-site handler used to, which
     # left the picker gone for the rest of the session.
     assert 'b-size-wrap").hidden' not in page
+    # Sizes load with the rest of the filters, not only once a category is picked.
+    assert page.count('loadFacet("size"') == 2
+    # Over five hundred sizes arrive unscoped, so each size chart folds away on its own.
+    assert 'fold.className = "option-group"' in page
 
 
 def test_the_filter_endpoints_need_a_login(client: TestClient) -> None:
