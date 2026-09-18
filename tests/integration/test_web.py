@@ -333,6 +333,9 @@ def test_the_size_picker_is_on_show_before_a_category_is_picked(
     block = page[page.index('id="b-size-wrap"') :]
     assert "hidden" not in block[: block.index("</div>")]
     assert "Pick a category first" in block
+    # Nothing may hide the box again either: the switch-site handler used to, which
+    # left the picker gone for the rest of the session.
+    assert 'b-size-wrap").hidden' not in page
 
 
 def test_the_filter_endpoints_need_a_login(client: TestClient) -> None:

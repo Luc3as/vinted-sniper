@@ -802,7 +802,7 @@
     state.picked.status.clear();
     state.picked.color.clear();
     state.picked.size.clear();
-    $("b-size-wrap").hidden = true;
+    $("b-size").replaceChildren(msg(SIZE_HINT));
     init();
   });
   for (const id of ["b-text", "b-price-from", "b-price-to"]) {
