@@ -5,6 +5,10 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 ## Unreleased
 
 ### Fixed
+- The search builder's **Size** box was invisible until a category was picked, which read as
+  a missing feature rather than as a next step. It is now always on show and says what to do
+  first — sizes differ between clothes and shoes, so they can only be listed once the category
+  is known. Switching country site no longer hides the box for the rest of the session.
 - A session Vinted had flagged was reborn with the same cookies: curl_cffi keeps its cookie
   jar on the pooled transport, so every "fresh" session after a refusal carried the same
   DataDome cookies and stayed blocked until the container restarted. A new session now gets
