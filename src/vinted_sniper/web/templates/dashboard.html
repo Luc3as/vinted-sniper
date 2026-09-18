@@ -262,9 +262,11 @@
           </div>
         </div>
 
-        <div style="margin-top:.75rem" id="b-size-wrap" hidden>
+        <div style="margin-top:.75rem" id="b-size-wrap">
           <label>Size</label>
-          <div class="option-list" id="b-size"></div>
+          <div class="option-list" id="b-size">
+            <span class="muted">Pick a category first — sizes differ between clothes and shoes.</span>
+          </div>
         </div>
 
         <p class="muted" id="b-preview" style="margin:.6rem 0 0"></p>
@@ -523,6 +525,8 @@
   };
   let nameAuto = ""; // the last name we filled in, so we never overwrite the user's own
 
+  const SIZE_HINT = "Pick a category first — sizes differ between clothes and shoes.";
+
   const tld = () => $("b-tld").value;
   const selectedCat = () => state.path[state.path.length - 1] || null;
 
@@ -599,8 +603,9 @@
     // Sizes only mean something within a category, and they change with it.
     state.picked.size.clear();
     const cat = selectedCat();
-    $("b-size-wrap").hidden = !cat;
+    // The box stays put either way: an empty space would read as a missing feature.
     if (cat) loadFacet("size", $("b-size"));
+    else $("b-size").replaceChildren(msg(SIZE_HINT));
     sync();
   }
 

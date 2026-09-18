@@ -324,6 +324,17 @@ def test_the_dashboard_offers_the_builder_when_the_service_is_wired(
     assert "Build a search instead" not in signed_in.get("/searches").text
 
 
+def test_the_size_picker_is_on_show_before_a_category_is_picked(
+    builder_client: TestClient,
+) -> None:
+    """Sizes load per category, but the box must not be invisible until then — an
+    empty space reads as a missing feature rather than as a next step."""
+    page = builder_client.get("/searches").text
+    block = page[page.index('id="b-size-wrap"') :]
+    assert "hidden" not in block[: block.index("</div>")]
+    assert "Pick a category first" in block
+
+
 def test_the_filter_endpoints_need_a_login(client: TestClient) -> None:
     for path in (
         "/api/filters/fr/categories",
