@@ -122,7 +122,7 @@ def _other_sweep(line: str, sweep_id: int) -> bool:
     return found is not None and found != sweep_id
 
 
-def table_counts(db_path: str) -> dict[str, int]:
+def table_counts(db_path: str | Path) -> dict[str, int]:
     """Row counts for the tables a sweep must not touch, plus the ones it owns.
 
     A sweep-written `items` row would make the standing poller treat that listing as
