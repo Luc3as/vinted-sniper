@@ -50,7 +50,7 @@ cares about:
 | `search`, `search_id` | The search's name and id. The name is usually the text searched for. |
 | `items[].title`, `brand`, `size`, `condition` | What the seller wrote. |
 | `items[].price`, `total_price`, `currency` | Asking price and what the buyer actually pays. |
-| `items[].photo_urls` | Every photo, full size. Two or three are usually enough to identify a product. |
+| `items[].photo_urls` | Every photo, full size. Two or three are usually enough to identify a product. Vinted serves **WebP**: if your agent downloads a photo and hands it to a vision model, read the media type off the bytes instead of assuming `image/jpeg` — the model rejects the whole request when the declared type and the bytes disagree. |
 | `items[].seller`, `seller_rating`, `seller_reviews` | Who is selling, 0–1 rating, review count. |
 | `items[].enrichment_url` | Where to post the verdict. `null` while the dashboard is off. |
 | `items[].favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour` | Demand. A listing twelve minutes old with six hearts is one the market has already noticed. |
@@ -171,7 +171,7 @@ záleží:
 | `search`, `search_id` | Meno a id vyhľadávania. Meno je obvykle hľadaný text. |
 | `items[].title`, `brand`, `size`, `condition` | Čo napísal predajca. |
 | `items[].price`, `total_price`, `currency` | Pýtaná cena a čo kupujúci naozaj zaplatí. |
-| `items[].photo_urls` | Všetky fotky v plnej veľkosti. Na identifikáciu produktu obvykle stačia dve-tri. |
+| `items[].photo_urls` | Všetky fotky v plnej veľkosti. Na identifikáciu produktu obvykle stačia dve-tri. Vinted servíruje **WebP**: ak agent fotku stiahne a podá ju vision modelu, typ obsahu čítaj z bajtov, nepredpokladaj `image/jpeg` — keď deklarovaný typ a bajty nesúhlasia, model odmietne celý request. |
 | `items[].seller`, `seller_rating`, `seller_reviews` | Kto predáva, hodnotenie 0–1, počet recenzií. |
 | `items[].enrichment_url` | Kam poslať verdikt. `null`, kým je dashboard vypnutý. |
 | `items[].favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour` | Dopyt. Inzerát starý dvanásť minút so šiestimi srdiečkami si trh už všimol. |

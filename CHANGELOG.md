@@ -5,6 +5,13 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 ## Unreleased
 
 ### Fixed
+- **Verdicts stopped arriving.** Every AI verdict had failed silently since roughly 13
+  September: the reference n8n workflow downloaded each photo and labelled it `image/jpeg`,
+  but Vinted now serves WebP, and the vision model rejects a request whose declared media
+  type does not match the bytes — so the agent answered nothing and no verdict was ever
+  posted back. The app was blameless (it held each alert its ninety seconds and sent it
+  plain), which is why nothing looked broken. The three live workflows now read the media
+  type off the bytes; `docs/enrichment.md` warns anyone writing their own agent.
 - The search builder's **Size** box was invisible until a category was picked, and switching
   country site hid it for the rest of the session. It is now on show from the moment the
   builder opens and stays there: Vinted offers every size chart it keeps even with no
