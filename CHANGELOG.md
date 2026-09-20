@@ -4,7 +4,20 @@ All notable changes, newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### Added
+- **A notice when the AI check goes quiet.** The enrichment loop is built to fail
+  invisibly — a missing verdict costs a delay, never an alert — which is exactly why its
+  last two outages ran for days before anyone noticed. The app now counts the run of
+  listings it sent for a verdict and never got one back, waiting out each listing's window
+  plus ten minutes first so a slow answer is never mistaken for no answer. Five in a row
+  sends one message to the destinations marked for status notices, and nothing further
+  until a verdict returns. Alerts are unaffected either way.
+
 ### Fixed
+- **A hot-deal verdict arrived without its photo.** The follow-up sent when a verdict lands
+  after the alert had link previews switched off, so the one message actually making the
+  case for a deal was a wall of text while the plainer first alert got the picture. It now
+  carries the same photo preview.
 - **Verdicts stopped arriving.** Every AI verdict had failed silently since roughly 13
   September: the reference n8n workflow downloaded each photo and labelled it `image/jpeg`,
   but Vinted now serves WebP, and the vision model rejects a request whose declared media

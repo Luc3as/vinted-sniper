@@ -501,3 +501,34 @@ async def test_a_slovak_destination_gets_a_slovak_alert() -> None:
     assert "Otvoriť inzerát" in buttons
     assert "🚫 Preskočiť predajcu" in buttons
     assert "👍 Trafil sa" in buttons
+
+
+async def test_a_verdict_follow_up_still_shows_the_listing_photo() -> None:
+    """The follow-up is the message that sells the deal; a wall of text does not.
+
+    The first alert leads with the photo as a link preview. The verdict that arrives
+    afterwards was going out with previews disabled, so the hottest message of the pair
+    was the only one with nothing to look at.
+    """
+    recorder = Recorder(httpx.Response(200, json={"ok": True}))
+    sender = TelegramSender(
+        {"chat_id": "123"}, bot_token="t", client=recorder.client(), bucket=fast_bucket()
+    )
+    hot = Enrichment(
+        score=78,
+        model="The North Face vintage Gore-Tex jacket 90s",
+        retail_price=Decimal("80"),
+        retail_source="thenorthface.com",
+        matches_query=True,
+        risk=None,
+        verdict="Vintage TNF v dobrom stave od overeného predajcu.",
+        enriched_at=1,
+    )
+
+    await sender.send([replace(notification(1), kind="verdict", enrichment=hot)])
+
+    payload = recorder.payload(0)
+    assert payload["text"].startswith("🔥 <b>Verdict is in: hot deal</b>")
+    assert payload["link_preview_options"]["url"] == "https://images.vinted.net/1.jpeg"
+    assert payload["link_preview_options"]["prefer_large_media"] is True
+    assert payload["link_preview_options"]["show_above_text"] is True

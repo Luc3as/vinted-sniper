@@ -223,7 +223,7 @@ class TelegramSender:
             if summary:
                 lines.append(html.escape(summary))
             lines.extend(f"<i>{html.escape(detail)}</i>" for detail in details)
-        return self._base_payload() | {
+        payload = self._base_payload() | {
             "text": "\n".join(lines)[:MAX_MESSAGE_CHARS],
             "reply_markup": {
                 "inline_keyboard": [
@@ -231,8 +231,18 @@ class TelegramSender:
                     feedback_buttons(item.item_id, t),
                 ]
             },
-            "link_preview_options": {"is_disabled": True},
         }
+        # This is the message that makes the case for a hot deal, so it gets the photo
+        # the first alert had; without one there is nothing to look at but the score.
+        if item.photo_url:
+            payload["link_preview_options"] = {
+                "url": item.photo_url,
+                "prefer_large_media": True,
+                "show_above_text": True,
+            }
+        else:
+            payload["link_preview_options"] = {"is_disabled": True}
+        return payload
 
     def _verdict_block(self, item: Item, verdict: Enrichment, *, silent: bool) -> list[str]:
         """The score line, the one-sentence recommendation, and what the model thinks

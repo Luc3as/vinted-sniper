@@ -29,6 +29,15 @@ alert went out, it is stored (the dashboard shows it) and, when it scores at lea
 "verdict is in: hot deal" follow-up goes to the same chat destinations. A late verdict
 that says "nothing special" is kept quiet: it would not earn a second message.
 
+**Silence that lasts is reported.** Degrading quietly is right for one listing and wrong
+for a hundred: an agent that has died looks exactly like an agent that keeps declining, and
+the alerts that arrive without a score give nothing away. So the app counts the run of
+listings it sent for a verdict and never got one back — only those whose wait window plus
+ten minutes has passed, so a slow answer is never mistaken for no answer. Five in a row
+sends one notice to the destinations marked for status messages ("the AI check has gone
+quiet"), and nothing more until a verdict comes back. Alerts keep flowing throughout; this
+only tells you why they have gone plain.
+
 ## Setting it up
 
 1. Add a webhook destination pointing at your agent (n8n: a Webhook node's production URL).
@@ -149,6 +158,14 @@ sa (dashboard ho ukáže) a — keď má skóre aspoň `ENRICHMENT_HIGHLIGHT_SCO
 ide o nesprávny produkt — do tých istých chatových cieľov odíde krátky follow-up „verdikt je
 tu: hot deal". Oneskorený verdikt v zmysle „nič extra" zostane ticho: druhú správu by si
 nezaslúžil.
+
+**Ticho, ktoré trvá, sa ohlási.** Pri jednom inzeráte je tiché zlyhanie správne, pri sto
+nesprávne: mŕtvy agent vyzerá presne ako agent, ktorý stále odmieta, a alerty bez skóre nič
+neprezradia. Aplikácia preto počíta sériu inzerátov, ktoré poslala na posúdenie a verdikt
+sa nevrátil — iba tie, ktorým už uplynulo čakacie okno plus desať minút, takže pomalá
+odpoveď sa nikdy nezamení za žiadnu. Päť po sebe pošle jedno upozornenie do cieľov
+označených pre stavové správy („kontrola umelou inteligenciou stíchla") a potom už nič, kým
+nejaký verdikt nepríde. Alerty chodia po celý čas ďalej; toto len povie, prečo sú holé.
 
 ## Nastavenie
 

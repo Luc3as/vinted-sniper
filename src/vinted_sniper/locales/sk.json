@@ -15,7 +15,11 @@
   "not the model searched for": "nie je to hľadaný model",
   "risk: {risk}": "riziko: {risk}",
   "Verdict is in: hot deal": "Verdikt je tu: top ponuka",
-  "{n} more matches": ["{n} ďalší nález", "{n} ďalšie nálezy", "{n} ďalších nálezov"],
+  "{n} more matches": [
+    "{n} ďalší nález",
+    "{n} ďalšie nálezy",
+    "{n} ďalších nálezov"
+  ],
   "Open listing": "Otvoriť inzerát",
   "Seller profile": "Profil predajcu",
   "Skip seller": "Preskočiť predajcu",
@@ -35,7 +39,6 @@
   "View item": "Zobraziť inzerát",
   "Dashboard": "Prehľad",
   "{n} total": "{n} spolu",
-
   "This chat is not connected to vinted-sniper.": "Tento chat nie je pripojený k vinted-sniperu.",
   "That button is out of date.": "Toto tlačidlo už nie je platné.",
   "Skipping {login} for this search from now on.": "Predajcu {login} v tomto hľadaní odteraz preskakujem.",
@@ -57,24 +60,47 @@
   "never": "nikdy",
   "• {name} (id {id}) — {state}, last checked {last}": "• {name} (id {id}) — {state}, naposledy {last}",
   " (site held for {minutes} min)": " (stránka pozastavená na {minutes} min)",
-  "{n} notification(s) waiting to send.": ["{n} notifikácia čaká na odoslanie.", "{n} notifikácie čakajú na odoslanie.", "{n} notifikácií čaká na odoslanie."],
+  "{n} notification(s) waiting to send.": [
+    "{n} notifikácia čaká na odoslanie.",
+    "{n} notifikácie čakajú na odoslanie.",
+    "{n} notifikácií čaká na odoslanie."
+  ],
   "/status — is everything still running\n/pause <id>, /resume <id> — pause or resume a search\n/start <code> — connect this chat to vinted-sniper\n\nUnder each alert: skip that seller for the search, or pause the search.\nEverything else is managed in vinted-sniper itself.": "/status — beží všetko?\n/pause <id>, /resume <id> — pozastaviť alebo obnoviť hľadanie\n/start <kód> — pripojiť tento chat k vinted-sniperu\n\nPod každým alertom: preskočiť predajcu v tomto hľadaní alebo pozastaviť hľadanie.\nVšetko ostatné sa nastavuje vo vinted-sniperi.",
   "Connected. Matching listings will arrive here.\nSend /status any time to check that everything is still running.": "Pripojené. Nálezy budú chodiť sem.\nPošli /status kedykoľvek, ak chceš skontrolovať, že všetko beží.",
-
   "vinted.{tld} is refusing requests from this address (“{name}” was the first to notice). Holding every search on that site for about {minutes} min. If this keeps happening, see the troubleshooting guide.": "vinted.{tld} odmieta požiadavky z tejto adresy (prvé si to všimlo „{name}“). Všetky hľadania na tejto stránke pozastavujem asi na {minutes} min. Ak sa to opakuje, pozri troubleshooting.",
   "“{name}” has seen nothing new for {cycles} checks while other vinted.{tld} searches keep finding listings. Started a fresh session; if it stays quiet, see the troubleshooting guide.": "„{name}“ nenašlo nič nové {cycles} kontrol po sebe, kým ostatné hľadania na vinted.{tld} nálezy majú. Založil som novú session; ak zostane ticho, pozri troubleshooting.",
   "“{name}” has seen nothing new for {cycles} checks while other vinted.{tld} searches keep finding listings. If it stays quiet, see the troubleshooting guide.": "„{name}“ nenašlo nič nové {cycles} kontrol po sebe, kým ostatné hľadania na vinted.{tld} nálezy majú. Ak zostane ticho, pozri troubleshooting.",
-
   "Weekly: nothing new turned up on any search. Either the market is quiet or the searches are too narrow.": "Týždeň: na žiadnom hľadaní sa nič nové neobjavilo. Buď je trh tichý, alebo sú hľadania príliš úzke.",
   "Weekly: {found} across {searches}, {sent}, {drops}.": "Týždeň: {found} v {searches}, {sent}, {drops}.",
-  "{n} new listing": ["{n} nový inzerát", "{n} nové inzeráty", "{n} nových inzerátov"],
-  "{n} search": ["{n} hľadaní", "{n} hľadaniach", "{n} hľadaniach"],
-  "{n} alert sent": ["{n} odoslaný alert", "{n} odoslané alerty", "{n} odoslaných alertov"],
-  "{n} price drop": ["{n} zľava", "{n} zľavy", "{n} zliav"],
-  "{n} judged by the agent{avg}.": ["{n} posúdil agent{avg}.", "{n} posúdil agent{avg}.", "{n} posúdil agent{avg}."],
+  "{n} new listing": [
+    "{n} nový inzerát",
+    "{n} nové inzeráty",
+    "{n} nových inzerátov"
+  ],
+  "{n} search": [
+    "{n} hľadaní",
+    "{n} hľadaniach",
+    "{n} hľadaniach"
+  ],
+  "{n} alert sent": [
+    "{n} odoslaný alert",
+    "{n} odoslané alerty",
+    "{n} odoslaných alertov"
+  ],
+  "{n} price drop": [
+    "{n} zľava",
+    "{n} zľavy",
+    "{n} zliav"
+  ],
+  "{n} judged by the agent{avg}.": [
+    "{n} posúdil agent{avg}.",
+    "{n} posúdil agent{avg}.",
+    "{n} posúdil agent{avg}."
+  ],
   " (avg score {score})": " (priem. skóre {score})",
   "Best verdict: {score}/100 — {title}{price}.": "Najlepší verdikt: {score}/100 — {title}{price}.",
   " at {price} {currency}": " za {price} {currency}",
   "Busiest: {list}.": "Najrušnejšie: {list}.",
-  "Refusals from Vinted so far: {n}.": "Odmietnutí od Vintedu doteraz: {n}."
+  "Refusals from Vinted so far: {n}.": "Odmietnutí od Vintedu doteraz: {n}.",
+  "The AI check has gone quiet: the last {n} listings were sent for a verdict and none came back. Alerts are still going out, just without a score. Worth looking at the agent that answers them.": "Kontrola umelou inteligenciou stíchla: posledných {n} inzerátov šlo na posúdenie a nevrátil sa ani jeden verdikt. Upozornenia chodia ďalej, len bez skóre. Pozri sa na agenta, ktorý ich má posudzovať."
 }

@@ -1467,6 +1467,27 @@ class Repo:
         )
         return int(value or 0)
 
+    async def enrichment_answers(self, *, settled_before: int, limit: int) -> list[bool]:
+        """Did the outside agent answer? One True/False per recent listing sent to it.
+
+        Newest first, and only for listings whose webhook left long enough ago that a
+        verdict had a fair chance to come back — anything more recent is still in flight,
+        not unanswered. A listing counts once however many webhook destinations it went
+        to: the question is whether an answer came, not how many were asked.
+        """
+        rows = await self._db.fetch_all(
+            "SELECT i.enriched_at IS NOT NULL AS answered "
+            "FROM outbox o "
+            "JOIN destinations d ON d.id = o.destination_id "
+            "JOIN items i ON i.item_id = o.item_id "
+            "WHERE d.kind = 'webhook' AND o.kind = 'new' AND o.status = 'sent' "
+            "AND o.sent_at IS NOT NULL AND o.sent_at <= ? "
+            "GROUP BY o.item_id "
+            "ORDER BY MAX(o.sent_at) DESC LIMIT ?",
+            (settled_before, limit),
+        )
+        return [bool(row["answered"]) for row in rows]
+
     # --- Relevance sweeps ----------------------------------------------------------
     #
     # Deliberately separate from items/outbox: a sweep reads stock the standing poller has

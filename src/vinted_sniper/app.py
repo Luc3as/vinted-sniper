@@ -23,6 +23,7 @@ from vinted_sniper.config import Settings
 from vinted_sniper.db import Database, apply_pending
 from vinted_sniper.db.repo import Query, Repo
 from vinted_sniper.deliver.dispatcher import Dispatcher
+from vinted_sniper.engine.enrichwatch import EnrichmentWatch
 from vinted_sniper.engine.health import Heartbeat
 from vinted_sniper.engine.liveness import LivenessChecker
 from vinted_sniper.engine.poller import Poller
@@ -110,6 +111,12 @@ class Application:
                     stop=self._stop,
                     announce=dispatcher.notify_status,
                 )
+                enrichwatch = EnrichmentWatch(
+                    repo=repo,
+                    settings=settings,
+                    stop=self._stop,
+                    announce=dispatcher.notify_status,
+                )
                 heartbeat = Heartbeat(repo, self._stop)
                 liveness = LivenessChecker(repo, client, self._stop)
 
@@ -125,6 +132,7 @@ class Application:
                     async with asyncio.TaskGroup() as tg:
                         tg.create_task(dispatcher.run(), name="dispatcher")
                         tg.create_task(watchdog.run(), name="watchdog")
+                        tg.create_task(enrichwatch.run(), name="enrichment-watch")
                         tg.create_task(heartbeat.run(), name="heartbeat")
                         tg.create_task(liveness.run(), name="liveness")
                         tg.create_task(self._housekeeping(repo), name="housekeeping")
