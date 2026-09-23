@@ -14,6 +14,14 @@ All notable changes, newest first. Dates are when the change landed on `main`.
   until a verdict returns. Alerts are unaffected either way.
 
 ### Fixed
+- **Searches stopped returning anything, and the logs blamed the token.** Every catalog call
+  had been answering `401 UNAUTHORIZED` since 23 September while the handshake in front of it
+  kept succeeding, so the app read it as an expired token and asked for a new one. The token
+  was never the problem: the browser TLS fingerprint the app was presenting had started being
+  refused, and a request carrying it got a session but no data. Turning impersonation off
+  restores it — same address, same minute, listings come back. The troubleshooting guide now
+  covers impersonation as a cause rather than only as a remedy, including the one-minute test
+  that tells the two apart.
 - **A rejected session token turned into a five-hour hammering.** A 401 from Vinted means
   the anonymous token aged out, so the poller dropped it and fetched a new one five
   seconds later — correct once, ruinous when the *replacement* token is rejected too. On

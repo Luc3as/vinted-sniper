@@ -79,10 +79,21 @@ Options, cheapest first:
    logs) — that is deliberate, not a second problem.
 3. **Move it home.** Residential connections are challenged far less than datacenter ones. A
    Raspberry Pi is enough.
-4. **Turn on TLS impersonation.** Set `VINTED_SNIPER_HTTP_IMPERSONATE=true`. This makes
-   requests look like a real browser at the connection level rather than like Python. It
-   needs the `impersonate` extra installed, and it is not a magic fix — if your address is
+4. **Try TLS impersonation — and try turning it off.** `VINTED_SNIPER_HTTP_IMPERSONATE=true`
+   makes requests look like a real browser at the connection level rather than like Python.
+   It needs the `impersonate` extra installed, and it is not a magic fix — if your address is
    blocked outright, it stays blocked.
+
+   It can also be the cause. The fingerprint curl_cffi presents is itself a known pattern,
+   and when the anti-bot side starts scoring it, the homepage still hands you a session — the
+   handshake succeeds, cookies come back, and every catalog call afterwards answers `401
+   UNAUTHORIZED`. That reads like an expired token, not like a block. On 23 September 2026
+   this took vinted.sk down for the whole day here. The test takes a minute: fetch the
+   homepage and then one catalog call with the flag on, then the same with it off, from the
+   same address and within the same minute. If impersonation-off returns listings while
+   impersonation-on returns 401, the fingerprint is the problem — turn it off and the app
+   recovers immediately. A `datadome` cookie appearing only on the impersonated handshake is
+   the tell.
 5. **Use a proxy.** `VINTED_SNIPER_PROXY_FILE` points at a text file with one proxy URL per
    line. Free proxy lists are already blocked; if you go this route, use residential proxies
    in the same country as the site you are watching. Most people never need this.
@@ -238,9 +249,20 @@ od najlacnejšej:
    zámer, nie druhý problém.
 3. **Presuň to domov.** Domáce pripojenia sú challengované oveľa menej než datacentrové.
    Raspberry Pi stačí.
-4. **Zapni TLS impersonation.** Nastav `VINTED_SNIPER_HTTP_IMPERSONATE=true`. Requesty budú na
-   úrovni spojenia vyzerať ako skutočný prehliadač, nie ako Python. Potrebuje nainštalovanú
-   extra `impersonate` a nie je to zázrak — ak je adresa blokovaná natvrdo, blokovaná zostane.
+4. **Skús TLS impersonation — a skús ju aj vypnúť.** `VINTED_SNIPER_HTTP_IMPERSONATE=true`
+   spraví, že requesty budú na úrovni spojenia vyzerať ako skutočný prehliadač, nie ako
+   Python. Potrebuje nainštalovanú extra `impersonate` a nie je to zázrak — ak je adresa
+   blokovaná natvrdo, blokovaná zostane.
+
+   Môže byť aj príčinou. Odtlačok, ktorý curl_cffi predstiera, je sám o sebe známy vzor, a keď
+   ho protibotová strana začne hodnotiť, domovská stránka ti session ešte vydá — handshake
+   prejde, cookies prídu, ale každé ďalšie volanie katalógu odpovie `401 UNAUTHORIZED`. Vyzerá
+   to ako vypršaný token, nie ako blokovanie. 23. septembra 2026 takto vypadol vinted.sk na
+   celý deň. Test trvá minútu: stiahni domovskú stránku a jedno volanie katalógu so zapnutým
+   prepínačom, potom to isté s vypnutým, z tej istej adresy a v tej istej minúte. Ak vypnutá
+   impersonation vráti ponuky a zapnutá vráti 401, problém je v odtlačku — vypni ju a appka sa
+   hneď spamätá. Cookie `datadome`, ktorá sa objaví len pri impersonovanom handshake, je
+   znamenie.
 5. **Použi proxy.** `VINTED_SNIPER_PROXY_FILE` ukazuje na textový súbor s jednou proxy URL na
    riadok. Free proxy zoznamy sú už zablokované; ak ideš touto cestou, použi rezidenčné proxy
    v krajine stránky, ktorú sleduješ. Väčšina ľudí to nikdy nepotrebuje.
