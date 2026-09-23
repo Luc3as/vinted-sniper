@@ -94,11 +94,24 @@ class Poller:
         try:
             await self._check()
         except AuthExpiredError as exc:
-            # The anonymous token aged out. A new one costs a single page load.
-            self._log.info("poll.session_expired", error=str(exc))
+            # The anonymous token aged out. A new one costs a single page load — but only
+            # the first time. A token that was minted seconds ago and refused anyway is
+            # not an expiry, it is a refusal wearing a 401, and fetching yet another one
+            # every five seconds is what turns it into a real block.
+            self._consecutive_errors += 1
             await self._repo.record_failure(self.query.id, "http_401", str(exc))
             await self._sessions.invalidate(self.query.tld)
-            return min(5.0, float(self.query.poll_interval_s))
+            if self._consecutive_errors <= 1:
+                self._log.info("poll.session_expired", error=str(exc))
+                return min(5.0, float(self.query.poll_interval_s))
+            delay = self._backoff()
+            self._log.warning(
+                "poll.session_rejected",
+                error=str(exc),
+                attempts=self._consecutive_errors,
+                retry_in_s=round(delay),
+            )
+            return delay
         except BlockedError as exc:
             # Vinted is refusing this client. A fresh cookie will not change that, so drop
             # the session, back off hard, and hold every other search on this site with

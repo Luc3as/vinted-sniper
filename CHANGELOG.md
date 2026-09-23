@@ -14,6 +14,14 @@ All notable changes, newest first. Dates are when the change landed on `main`.
   until a verdict returns. Alerts are unaffected either way.
 
 ### Fixed
+- **A rejected session token turned into a five-hour hammering.** A 401 from Vinted means
+  the anonymous token aged out, so the poller dropped it and fetched a new one five
+  seconds later — correct once, ruinous when the *replacement* token is rejected too. On
+  23 September every fresh token came back refused and the loop ran unchecked for five
+  hours, roughly a thousand handshakes, until vinted.sk stopped answering the handshake at
+  all and every search fell into a site-wide cooldown. The first rejection is still a
+  cheap refresh; from the second onward it is read as a refusal and backs off
+  exponentially, the same way an outright block already did.
 - **A hot-deal verdict arrived without its photo.** The follow-up sent when a verdict lands
   after the alert had link previews switched off, so the one message actually making the
   case for a deal was a wall of text while the plainer first alert got the picture. It now

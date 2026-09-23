@@ -753,3 +753,37 @@ async def test_a_seller_gate_reads_the_profile_rather_than_rejecting_blind(
     transport.queue_user(id=43, feedback_reputation=1.0, feedback_count=3)
     await poller.tick()
     assert len(await repo.known_item_ids([2])) == 0, "3 reviews does not"
+
+
+async def test_a_token_that_keeps_being_rejected_stops_asking_for_new_ones(
+    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
+) -> None:
+    """A 401 normally means the anonymous token aged out, so a fresh one is cheap and
+    right. When *every* fresh token is rejected too, that reading is wrong — the address
+    is being refused — and retrying every five seconds turns a soft refusal into a hard
+    block. On 2026-09-23 that loop ran for five hours and fetched a thousand sessions
+    before vinted.sk stopped answering the handshake at all.
+    """
+    clock = FakeClock()
+    poller, _ = await make_poller(transport, repo, settings, db=db, clock=clock)
+    await poller.tick()  # a first, successful check establishes a session
+
+    delays = []
+    for _ in range(5):
+        transport.queue_status(401, "Unauthorized")
+        delay = await poller.tick()
+        delays.append(delay)
+        clock.advance(delay + 1)
+
+    assert delays[0] <= 5.0, "the first rejection is still a cheap token refresh"
+    assert delays[-1] > settings.poll_default_interval_s, (
+        "a token rejected over and over is a refusal, not an expiry: back off"
+    )
+    assert sum(delays) > 300, (
+        "five rejections in a row must not add up to half a minute of hammering"
+    )
+
+    # Once a fresh token is accepted again, normal pace resumes.
+    transport.queue_catalog([])
+    assert await poller.tick() > 0
+    assert (await repo.get_state(poller.query.id)).last_status == "ok"
