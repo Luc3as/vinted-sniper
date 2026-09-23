@@ -1,0 +1,54 @@
+# The compose file deployed as Portainer stack 31 (endpoint 2, vinted.veduci.sk).
+#
+# Kept here so the live stack has a tracked source. Portainer stores its own copy and
+# that copy is what actually runs, so this file is a mirror, not the deployment: change
+# it here, then PUT it with a freshly fetched env (never a saved env snapshot).
+#
+# The image tag says `impersonate` because the image is built with the browser-TLS extra
+# installed. That is a build-time tag and says nothing about whether the feature is on.
+# VINTED_SNIPER_HTTP_IMPERSONATE below is the runtime switch, and it must stay false:
+# curl_cffi's chrome fingerprint is scored by DataDome, which hands back a session that
+# every catalog call is then refused with 401. See docs/troubleshooting.md.
+#
+# Values in ${...} come from the stack's env, held in Portainer and never stored here.
+
+services:
+  vinted-sniper:
+    image: vinted-sniper:impersonate
+    container_name: vinted-sniper
+    restart: unless-stopped
+    environment:
+      - VINTED_SNIPER_TELEGRAM_BOT_TOKEN=${TG_TOKEN}
+      - VINTED_SNIPER_WEB_AUTH_TOKEN=${WEB_TOKEN}
+      - VINTED_SNIPER_CALLBACK_AUTH_TOKEN=${CALLBACK_TOKEN}
+      - VINTED_SNIPER_HTTP_IMPERSONATE=false
+      - VINTED_SNIPER_TIMEZONE=Europe/Bratislava
+      - VINTED_SNIPER_POLL_DEFAULT_INTERVAL_S=300
+      - VINTED_SNIPER_SITE_REQUESTS_PER_MINUTE=12
+      - VINTED_SNIPER_ENRICHMENT_WAIT_S=90
+      - VINTED_SNIPER_WEB_PUBLIC_URL=https://vinted.veduci.sk
+      - VINTED_SNIPER_FIRST_RUN_MODE=silent
+      - VINTED_SNIPER_WATCHDOG_ACTION=warn
+      - VINTED_SNIPER_WATCHDOG_STALE_CYCLES=50
+      - VINTED_SNIPER_LOG_FORMAT=console
+      - VINTED_SNIPER_MAGIC_WEBHOOK_URL=${MAGIC_WEBHOOK_URL}
+      - VINTED_SNIPER_MAGIC_WEBHOOK_TOKEN=${MAGIC_WEBHOOK_TOKEN}
+      - VINTED_SNIPER_MAGIC_TRIAGE_WEBHOOK_URL=${MAGIC_TRIAGE_WEBHOOK_URL}
+      - VINTED_SNIPER_MAGIC_VERDICT_WEBHOOK_URL=${MAGIC_VERDICT_WEBHOOK_URL}
+      - VINTED_SNIPER_MAGIC_TIMEOUT_S=${MAGIC_TIMEOUT_S}
+      - VINTED_SNIPER_MAGIC_COST_PER_MTOK_IN=${MAGIC_COST_PER_MTOK_IN}
+      - VINTED_SNIPER_MAGIC_COST_PER_MTOK_OUT=${MAGIC_COST_PER_MTOK_OUT}
+    volumes:
+      - /opt/vinted_sniper/data:/data
+    ports:
+      - "8010:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

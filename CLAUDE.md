@@ -42,6 +42,9 @@ Baseline rules imported from `/opt/AI_projects/_Default_project/project_harness/
 ## Deploy (Portainer endpoint 2, stack 31)
 
 - Build local image `vinted-sniper:impersonate` → load + redeploy via `/tmp/vs-deploy.py`.
+- `dev/stack31-compose.yml` mirrors the deployed compose. Portainer's own copy is what
+  runs, so edit the mirror and PUT it — and if the two ever disagree, find out why before
+  overwriting either. `VINTED_SNIPER_HTTP_IMPERSONATE` must stay `false` (2026-09-23).
 - **ALWAYS fetch the live stack env fresh before the PUT** — never reuse a saved env
   snapshot (WEB_TOKEN overwrite incident, 2026-09-08).
 - Never redeploy mid-sweep — the restart kills the running sweep.
