@@ -30,6 +30,14 @@ All notable changes, newest first. Dates are when the change landed on `main`.
   all and every search fell into a site-wide cooldown. The first rejection is still a
   cheap refresh; from the second onward it is read as a refusal and backs off
   exponentially, the same way an outright block already did.
+- **Telegram alerts arrived without the listing photo.** The photo was attached as a link
+  preview rather than uploaded, which kept the message cheap and long — but Vinted serves
+  its listing photos as WebP and nothing else, and Telegram's preview fetcher renders none
+  of it, so every alert had an empty space where the picture belonged. Alerts and verdict
+  follow-ups now go out as photo messages. The text moves to a caption, which Telegram caps
+  at 1024 characters against a message's 4096; a listing alert runs to about four hundred,
+  so nothing is lost in practice, and the buttons are unaffected. If Telegram ever refuses
+  a photo the alert still goes out as plain text rather than being dropped.
 - **A hot-deal verdict arrived without its photo.** The follow-up sent when a verdict lands
   after the alert had link previews switched off, so the one message actually making the
   case for a deal was a wall of text while the plainer first alert got the picture. It now

@@ -4,9 +4,12 @@ Sent as HTML rather than MarkdownV2 on purpose. MarkdownV2 requires eighteen cha
 be escaped anywhere they appear, and Vinted titles are full of them — a stray `.` or `!`
 turns into a hard send failure rather than a formatting wobble. HTML needs three.
 
-The photo rides along as a link preview instead of an upload. That keeps the full message
-length and the buttons, both of which a photo message would cost us, and saves fetching the
-image at all.
+The photo goes up as a photo message rather than riding along as a link preview. The link
+preview was cheaper — no upload, and the full 4096-character body — but Vinted serves its
+listing photos as WebP and nothing else, and Telegram's preview fetcher renders none of it,
+so every alert arrived with an empty space where the picture should be. A caption is capped
+at 1024 characters against the body's 4096; a listing alert runs to about four hundred, so
+the cap costs nothing in practice and the text is cut here rather than refused there.
 """
 
 from __future__ import annotations
@@ -38,6 +41,10 @@ MESSAGES_PER_S = 1.0
 DIGEST_THRESHOLD = 5
 
 MAX_MESSAGE_CHARS = 4096
+
+# A photo message carries its text as a caption, and Telegram allows a quarter as much
+# there. Overrunning it is a hard rejection, so the cut happens before the send.
+MAX_CAPTION_CHARS = 1024
 
 # Telegram states these plainly, so they are worth acting on rather than retrying.
 _PERMANENT_MARKERS = (
@@ -92,8 +99,7 @@ class TelegramSender:
         delivered: list[int] = []
 
         for notification in individually:
-            result = await self._post(
-                "sendMessage",
+            payload = (
                 self._verdict_payload(notification)
                 if notification.is_verdict
                 else self._listing_payload(
@@ -104,9 +110,9 @@ class TelegramSender:
                     ),
                     enrichment=notification.enrichment,
                     market_line=notification.market_line(self._t),
-                ),
-                [notification.outbox_id],
+                )
             )
+            result = await self._send_with_photo(payload, notification.outbox_id)
             if not result.delivered:
                 remaining = [n.outbox_id for n in batch if n.outbox_id not in delivered]
                 return SendResult(
@@ -142,6 +148,41 @@ class TelegramSender:
             self._base_payload() | {"text": html.escape(message)[:MAX_MESSAGE_CHARS]},
             [],
         )
+
+    async def _send_with_photo(self, payload: dict[str, Any], outbox_id: int) -> SendResult:
+        """Send as a photo when the listing has one, falling back to the plain message.
+
+        Only the photo itself is retried away: a rate limit or a blocked chat would fail
+        the text send in exactly the same way, so those come straight back to the caller.
+        """
+        as_photo = self._as_photo(payload)
+        if as_photo is None:
+            return await self._post("sendMessage", payload, [outbox_id])
+
+        method, photo_payload = as_photo
+        result = await self._post(method, photo_payload, [outbox_id])
+        if result.delivered or result.retry_after_s is not None or result.permanent_error:
+            return result
+
+        log.warning("telegram.photo_refused", error=result.error, outbox_id=outbox_id)
+        return await self._post("sendMessage", payload, [outbox_id])
+
+    @staticmethod
+    def _as_photo(payload: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+        """Recast a text payload as a photo message, or None when there is no photo.
+
+        The caller keeps the text form as the fallback: a photo Telegram will not take
+        must not cost us the alert, because the listing is the point and the picture is
+        the garnish.
+        """
+        preview = payload.get("link_preview_options") or {}
+        url = preview.get("url")
+        if not url:
+            return None
+        photo = {k: v for k, v in payload.items() if k not in ("text", "link_preview_options")}
+        photo["photo"] = url
+        photo["caption"] = payload["text"][:MAX_CAPTION_CHARS]
+        return "sendPhoto", photo
 
     def _base_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"chat_id": self._chat_id, "parse_mode": "HTML"}

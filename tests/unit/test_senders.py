@@ -18,6 +18,11 @@ from vinted_sniper.deliver.telegram import TelegramSender, inline_actions
 from vinted_sniper.enrichment import Enrichment
 from vinted_sniper.vinted.models import Item
 
+# What Vinted actually serves. The CDN has no JPEG variant of a listing photo, and
+# Telegram's link-preview fetcher will not render WebP, so the format is the whole
+# reason an alert needs a real photo upload.
+PHOTO_WEBP = "https://images1.vinted.net/tc/05_00c52/9dd167b8.webp?s=abc123"
+
 
 def notification(item_id: int, **kwargs: Any) -> PendingNotification:
     defaults: dict[str, Any] = {
@@ -254,7 +259,7 @@ async def test_telegram_sends_one_message_per_listing_with_a_photo_preview() -> 
     assert result.delivered == [1, 2]
     payload = recorder.payload(0)
     assert payload["parse_mode"] == "HTML"
-    assert payload["link_preview_options"]["prefer_large_media"] is True
+    assert payload["photo"] == "https://images.vinted.net/1.jpeg"
     first_row = payload["reply_markup"]["inline_keyboard"][0]
     assert first_row[0]["url"].endswith("/items/1")
     assert [b["text"] for b in first_row] == ["Open listing", "Seller profile"]
@@ -301,7 +306,7 @@ async def test_hostile_titles_do_not_break_the_message(title: str) -> None:
     result = await sender.send([notification(1, title=title)])
 
     assert result.delivered == [1]
-    text = recorder.payload()["text"]
+    text = recorder.payload()["caption"]
     assert "<script>" not in text
     assert "&lt;" in text or "<b>" in text
 
@@ -372,7 +377,7 @@ async def test_listing_times_are_shown_in_the_reader_timezone() -> None:
     # photo_ts 1_760_000_000 is 08:53 UTC on a summer-time day: 10:53 in Bratislava.
     await sender.send([notification(1)])
 
-    text = recorder.payload()["text"]
+    text = recorder.payload()["caption"]
     assert "10:53" in text
     assert "UTC" not in text
 
@@ -453,16 +458,16 @@ async def test_telegram_headlines_a_hot_deal_and_mutes_a_dull_one() -> None:
     await sender.send([replace(notification(2), enrichment=dull)])
 
     first, second = recorder.payload(0), recorder.payload(1)
-    assert first["text"].startswith(
+    assert first["caption"].startswith(
         "<b>Item 1</b>\n🔥 <b>HOT DEAL</b> · <b>deal 91/100 · retail ~140 EUR · -88%</b>"
     )
     thumbs = first["reply_markup"]["inline_keyboard"][-1]
     assert [b["callback_data"] for b in thumbs] == ["fb:1:1", "fb:1:-1"]
-    assert "Looks like: Nike Air Max 90" in first["text"]
+    assert "Looks like: Nike Air Max 90" in first["caption"]
     assert "disable_notification" not in first
     assert second["disable_notification"] is True
-    assert "not the model searched for" in second["text"]
-    assert "risk: stock photos only" in second["text"]
+    assert "not the model searched for" in second["caption"]
+    assert "risk: stock photos only" in second["caption"]
 
 
 async def test_a_slovak_destination_gets_a_slovak_alert() -> None:
@@ -489,7 +494,7 @@ async def test_a_slovak_destination_gets_a_slovak_alert() -> None:
     await sender.send([pending])
 
     payload = recorder.payload(0)
-    text = payload["text"]
+    text = payload["caption"]
     assert text.startswith(
         "<b>Item 1</b>\n🔥 <b>TOP PONUKA</b> · <b>skóre 91/100 · v obchode ~140 EUR"
     )
@@ -528,7 +533,70 @@ async def test_a_verdict_follow_up_still_shows_the_listing_photo() -> None:
     await sender.send([replace(notification(1), kind="verdict", enrichment=hot)])
 
     payload = recorder.payload(0)
-    assert payload["text"].startswith("🔥 <b>Verdict is in: hot deal</b>")
-    assert payload["link_preview_options"]["url"] == "https://images.vinted.net/1.jpeg"
-    assert payload["link_preview_options"]["prefer_large_media"] is True
-    assert payload["link_preview_options"]["show_above_text"] is True
+    assert payload["caption"].startswith("🔥 <b>Verdict is in: hot deal</b>")
+    assert payload["photo"] == "https://images.vinted.net/1.jpeg"
+
+
+async def test_a_listing_photo_is_uploaded_not_left_to_the_link_preview() -> None:
+    """Vinted serves WebP and Telegram's link-preview fetcher renders none of it, so an
+    alert built on `link_preview_options` arrived with no picture at all. The photo has to
+    go up as a real photo message."""
+    recorder = Recorder(httpx.Response(200, json={"ok": True}))
+    sender = TelegramSender(
+        {"chat_id": "123"}, bot_token="t", client=recorder.client(), bucket=fast_bucket()
+    )
+
+    result = await sender.send([notification(1, photo_url=PHOTO_WEBP)])
+
+    assert result.delivered == [1]
+    assert recorder.requests[0].url.path.endswith("/sendPhoto")
+    payload = recorder.payload()
+    assert payload["photo"] == PHOTO_WEBP
+    # The body moves to the caption, and the buttons have to survive the move.
+    assert "caption" in payload and "text" not in payload
+    assert payload["reply_markup"]["inline_keyboard"][0][0]["url"].endswith("/items/1")
+
+
+async def test_a_caption_is_cut_to_the_length_telegram_accepts() -> None:
+    """A caption is capped at 1024 where a message body gets 4096; overrunning it is a
+    hard send failure, so the cut happens here rather than at Telegram."""
+    recorder = Recorder(httpx.Response(200, json={"ok": True}))
+    sender = TelegramSender(
+        {"chat_id": "123"}, bot_token="t", client=recorder.client(), bucket=fast_bucket()
+    )
+
+    await sender.send([notification(1, photo_url=PHOTO_WEBP, title="x" * 3000)])
+
+    assert len(recorder.payload()["caption"]) <= 1024
+
+
+async def test_a_listing_without_a_photo_still_goes_out_as_a_message() -> None:
+    recorder = Recorder(httpx.Response(200, json={"ok": True}))
+    sender = TelegramSender(
+        {"chat_id": "123"}, bot_token="t", client=recorder.client(), bucket=fast_bucket()
+    )
+
+    result = await sender.send([notification(1, photo_url=None)])
+
+    assert result.delivered == [1]
+    assert recorder.requests[0].url.path.endswith("/sendMessage")
+    assert recorder.payload()["link_preview_options"] == {"is_disabled": True}
+
+
+async def test_a_photo_telegram_refuses_falls_back_to_the_text_alert() -> None:
+    """A photo Telegram will not take must not cost us the alert — the listing is the
+    point, the picture is the garnish."""
+    recorder = Recorder(
+        httpx.Response(400, json={"ok": False, "description": "wrong file identifier"}),
+        httpx.Response(200, json={"ok": True}),
+    )
+    sender = TelegramSender(
+        {"chat_id": "123"}, bot_token="t", client=recorder.client(), bucket=fast_bucket()
+    )
+
+    result = await sender.send([notification(1, photo_url=PHOTO_WEBP)])
+
+    assert result.delivered == [1]
+    assert recorder.requests[0].url.path.endswith("/sendPhoto")
+    assert recorder.requests[1].url.path.endswith("/sendMessage")
+    assert "text" in recorder.payload(1)
