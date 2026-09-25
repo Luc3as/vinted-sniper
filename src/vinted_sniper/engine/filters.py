@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from vinted_sniper.db.repo import Query
 from vinted_sniper.vinted.models import Item
+from vinted_sniper.vinted.urls import dropped_search_words
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,19 @@ def _banned(item: Item, query: Query) -> Rejection | None:
 def _required(item: Item, query: Query) -> Rejection | None:
     if missing := _missing_keyword(item, query.required_keywords):
         return Rejection("missing_keyword", f"listing does not mention {missing!r}")
+    return None
+
+
+def _search_words(item: Item, query: Query) -> Rejection | None:
+    """The words a filtered request left out, applied here instead.
+
+    svc-catalogue hard-filters on `search_text` (title or description only), so a search
+    that also carries structured filters keeps the words out of the request
+    (vinted/urls.py:search_request_params) and this gate reads them off the listing —
+    where the brand field also counts, which is exactly the leniency the server-side
+    filter lacked."""
+    if missing := _missing_keyword(item, dropped_search_words(query.params)):
+        return Rejection("search_word", f"listing does not mention {missing!r}")
     return None
 
 
@@ -141,6 +155,7 @@ _GATES = (
     _promoted,
     _banned,
     _required,
+    _search_words,
     _title_pattern,
     _price,
     _condition,
@@ -152,9 +167,9 @@ _GATES = (
 # What a relevance sweep runs instead. A sweep reads existing stock rather than the newest
 # arrivals, so three of the gates above would work against it:
 #   _promoted     — bumped listings are ordinary in standing stock, not stale repeats.
-#   _required     — Vinted's search_text is only a hint and sellers routinely leave the
-#   _title_pattern  model name out of the title, so the title has to rank a listing
-#                   (engine/sweep.py:score_title) rather than eliminate it.
+#   _required     — sellers routinely leave the model name out of the title, so the
+#   _search_words   title has to rank a listing (engine/sweep.py:score_title) rather
+#   _title_pattern  than eliminate it.
 # Everything else is a real constraint on what you would buy, so it still drops listings.
 SWEEP_GATES: tuple[Gate, ...] = (
     _banned,

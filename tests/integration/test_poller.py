@@ -125,7 +125,67 @@ async def test_the_catalog_request_speaks_svc_catalogues_filter_dialect(
     assert sent["attribute_ids[size]"] == "208,209"
     assert "brand_ids" not in sent, "svc-catalogue ignores this name silently"
     assert "size_ids" not in sent, "svc-catalogue ignores this name silently"
-    assert sent["search_text"] == "mikina"
+    # svc-catalogue hard-filters on search_text (every token must appear in the title or
+    # description), so alongside structured filters the words stay out of the request.
+    assert "search_text" not in sent
+
+
+async def test_a_filtered_search_matches_its_words_itself_instead_of_sending_them(
+    transport: ScriptedTransport,
+    repo: Repo,
+    settings: Settings,
+    db: Any,
+    make_item: Callable[..., dict[str, Any]],
+) -> None:
+    """svc-catalogue turned `search_text` into a hard filter — sent alongside a brand or
+    size filter it silently starved standing searches (query 19 saw one listing in nine
+    days). The words stay out of the request and gate the results app-side instead, where
+    the brand field also counts."""
+    query_id = await repo.add_query(
+        name="torrentshell watch",
+        url="https://www.vinted.fr/catalog?search_text=torrentshell&brand_ids[]=90804",
+        tld="fr",
+        params={"search_text": "torrentshell", "order": "newest_first", "brand_ids": "90804"},
+        poll_interval_s=60,
+    )
+    query = await repo.get_query(query_id)
+    assert query is not None
+    poller, _ = poller_for(query, transport, repo, settings, db=db)
+    destination_id = await repo.add_destination(kind="webhook", name="test", config={"url": "x"})
+    await repo.route(query.id, destination_id)
+
+    now = int(time.time())
+    transport.queue_catalog([make_item(1, photo_ts=now - 600)])
+    await poller.tick()
+
+    transport.queue_catalog(
+        [
+            make_item(2, photo_ts=now, title="Patagonia Torrentshell 3L"),
+            make_item(3, photo_ts=now),
+        ]
+    )
+    await poller.tick()
+
+    sent = next(r for r in transport.requests if "/svc-catalogue/" in r["url"])["params"]
+    assert "search_text" not in sent, "svc-catalogue would hard-filter on it"
+    assert sent["attribute_ids[brand]"] == "90804"
+
+    queued = await repo.claim_batch(destination_id, 10)
+    assert [n.item.item_id for n in queued] == [2], "the words still gate the alerts, app-side"
+
+
+async def test_a_text_only_search_still_sends_its_words(
+    transport: ScriptedTransport, repo: Repo, settings: Settings, db: Any
+) -> None:
+    """Alone, `search_text` is still a fuzzy hint — dropped, the request would read the
+    whole site."""
+    poller, _ = await make_poller(transport, repo, settings, db=db)
+    transport.queue_catalog([])
+
+    await poller.tick()
+
+    sent = next(r for r in transport.requests if "/svc-catalogue/" in r["url"])["params"]
+    assert sent["search_text"] == "nike"
 
 
 async def test_empty_results_are_a_success_not_a_failure(

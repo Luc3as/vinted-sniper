@@ -33,6 +33,7 @@ from vinted_sniper.vinted.errors import (
 )
 from vinted_sniper.vinted.models import Item
 from vinted_sniper.vinted.session import SessionManager
+from vinted_sniper.vinted.urls import search_request_params
 
 log = get_logger(__name__)
 
@@ -220,7 +221,10 @@ class Poller:
         )
 
     async def _check(self) -> None:
-        items = await self._client.search(self.query.tld, self.query.params)
+        # A filtered search keeps its words out of the request — svc-catalogue would
+        # hard-filter on them — and the `_search_words` gate in filters.py applies them
+        # to the results instead.
+        items = await self._client.search(self.query.tld, search_request_params(self.query.params))
         state = await self._repo.get_state(self.query.id)
         # Every listing on the page is a price point, filters or not. Costs nothing.
         await self._repo.observe_market(self.query.id, items)

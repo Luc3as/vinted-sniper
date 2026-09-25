@@ -328,6 +328,28 @@ def test_a_required_word_absent_from_title_and_brand_still_rejects() -> None:
     assert rejection.reason == "missing_keyword"
 
 
+def test_a_filtered_searchs_words_are_read_off_the_listing_not_sent() -> None:
+    """A search with structured filters keeps its words out of the request (svc-catalogue
+    hard-filters on them) and reads them off the listing instead — brand field included,
+    so a token the seller left to the brand field still counts."""
+    query = search(params={"search_text": "patagonia torrentshell", "brand_ids": "90804"})
+
+    assert filters.matches(item(1, title="Torrentshell 3L bunda", brand="Patagonia"), query)
+
+    rejection = filters.check(item(2, title="Flísová mikina", brand="Patagonia"), query)
+    assert rejection is not None
+    assert rejection.reason == "search_word"
+    assert "torrentshell" in rejection.detail
+
+
+def test_a_text_only_searchs_words_travel_and_gate_nothing() -> None:
+    """Without a structured filter the words go in the request (alone they are a fuzzy
+    hint), so fuzzy matches that omit the word keep coming through, as they always have."""
+    query = search(params={"search_text": "torrentshell"})
+
+    assert filters.matches(item(1, title="Patagonia bunda"), query)
+
+
 def test_an_excluded_word_found_only_in_the_brand_still_rejects() -> None:
     listing = item(1, title="Zimná bunda detská", brand="Replica Co")
 

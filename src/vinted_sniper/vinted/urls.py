@@ -201,18 +201,32 @@ def catalog_api_params(params: dict[str, str]) -> dict[str, str]:
     return translated
 
 
-def sweep_request_params(params: dict[str, str]) -> dict[str, str]:
-    """A sweep's params, with `search_text` kept only when it is the only net.
+def dropped_search_words(params: dict[str, str]) -> list[str]:
+    """The words `search_request_params()` keeps out of this request, one per token.
+
+    Whoever drops them still owes them to the user: a sweep ranks on them
+    (engine/sweep.py:score_title), a standing search gates its alerts on them
+    (engine/filters.py). With no structured filter nothing is dropped — alone,
+    `search_text` is still a fuzzy hint and travels.
+    """
+    if any(key in _ATTRIBUTE_FACETS for key in params):
+        return (params.get("search_text") or "").split()
+    return []
+
+
+def search_request_params(params: dict[str, str]) -> dict[str, str]:
+    """A catalog request's params, with `search_text` kept only when it is the only net.
 
     The old endpoint took `search_text` as a relevance hint; svc-catalogue filters on it —
     every token has to appear in the title or description (verified live 2026-09-25:
     brand+size+price plus "Patagonia hardshell" answers 1 item where the site's own page,
-    which searches through a different backend, says 150). A sweep ranks on the words
-    app-side and never filters on them, so when structured filters already narrow the
-    read the words stay out of the request. With no structured filter they stay in:
-    unfiltered, svc-catalogue is the whole site.
+    which searches through a different backend, says 150). Sent alongside structured
+    filters it emptied sweeps and starved standing searches alike, so when a structured
+    filter already narrows the read the words stay out of the request and the caller
+    applies them itself (`dropped_search_words()`). With no structured filter they stay
+    in: unfiltered, svc-catalogue is the whole site.
     """
-    if any(key in _ATTRIBUTE_FACETS for key in params):
+    if dropped_search_words(params):
         return {key: value for key, value in params.items() if key != "search_text"}
     return dict(params)
 
