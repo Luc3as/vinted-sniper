@@ -51,6 +51,7 @@ from vinted_sniper.vinted.errors import (
 )
 from vinted_sniper.vinted.models import Item
 from vinted_sniper.vinted.session import SessionManager
+from vinted_sniper.vinted.urls import sweep_request_params
 
 if TYPE_CHECKING:  # pragma: no cover - the stages are duck-typed at runtime, see judge_sweep()
     from vinted_sniper.magic.triage import TriageClient
@@ -269,7 +270,7 @@ async def run_sweep(
     for page in range(1, max_pages + 1):
         # Built fresh every iteration: `params` may be a stored query's own dict, and a
         # sweep must not leave `order=relevance` behind in it.
-        request = {**params, "order": "relevance", "page": str(page)}
+        request = {**sweep_request_params(params), "order": "relevance", "page": str(page)}
         try:
             items = await client.search(tld, request)
         except BlockedError as exc:

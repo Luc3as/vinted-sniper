@@ -201,6 +201,22 @@ def catalog_api_params(params: dict[str, str]) -> dict[str, str]:
     return translated
 
 
+def sweep_request_params(params: dict[str, str]) -> dict[str, str]:
+    """A sweep's params, with `search_text` kept only when it is the only net.
+
+    The old endpoint took `search_text` as a relevance hint; svc-catalogue filters on it —
+    every token has to appear in the title or description (verified live 2026-09-25:
+    brand+size+price plus "Patagonia hardshell" answers 1 item where the site's own page,
+    which searches through a different backend, says 150). A sweep ranks on the words
+    app-side and never filters on them, so when structured filters already narrow the
+    read the words stay out of the request. With no structured filter they stay in:
+    unfiltered, svc-catalogue is the whole site.
+    """
+    if any(key in _ATTRIBUTE_FACETS for key in params):
+        return {key: value for key, value in params.items() if key != "search_text"}
+    return dict(params)
+
+
 def filters_search_endpoint(tld: str) -> str:
     """Search within one filter's options — e.g. brand autocomplete.
 

@@ -116,6 +116,44 @@ async def test_the_relevance_override_never_touches_the_callers_params(
     assert "page" not in stored
 
 
+async def test_a_filtered_sweep_keeps_the_words_out_of_the_request(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """R003 on the wire: a sweep ranks on the words, it never filters on them.
+
+    svc-catalogue turned `search_text` into a hard filter — every token has to appear in
+    the title or description (verified live 2026-09-25: brand+size+price plus "Patagonia
+    hardshell" answers 1 item where the site's own page says 150). Sent alongside
+    structured filters it silently empties the read, so the filters travel and the words
+    stay home for the app-side ranking to use.
+    """
+    queue_page(transport, make_item, range(3))
+
+    await sweep_over(
+        transport,
+        repo,
+        db,
+        params={"search_text": "patagonia hardshell", "brand_ids": "90804", "size_ids": "209"},
+    )
+
+    request = catalog_requests(transport)[0]
+    assert "search_text" not in request["params"]
+    assert request["params"]["attribute_ids[brand]"] == "90804"
+    assert request["params"]["attribute_ids[size]"] == "209"
+
+
+async def test_a_sweep_with_nothing_but_words_still_sends_them(
+    transport: ScriptedTransport, repo: Repo, db: Any, make_item: Callable[..., dict[str, Any]]
+) -> None:
+    """With no structured filter the text is the only net — dropped, the request would
+    read the whole site."""
+    queue_page(transport, make_item, range(3))
+
+    await sweep_over(transport, repo, db)
+
+    assert catalog_requests(transport)[0]["params"]["search_text"] == "torrentshell"
+
+
 # --- Early stop -----------------------------------------------------------------------
 
 
