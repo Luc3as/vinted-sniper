@@ -1466,6 +1466,37 @@ def test_the_magic_page_is_in_the_nav_and_says_what_a_sweep_will_cost(
     assert page.text.index(ceiling) < page.text.index(button)
 
 
+async def test_a_running_sweep_is_listed_under_earlier_sweeps(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """A sweep in its first phase has checked no photos yet, but the person who started it
+    still needs the way back to it after closing the tab — a row saying so, not a blank."""
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=["torrentshell"])
+
+    page = signed_in.get("/magic")
+
+    assert page.status_code == 200
+    assert f"/magic?sweep={sweep_id}" in page.text
+    assert "still going" in page.text
+
+
+async def test_a_sweep_that_found_nothing_is_still_listed_under_earlier_sweeps(
+    signed_in: TestClient, repo: Repo
+) -> None:
+    """Zero results is an answer somebody paid a page read for; the row says so instead
+    of the whole run vanishing from the page that started it."""
+    sweep_id = await repo.create_sweep_run(tld="sk", params={}, keywords=[])
+    await repo.finish_sweep_run(
+        sweep_id, status="ok", pages_fetched=1, items_seen=0, candidates=0, funnel={}
+    )
+
+    page = signed_in.get("/magic")
+
+    assert page.status_code == 200
+    assert f"/magic?sweep={sweep_id}" in page.text
+    assert "nothing found" in page.text
+
+
 async def test_a_judged_sweep_is_rendered_on_the_magic_page(
     signed_in: TestClient, repo: Repo
 ) -> None:

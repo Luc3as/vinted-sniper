@@ -245,7 +245,7 @@
 <section id="m-past">
   <div class="section-head">
     <h2>{{ icon('search') }}Earlier sweeps</h2>
-    <span class="lede">Every judged sweep this dashboard remembers. Each one is a link — what you paid
+    <span class="lede">Every sweep this dashboard remembers. Each one is a link — what you paid
       for is kept here, not lost when the page moves on.</span>
   </div>
   <div class="card">
@@ -255,7 +255,13 @@
       <span class="pill {{ 'sent' if past.status == 'ok' else ('failed' if past.status == 'blocked' else 'pending') }}">{{ status_words.get(past.status, past.status) }}</span>
       <span class="muted">vinted.{{ past.tld }}{% if past.keywords %} · {{ past.keywords }}{% endif %}</span>
       <span class="muted">{{ past.age }}</span>
+      {% if past.triaged or past.verdicts %}
       <span class="muted">{{ past.triaged }} photo(s) checked, {{ past.verdicts }} opinion(s) — €{{ past.cost_eur }}</span>
+      {% elif past.status == 'running' %}
+      <span class="muted">still going — open it to watch</span>
+      {% else %}
+      <span class="muted">nothing found</span>
+      {% endif %}
     </div>
     {% endfor %}
   </div>

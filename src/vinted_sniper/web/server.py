@@ -472,7 +472,7 @@ def create_app(
         recent_candidates = {row.id: await repo.sweep_candidates(row.id) for row in recent}
         past_sweeps = [
             view
-            for view in _sweep_views(recent, recent_candidates, now=now)
+            for view in _sweep_views(recent, recent_candidates, now=now, keep_unjudged=True)
             if run is None or view["id"] != run.id
         ]
         return TEMPLATES.TemplateResponse(
@@ -1324,18 +1324,26 @@ def _sweep_run_view(
 
 
 def _sweep_views(
-    runs: list[SweepRun], candidates: dict[int, list[SweepCandidate]], now: int
+    runs: list[SweepRun],
+    candidates: dict[int, list[SweepCandidate]],
+    now: int,
+    *,
+    keep_unjudged: bool = False,
 ) -> list[dict[str, Any]]:
-    """Recent judged sweeps for the history page: counts, top matches, and the bill.
+    """Recent sweeps for a page footer: counts, top matches, and the bill.
 
-    Only runs that were actually judged appear. An unjudged sweep is a `sweep` command
-    somebody ran without `--judge`; it has no scores and no cost, so a row for it here
-    would be an empty row on a page about what the AI concluded.
+    By default only runs that were actually judged appear — /history's choice. An unjudged
+    sweep there is a `sweep` command somebody ran without `--judge`; it has no scores and
+    no cost, so a row for it would be an empty row on a page about what the AI concluded.
+
+    /magic passes `keep_unjudged=True`: on the page where sweeps are started, a run still
+    reading its first pages and a run that found nothing both have to stay visible — the
+    row under "Earlier sweeps" is the only way back to a sweep once its tab is closed.
     """
     views: list[dict[str, Any]] = []
     for run in runs:
         view = _sweep_run_view(run, candidates.get(run.id, []), now, limit=SWEEP_HISTORY_MATCHES)
-        if not view["triaged"] and not view["verdicts"]:
+        if not keep_unjudged and not view["triaged"] and not view["verdicts"]:
             continue
         views.append(view)
     return views
