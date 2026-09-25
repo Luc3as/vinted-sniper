@@ -1477,7 +1477,9 @@ async def test_a_running_sweep_is_listed_under_earlier_sweeps(
 
     assert page.status_code == 200
     assert f"/magic?sweep={sweep_id}" in page.text
-    assert "still going" in page.text
+    # The full row wording: the page's own script says "still going" in a comment, so a
+    # substring that short would pass with no row rendered at all.
+    assert "still going — open it to watch" in page.text
 
 
 async def test_a_sweep_that_found_nothing_is_still_listed_under_earlier_sweeps(
