@@ -153,6 +153,23 @@ expires after thirty minutes.
 For a group, add the bot to the group first. For a forum topic, tap the link inside that
 topic.
 
+## Verdicts arrive for only a fraction of a search's items
+
+Two things make that ratio look worse than the pipeline is.
+
+First, a search's very first check records everything already on the shelf silently, so it
+is never announced as new later. None of those seeded rows go to the agent, and they stay in
+the lifetime count forever. A search showing hundreds of items and a handful of verdicts has
+usually just seeded a big shelf once — judge the pipeline by today's numbers (items first
+seen today versus verdicts stored today), not by lifetime totals.
+
+Second, `sent` on a webhook destination only means the other end accepted the POST. If the
+automation behind it fails afterwards — a model rejecting the request, a broken node — no
+verdict comes back and nothing here logs an error. The app notices the silence: after several
+consecutive webhooks go unanswered it sends a warning to the destinations that take status
+notices. If you see that warning, the place to look is the automation's own execution log,
+not this app's.
+
 ## Everything is broken after an update
 
 Roll back to the previous image and open an issue. `latest` moves, so pin the digest of the
@@ -317,6 +334,22 @@ alebo skupine, kde chceš alerty. Appka musí bežať, aby link fungoval, a link
 tridsiatich minútach.
 
 Pri skupine najprv pridaj bota do skupiny. Pri forum topicu klikni na link v danom topicu.
+
+## Verdikty chodia len na zlomok inzerátov vyhľadávania
+
+Ten pomer kazia dve veci, a ani jedna neznamená rozbitý pipeline.
+
+Po prvé: úplne prvá kontrola vyhľadávania potichu zapíše všetko, čo už na poličke je, aby to
+neskôr nebolo hlásené ako nové. Nič z toho nejde agentovi a v celkovom počte to ostane
+navždy. Vyhľadávanie so stovkami inzerátov a hŕstkou verdiktov obvykle len raz nasalo veľkú
+poličku — pipeline posudzuj podľa dnešných čísel (inzeráty prvýkrát videné dnes verzus
+verdikty uložené dnes), nie podľa celkových súčtov.
+
+Po druhé: `sent` pri webhook cieli znamená len to, že druhá strana prijala POST. Ak
+automatizácia za ním zlyhá až potom — model odmietne požiadavku, pokazený node — verdikt sa
+nevráti a tu sa žiadna chyba nezaloguje. Appka si ticho všimne: po niekoľkých webhookoch bez
+odpovede za sebou pošle varovanie cieľom, ktoré odoberajú stavové správy. Ak to varovanie
+vidíš, hľadaj v execution logu samotnej automatizácie, nie v logoch tejto appky.
 
 ## Po update je všetko rozbité
 
