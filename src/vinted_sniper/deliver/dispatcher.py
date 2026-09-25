@@ -276,7 +276,12 @@ class Dispatcher:
         what the buyer thought of earlier verdicts on this search."""
         item = notification.item
         payable = item.total_price if item.total_price is not None else item.price
+        query = await self._repo.get_query(notification.query_id)
         return {
+            # What Vinted was actually asked for. The payload's "search" field carries the
+            # search's display name, which is the buyer's own label (a person, a note) —
+            # an agent judging "is this the product?" must use these terms, never the name.
+            "search_terms": {"text": (query.params.get("search_text") if query else None) or None},
             "market": await self._repo.market_context(
                 notification.query_id, payable, item.condition
             ),

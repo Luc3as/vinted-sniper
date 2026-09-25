@@ -272,10 +272,13 @@ it changes only with a version bump, because other people's automations depend o
 second one. `message_seller` and `buy` keep their keys for compatibility but both resolve to
 the listing page — Vinted removed the deep links they used to point at.
 
+`search` is the search's display name — a label the buyer chose, not necessarily the words
+searched for. Items carry the real ones in `search_terms`.
+
 Items also carry the enrichment fields — `event`, `photo_urls`, `seller_reviews`,
-`enrichment_url`, `favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour`,
-`market`, `known_retail`, `reader_language`, `buyer_feedback`, and `previous_total_price` on
-a price drop — documented in [enrichment.md](enrichment.md).
+`enrichment_url`, `search_terms`, `favourites`, `views`, `listed_minutes_ago`,
+`favourites_per_hour`, `market`, `known_retail`, `reader_language`, `buyer_feedback`, and
+`previous_total_price` on a price drop — documented in [enrichment.md](enrichment.md).
 
 ## RSS
 
@@ -565,8 +568,11 @@ zmenou verzie, lebo závisia od neho automatizácie iných ľudí.
 používajú to druhé. `message_seller` a `buy` si nechávajú kľúče kvôli kompatibilite, ale oba
 vedú na stránku inzerátu — hlboké odkazy, na ktoré mierili, Vinted odstránil.
 
+`search` je zobrazované meno vyhľadávania — tvoj vlastný štítok, nie nutne hľadané slová.
+Skutočné hľadané slová nesie každá položka v poli `search_terms`.
+
 Položky nesú aj enrichment polia — `event`, `photo_urls`, `seller_reviews`,
-`enrichment_url`, `favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour`,
+`enrichment_url`, `search_terms`, `favourites`, `views`, `listed_minutes_ago`, `favourites_per_hour`,
 `market`, `known_retail`, `reader_language`, `buyer_feedback` a `previous_total_price` pri
 zľave — zdokumentované v [enrichment.md](enrichment.md).
 

@@ -56,7 +56,8 @@ cares about:
 
 | Field | Meaning |
 |---|---|
-| `search`, `search_id` | The search's name and id. The name is usually the text searched for. |
+| `search`, `search_id` | The search's name and id. The name is the buyer's own label — often a note like a person's name, not a product. Never judge the item against it. |
+| `items[].search_terms` | What Vinted was actually asked for: `{text}` — the words in the search box (`null` when the search filters by brand or category alone). This, not `search`, is what "does the item match the search" means. |
 | `items[].title`, `brand`, `size`, `condition` | What the seller wrote. |
 | `items[].price`, `total_price`, `currency` | Asking price and what the buyer actually pays. |
 | `items[].photo_urls` | Every photo, full size. Two or three are usually enough to identify a product. Vinted serves **WebP**: if your agent downloads a photo and hands it to a vision model, read the media type off the bytes instead of assuming `image/jpeg` — the model rejects the whole request when the declared type and the bytes disagree. |

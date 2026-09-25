@@ -645,3 +645,47 @@ async def test_the_agent_is_told_which_language_the_buyer_reads(
     body = json.loads(endpoint.requests[-1].content)
     assert body["items"][0]["reader_language"] == "sk"
     assert await repo.reader_language_for_query(9999) == "en", "no readers: default"
+
+
+async def test_the_agent_gets_the_real_search_terms_not_the_searchs_nickname(
+    repo: Repo, settings: Settings
+) -> None:
+    # A search named after a person ("Patagonia Ninka") once made the agent reject a
+    # Torrentshell jacket for not being a "Ninka". The agent must judge by what Vinted
+    # was actually asked for; the name stays a note for the human.
+    query_id = await repo.add_query(
+        name="Patagonia Ninka",
+        url="https://www.vinted.fr/catalog?search_text=Patagonia+torrentshell&brand_ids[]=90804",
+        tld="fr",
+        params={"search_text": "Patagonia torrentshell", "brand_ids": "90804"},
+        poll_interval_s=60,
+    )
+    query = await repo.get_query(query_id)
+    assert query is not None
+    brain = await repo.add_destination(
+        kind="webhook", name="n8n", config={"url": "https://example.test/n8n"}
+    )
+    await repo.record_new_items(query, [listing(1)], [brain])
+
+    endpoint = FakeEndpoint()
+    await make_dispatcher(repo, settings, endpoint).drain()
+
+    body = json.loads(endpoint.requests[-1].content)
+    assert body["search"] == "Patagonia Ninka", "the nickname still travels, for the human"
+    assert body["items"][0]["search_terms"] == {"text": "Patagonia torrentshell"}
+
+
+async def test_a_search_without_words_says_so_instead_of_leaking_the_nickname(
+    repo: Repo, settings: Settings
+) -> None:
+    query = await a_search(repo)  # params={}: filters only, no search_text
+    brain = await repo.add_destination(
+        kind="webhook", name="n8n", config={"url": "https://example.test/n8n"}
+    )
+    await repo.record_new_items(query, [listing(1)], [brain])
+
+    endpoint = FakeEndpoint()
+    await make_dispatcher(repo, settings, endpoint).drain()
+
+    body = json.loads(endpoint.requests[-1].content)
+    assert body["items"][0]["search_terms"] == {"text": None}
